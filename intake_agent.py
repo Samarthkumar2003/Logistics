@@ -15,6 +15,7 @@ class ShipmentDetails(BaseModel):
     weight_kg: float = Field(description="The total weight of the shipment in kilograms. Convert from pounds or tons if necessary.")
     commodity: str = Field(description="The type of goods or cargo being shipped.")
     mode: str = Field(description="The mode of transport, e.g., 'sea_freight', 'air_freight', 'road'. If not perfectly clear, deduce from context or label 'unknown'.")
+    destination_country: str = Field(description="The country of the destination. Infer from the destination city/port name if not explicitly stated.")
 
 
 def run_intake_agent(email_content: str) -> ShipmentDetails:

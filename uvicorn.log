@@ -1,0 +1,125 @@
+INFO:     Started server process [33820]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8001 (Press CTRL+C to quit)
+INFO:     127.0.0.1:62957 - "GET /openapi.json HTTP/1.1" 200 OK
+INFO:     127.0.0.1:62959 - "GET /automation/status HTTP/1.1" 200 OK
+INFO:     127.0.0.1:58180 - "GET /health HTTP/1.1"Run time of job "run_daily_scan (trigger: cron[hour='7', minute='0'], next run at: 2026-03-27 07:00:00 UTC)" was missed by 8:00:46.871896
+
+ble 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+INFO:     127.0.0.1:58193 - "GET /fetch-inbox?limit=20&offset=0 HTTP/1.1" 200 OK
+INFO:     127.0.0.1:61670 - "OPTIONS /process-email HTTP/1.1" 200 OK
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}
+KNN classification failed: {'message': "Could not find the table 'public.email_training_data' in the schema cache", 'code': 'PGRST205', 'hint': None, 'details': None}

@@ -498,3 +498,70 @@ body {
 }
 .review-btn:hover { border-color: #3b82f6; color: #3b82f6; }
 
+/* ==================== RICH OFFICE FURNITURE ==================== */
+
+.f-glass-h { position:absolute; z-index:3; height:4px; background:rgba(180,220,255,0.32); border-top:1px solid rgba(150,200,255,0.55); border-bottom:1px solid rgba(150,200,255,0.35); }
+.f-glass-v { position:absolute; z-index:3; width:4px; background:rgba(180,220,255,0.32); border-left:1px solid rgba(150,200,255,0.55); border-right:1px solid rgba(150,200,255,0.35); }
+
+.f-exec-desk { position:absolute; z-index:3; width:150px; height:65px; background:linear-gradient(180deg,#8a6540,#6a4520); border:2px solid #4a2e12; border-radius:4px; box-shadow:3px 5px 0 rgba(0,0,0,0.25); }
+.f-exec-desk .e-screen { position:absolute; top:5px; left:12px; width:42px; height:30px; background:#0d1930; border:2px solid #5a5a6a; border-radius:2px; box-shadow:0 0 8px rgba(59,130,246,0.4); }
+.f-exec-desk .e-screen::after { content:''; position:absolute; inset:3px; background:linear-gradient(135deg,#1e3a5f 40%,#3b82f6); border-radius:1px; }
+.f-exec-desk .e-papers { position:absolute; top:10px; right:14px; width:28px; height:18px; background:#ece4d0; border:1px solid #c0b090; border-radius:1px; }
+.f-exec-desk .e-mug { position:absolute; bottom:7px; right:10px; width:12px; height:14px; background:#2a4a8a; border:1px solid #1a3a6a; border-radius:2px; }
+
+.f-exec-chair { position:absolute; z-index:2; width:34px; height:34px; background:#1e1e2e; border:2px solid #0e0e1e; border-radius:5px 5px 3px 3px; }
+.f-exec-chair::before { content:''; position:absolute; top:-10px; left:0; right:0; height:12px; background:#2a2a3e; border:2px solid #0e0e1e; border-radius:4px 4px 0 0; }
+
+.f-desk-v2 { position:absolute; z-index:3; width:110px; height:56px; background:linear-gradient(180deg,#7a5230,#5c3a1e); border:2px solid #3e2510; border-radius:3px; box-shadow:2px 4px 0 rgba(0,0,0,0.2); }
+.f-desk-v2 .d-monitor { position:absolute; top:4px; left:8px; width:38px; height:28px; background:#0a1020; border:2px solid #3a3a4a; border-radius:2px; }
+.f-desk-v2 .d-monitor::after { content:''; position:absolute; inset:3px; background:linear-gradient(135deg,#1a2a40,#2060a0); border-radius:1px; }
+.f-desk-v2 .d-papers { position:absolute; top:8px; right:8px; width:22px; height:15px; background:#e8e0d0; border:1px solid #b0a090; border-radius:1px; }
+.f-desk-v2 .d-mug { position:absolute; bottom:5px; right:6px; width:10px; height:12px; background:#c04030; border-radius:2px; }
+
+.f-chair-v2 { position:absolute; z-index:2; width:28px; height:28px; background:#3050b0; border:2px solid #2040a0; border-radius:5px 5px 2px 2px; }
+.f-chair-v2::before { content:''; position:absolute; top:-8px; left:0; right:0; height:10px; background:#3a5ab8; border:2px solid #2040a0; border-radius:4px 4px 0 0; }
+
+.f-meeting-table { position:absolute; z-index:3; width:200px; height:90px; background:linear-gradient(180deg,#9a7a4a,#7a5a2a); border:2px solid #5a3a18; border-radius:45px; box-shadow:3px 5px 0 rgba(0,0,0,0.2); }
+.f-m-chair { position:absolute; z-index:2; width:24px; height:24px; background:#5a6a8a; border:1px solid #3a4a6a; border-radius:3px; }
+
+.f-whiteboard { position:absolute; z-index:3; background:#f5f5f0; border:3px solid #7a7a7a; border-radius:2px; box-shadow:2px 2px 0 rgba(0,0,0,0.15); }
+.f-whiteboard::after { content:''; position:absolute; bottom:-5px; left:50%; transform:translateX(-50%); width:6px; height:6px; background:#888; border-radius:1px; }
+
+.f-filing { position:absolute; z-index:3; width:32px; height:50px; background:linear-gradient(90deg,#888898,#6a6a7a); border:2px solid #4a4a5a; border-radius:2px; box-shadow:2px 3px 0 rgba(0,0,0,0.2); }
+.f-filing::after { content:''; position:absolute; top:38%; left:8px; right:8px; height:2px; background:#3a3a4a; }
+
+.f-coffee { position:absolute; z-index:3; width:30px; height:36px; background:linear-gradient(180deg,#333,#1a1a1a); border:2px solid #111; border-radius:3px; box-shadow:2px 3px 0 rgba(0,0,0,0.3); }
+.f-coffee::before { content:''; position:absolute; top:6px; left:6px; right:6px; height:12px; background:#444; border-radius:2px; }
+.f-coffee::after { content:''; position:absolute; bottom:5px; left:50%; transform:translateX(-50%); width:10px; height:10px; background:#c87030; border-radius:50%; }
+
+.f-water { position:absolute; z-index:3; width:24px; height:44px; background:linear-gradient(180deg,#c0d8f0,#4a80b0); border:2px solid #3a70a0; border-radius:4px 4px 8px 8px; box-shadow:2px 3px 0 rgba(0,0,0,0.2); }
+.f-water::before { content:''; position:absolute; top:0; left:3px; right:3px; height:16px; background:rgba(200,230,255,0.6); border-radius:2px 2px 0 0; }
+
+.f-printer { position:absolute; z-index:3; width:54px; height:34px; background:linear-gradient(180deg,#c8c8c2,#a8a8a0); border:2px solid #888; border-radius:4px; box-shadow:2px 3px 0 rgba(0,0,0,0.2); }
+.f-printer::after { content:''; position:absolute; top:7px; left:8px; right:8px; height:10px; background:#e0e0d8; border-radius:2px; }
+
+.f-clock { position:absolute; z-index:3; width:26px; height:26px; background:#e8e8e0; border:3px solid #888; border-radius:50%; box-shadow:1px 1px 0 rgba(0,0,0,0.15); }
+
+.f-window { position:absolute; z-index:2; background:linear-gradient(135deg,rgba(125,207,255,0.5),rgba(180,230,255,0.28)); border:3px solid #9a9a8a; border-radius:2px; }
+
+.f-plant-lg { position:absolute; z-index:3; display:flex; flex-direction:column; align-items:center; }
+.f-plant-lg .lg-leaf-b { width:30px; height:30px; background:#166534; border-radius:50%; }
+.f-plant-lg .lg-leaf-t { width:22px; height:22px; background:#22c55e; border-radius:50%; margin-top:-10px; }
+.f-plant-lg .lg-pot { width:22px; height:16px; background:#b55a08; border-radius:0 0 6px 6px; margin-top:-2px; }
+
+.f-counter { position:absolute; z-index:3; background:linear-gradient(180deg,#9a7a50,#7a5a30); border:2px solid #5a3a18; border-radius:3px; }
+
+.f-reception { position:absolute; z-index:3; background:linear-gradient(180deg,#a09070,#80705a); border:2px solid #5a4028; border-radius:5px; box-shadow:3px 5px 0 rgba(0,0,0,0.2); }
+
+.f-couch { position:absolute; z-index:3; background:#4a5060; border:2px solid #2a3040; border-radius:6px 6px 3px 3px; }
+.f-couch::before { content:''; position:absolute; top:-10px; left:0; right:0; height:12px; background:#545a6a; border:2px solid #2a3040; border-radius:4px 4px 0 0; }
+
+.f-rug { position:absolute; z-index:1; border-radius:6px; opacity:0.42; }
+
+.zone-label { position:absolute; z-index:6; font-family:'Press Start 2P',cursive; font-size:0.35rem; color:rgba(255,255,255,0.32); letter-spacing:1px; text-transform:uppercase; pointer-events:none; }
+
+.zone-divider { position:absolute; z-index:3; left:30px; right:30px; height:2px; background:rgba(100,100,80,0.22); border-top:1px dashed rgba(100,100,80,0.28); }
+
+.f-shelf-v2 { position:absolute; z-index:3; background:#5c3a1e; border:2px solid #3e2510; border-radius:2px; }
+.f-shelf-v2 .books { display:flex; gap:2px; padding:4px 6px; height:100%; align-items:flex-end; }
+.f-shelf-v2 .book { width:6px; border-radius:1px; }
