@@ -37,9 +37,9 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-openai_client = OpenAI()
+openai_client = OpenAI(api_key=(os.environ.get("OPENAI_API_KEY") or "").strip())
 
-REPORT_RECIPIENT = os.environ.get("REPORT_RECIPIENT", "")
+REPORT_RECIPIENT = (os.environ.get("REPORT_RECIPIENT") or "").strip()
 VALID_LABELS = {"customer_requirement", "quotation_rate_card", "general", "skip"}
 
 
