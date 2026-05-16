@@ -29,7 +29,7 @@ SCOPES = [
 ]
 
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
-GMAIL_MAILBOX = os.getenv("GMAIL_MAILBOX")
+GMAIL_MAILBOX = (os.getenv("GMAIL_MAILBOX") or "").strip()
 
 
 def _get_service():
