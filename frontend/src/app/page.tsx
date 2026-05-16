@@ -1,6 +1,7 @@
 "use client";
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useRef } from 'react';
+import Link from 'next/link';
 
 const API_BASE = 'http://localhost:8001';
 
@@ -9,7 +10,6 @@ const DESKS = {
   history: { left: 90,  top: 445 },
   rfq:     { left: 380, top: 350 },
   quote:   { left: 610, top: 265 },
-  price:   { left: 610, top: 445 },
 };
 
 const COLORS: Record<string, { hair: string; shirt: string; pants: string; skin: string }> = {
@@ -17,8 +17,8 @@ const COLORS: Record<string, { hair: string; shirt: string; pants: string; skin:
   history: { hair: '#5c3a1e', shirt: '#f8f8f8', pants: '#6b4423', skin: '#f5d0a9' },
   rfq:     { hair: '#1a1a1a', shirt: '#ef4444', pants: '#1e293b', skin: '#d4a76a' },
   quote:   { hair: '#2d1b4e', shirt: '#a855f7', pants: '#1e293b', skin: '#f5d0a9' },
-  price:   { hair: '#1a3a1a', shirt: '#fbbf24', pants: '#3a2510', skin: '#d4a76a' },
 };
+
 
 interface InboxEmail { id: string; sender: string; subject: string; body: string; label?: string; label_confidence?: number; label_method?: string; }
 interface ShipmentDetails { origin: string; destination: string; weight_kg: number; commodity: string; mode: string; }
@@ -73,19 +73,12 @@ interface Quotation {
   is_selected: boolean;
 }
 
-interface PricePrediction {
-  predicted_low: number;
-  predicted_high: number;
-  confidence: string;
-  explanation: string;
-}
 
 interface StepData {
   intake: { left: number; top: number };
   history: { left: number; top: number };
   rfq: { left: number; top: number };
   quote: { left: number; top: number };
-  price: { left: number; top: number };
   walking: string[];
   bubbles: Record<string, string>;
   logs: string[];
@@ -98,7 +91,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
   const D = DESKS;
   return [
     {
-      intake: D.intake, history: D.history, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: D.intake, history: D.history, rfq: D.rfq, quote: D.quote,
       walking: [], bubbles: { intake: "New email detected!" },
       logs: [`Intake: Reading email from ${email.sender}`], duration: 4000,
       panel: { agent: 'intake', title: '📥 Incoming Email', content: (
@@ -110,7 +103,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: D.intake, history: D.history, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: D.intake, history: D.history, rfq: D.rfq, quote: D.quote,
       walking: [], bubbles: { intake: "Parsed into structured JSON!" },
       logs: ["Intake: Extracted structured data via gpt-4o-mini."], duration: 4000,
       panel: { agent: 'intake', title: '🧠 Extracted Data', content: (
@@ -125,7 +118,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: { left: 90, top: 355 }, history: D.history, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: { left: 90, top: 355 }, history: D.history, rfq: D.rfq, quote: D.quote,
       walking: ['intake'], bubbles: {},
       logs: ["Intake: Walking to History desk..."], duration: 2800,
       panel: { agent: 'intake', title: '🚶 Delivering Data', content: (
@@ -137,7 +130,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: { left: 90, top: 355 }, history: D.history, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: { left: 90, top: 355 }, history: D.history, rfq: D.rfq, quote: D.quote,
       walking: [], bubbles: { intake: `Route: ${shipment.origin} → ${shipment.destination}`, history: "Searching pgvector..." },
       logs: ["History: Running hybrid SQL + vector search..."], duration: 5000,
       panel: { agent: 'history', title: '🔍 Searching Database', content: (
@@ -151,7 +144,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: { left: 90, top: 355 }, history: D.history, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: { left: 90, top: 355 }, history: D.history, rfq: D.rfq, quote: D.quote,
       walking: [], bubbles: { history: `Found ${history_matches.length} match(es)!` },
       logs: [`History: ${history_matches.length} semantic match(es) found.`], duration: 4000,
       panel: { agent: 'history', title: '✅ Search Results', content: (
@@ -175,7 +168,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: D.intake, history: { left: 235, top: 395 }, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: D.intake, history: { left: 235, top: 395 }, rfq: D.rfq, quote: D.quote,
       walking: ['intake', 'history'], bubbles: {},
       logs: ["History: Walking to RFQ desk with results..."], duration: 2800,
       panel: { agent: 'history', title: '🚶 Delivering Results', content: (
@@ -186,7 +179,7 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: D.intake, history: { left: 235, top: 395 }, rfq: D.rfq, quote: D.quote, price: D.price,
+      intake: D.intake, history: { left: 235, top: 395 }, rfq: D.rfq, quote: D.quote,
       walking: [], bubbles: { history: `Draft for ${drafts.length} vendor(s).`, rfq: "Running gpt-4o..." },
       logs: ["RFQ: Generating vendor emails via gpt-4o..."], duration: 5000,
       panel: { agent: 'rfq', title: '✍️ Drafting Emails', content: (
@@ -201,16 +194,16 @@ function buildFlow(result: ProcessResult, email: InboxEmail): StepData[] {
       )},
     },
     {
-      intake: D.intake, history: D.history, rfq: D.rfq, quote: { ...D.quote }, price: { ...D.price },
-      walking: ['history'], bubbles: { rfq: `${drafts.length} email(s) sent!`, quote: "Waiting for replies...", price: "Standing by..." },
-      logs: ["RFQ: Emails sent automatically!", "Quote Parser: Monitoring inbox for replies.", "Price AI: Standing by for analysis."], duration: 5000,
+      intake: D.intake, history: D.history, rfq: D.rfq, quote: { ...D.quote },
+      walking: ['history'], bubbles: { rfq: `${drafts.length} email(s) sent!`, quote: "Waiting for replies..." },
+      logs: ["RFQ: Emails sent automatically!", "Quote Parser: Monitoring inbox for replies."], duration: 5000,
       panel: { agent: 'rfq', title: '📧 RFQs Sent', content: null },
     },
   ];
 }
 
 /* ========== OFFICE LAYOUT ========== */
-function OfficeLayout({ children }: { children?: React.ReactNode }) {
+function OfficeLayout({ children, matrixTrigger }: { children?: React.ReactNode; matrixTrigger?: number }) {
   return (
     <div className="office">
       {/* Walls */}
@@ -267,12 +260,12 @@ function OfficeLayout({ children }: { children?: React.ReactNode }) {
       <div className="zone-label" style={{ left: 618, top: 200 }}>MEETING ROOM</div>
 
       {/* ── Area rugs ── */}
-      <div className="f-rug" style={{ left: 52, top: 232, width: 188, height: 252, background: 'linear-gradient(135deg,#c05030,#a03020)' }} />
-      <div className="f-rug" style={{ left: 332, top: 280, width: 175, height: 165, background: 'linear-gradient(135deg,#208070,#106050)' }} />
-      <div className="f-rug" style={{ left: 568, top: 232, width: 188, height: 252, background: 'linear-gradient(135deg,#503080,#302060)' }} />
+      <div className="f-rug" style={{ left: 52, top: 232, width: 188, height: 252, background: 'linear-gradient(135deg,rgba(192,80,48,0.35),rgba(160,48,32,0.35))' }} />
+      <div className="f-rug" style={{ left: 332, top: 280, width: 175, height: 165, background: 'linear-gradient(135deg,rgba(32,128,112,0.35),rgba(16,96,80,0.35))' }} />
+      <div className="f-rug" style={{ left: 568, top: 232, width: 188, height: 252, background: 'linear-gradient(135deg,rgba(80,48,128,0.35),rgba(48,32,96,0.35))' }} />
 
       {/* ── Agent desks (v2) ── */}
-      {(['intake','history','rfq','quote','price'] as const).map(k => (
+      {(['intake','history','rfq','quote'] as const).map(k => (
         <div key={k}>
           <div className="f-desk-v2" style={{ left: DESKS[k].left-15, top: DESKS[k].top+55 }}>
             <div className="d-monitor" /><div className="d-papers" /><div className="d-mug" />
@@ -306,6 +299,9 @@ function OfficeLayout({ children }: { children?: React.ReactNode }) {
       <div className="f-plant" style={{ left: 550, top: 550 }}><div className="leaf" /><div className="pot" /></div>
 
       {children}
+
+      {/* Matrix rain overlay — on top of everything */}
+      <MatrixEffect trigger={matrixTrigger} />
     </div>
   );
 }
@@ -325,7 +321,6 @@ export default function Office() {
   const [jobs, setJobs] = useState<RFQJob[]>([]);
   const [selectedJob, setSelectedJob] = useState<RFQJob | null>(null);
   const [quotations, setQuotations] = useState<Quotation[]>([]);
-  const [prediction, setPrediction] = useState<PricePrediction | null>(null);
   const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [hasMore, setHasMore] = useState(false);
@@ -491,7 +486,7 @@ export default function Office() {
   async function loadJobDetail(job: RFQJob) {
     setSelectedJob(job);
     setQuotations([]);
-    setPrediction(null);
+
     setSelectedAgent('');
     try {
       const res = await fetch(`${API_BASE}/jobs/${job.reference}`);
@@ -514,7 +509,7 @@ export default function Office() {
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data = await res.json();
       setQuotations(data.quotations || []);
-      setPrediction(data.prediction || null);
+
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to check quotations');
     }
@@ -545,7 +540,7 @@ export default function Office() {
     setProcessResult(null);
     setSelectedJob(null);
     setQuotations([]);
-    setPrediction(null);
+
     setSelectedAgent('');
     setSearchQuery('');
     loadInbox(true);
@@ -554,7 +549,7 @@ export default function Office() {
   function handleBackToJobs() {
     setSelectedJob(null);
     setQuotations([]);
-    setPrediction(null);
+
     setSelectedAgent('');
     loadJobs();
   }
@@ -582,6 +577,15 @@ export default function Office() {
     ? (() => { const f = buildFlow(apiResult, selectedEmail); const c = f[step]; return Object.keys(c.bubbles)[0] || c.walking[0] || ''; })()
     : '';
 
+  const [matrixTrigger, setMatrixTrigger] = useState(0);
+  const prevActiveId = useRef('');
+  useEffect(() => {
+    if (activeId && activeId !== prevActiveId.current) {
+      setMatrixTrigger(t => t + 1);
+    }
+    prevActiveId.current = activeId;
+  }, [activeId]);
+
   const curStep = status === 'running' && apiResult && selectedEmail ? buildFlow(apiResult, selectedEmail)[step] : null;
   const flow = apiResult && selectedEmail ? buildFlow(apiResult, selectedEmail) : [];
   const isLastStep = status === 'running' && step === flow.length - 1;
@@ -599,7 +603,6 @@ export default function Office() {
           <SideAgent name="History AI" role="Semantic Search" color={COLORS.history.shirt} active={activeId === 'history'} />
           <SideAgent name="RFQ Drafter" role="Email Writer" color={COLORS.rfq.shirt} active={activeId === 'rfq'} />
           <SideAgent name="Quote Parser" role="Quotation Reader" color={COLORS.quote.shirt} active={activeId === 'quote'} />
-          <SideAgent name="Price AI" role="Rate Predictor" color={COLORS.price.shirt} active={activeId === 'price'} />
         </div>
         <div className="log-section">
           <h3>Activity Log</h3>
@@ -660,24 +663,36 @@ export default function Office() {
         </div>
 
         <div className="sidebar-footer">
-          <button onClick={status === 'inbox' ? loadInbox : handleBackToInbox}>
+          <button onClick={status === 'inbox' ? () => loadInbox() : handleBackToInbox}>
             {status === 'inbox' ? 'Refresh Inbox' : 'Back to Inbox'}
           </button>
+          <Link href="/dashboard" style={{
+            display: 'block', marginTop: 8, padding: '10px',
+            fontFamily: "'Press Start 2P', cursive", fontSize: '0.5rem',
+            textAlign: 'center', textDecoration: 'none',
+            background: 'rgba(99,102,241,0.12)', color: '#818cf8',
+            border: '1px solid rgba(99,102,241,0.3)', letterSpacing: 1,
+            transition: 'all 0.2s',
+          }}>
+            📊 Dashboard
+          </Link>
         </div>
       </aside>
 
       {/* OFFICE */}
-      <OfficeLayout>
+      <OfficeLayout matrixTrigger={matrixTrigger}>
         <PixelChar pos={curStep?.intake ?? DESKS.intake} colors={COLORS.intake} label="INTAKE AI"
-          bubble={curStep?.bubbles?.intake} walking={curStep?.walking.includes('intake') ?? false} />
+          bubble={curStep?.bubbles?.intake} walking={curStep?.walking.includes('intake') ?? false}
+          active={activeId === 'intake'} />
         <PixelChar pos={curStep?.history ?? DESKS.history} colors={COLORS.history} label="HISTORY AI"
-          bubble={curStep?.bubbles?.history} walking={curStep?.walking.includes('history') ?? false} />
+          bubble={curStep?.bubbles?.history} walking={curStep?.walking.includes('history') ?? false}
+          active={activeId === 'history'} />
         <PixelChar pos={curStep?.rfq ?? DESKS.rfq} colors={COLORS.rfq} label="RFQ DRAFTER"
-          bubble={curStep?.bubbles?.rfq} walking={curStep?.walking.includes('rfq') ?? false} />
+          bubble={curStep?.bubbles?.rfq} walking={curStep?.walking.includes('rfq') ?? false}
+          active={activeId === 'rfq'} />
         <PixelChar pos={curStep?.quote ?? DESKS.quote} colors={COLORS.quote} label="QUOTE PARSER"
-          bubble={curStep?.bubbles?.quote} walking={curStep?.walking.includes('quote') ?? false} />
-        <PixelChar pos={curStep?.price ?? DESKS.price} colors={COLORS.price} label="PRICE AI"
-          bubble={curStep?.bubbles?.price} walking={curStep?.walking.includes('price') ?? false} />
+          bubble={curStep?.bubbles?.quote} walking={curStep?.walking.includes('quote') ?? false}
+          active={activeId === 'quote'} />
       </OfficeLayout>
 
       {/* RIGHT PANEL */}
@@ -953,29 +968,6 @@ export default function Office() {
                 Check for Quotations
               </button>
 
-              {/* Price Prediction */}
-              {prediction && (
-                <div className="detail-block" style={{ marginTop: 14, background: '#0d1117', border: '1px solid #2a2a3a', borderRadius: 8, padding: 14 }}>
-                  <div className="detail-label">AI Price Prediction</div>
-                  <div style={{ color: '#e2e8f0', fontFamily: 'monospace', fontSize: 13, marginBottom: 6 }}>
-                    ${prediction.predicted_low.toFixed(2)} - ${prediction.predicted_high.toFixed(2)}
-                  </div>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
-                    <span style={{ fontSize: 11, color: '#94a3b8' }}>Confidence:</span>
-                    <span style={{
-                      background: prediction.confidence === 'high' ? '#22c55e' : prediction.confidence === 'medium' ? '#fbbf24' : '#ef4444',
-                      color: 'white', padding: '2px 8px', borderRadius: 10,
-                      fontSize: '0.65rem', fontWeight: 600,
-                    }}>
-                      {prediction.confidence}
-                    </span>
-                  </div>
-                  <div style={{ color: '#64748b', fontSize: 11, fontStyle: 'italic' }}>
-                    {prediction.explanation}
-                  </div>
-                </div>
-              )}
-
               {/* Quotations Table */}
               {quotations.length > 0 && (
                 <div style={{ marginTop: 14 }}>
@@ -1046,25 +1038,313 @@ export default function Office() {
   );
 }
 
-function PixelChar({ pos, colors, label, bubble, walking }: {
-  pos: { left: number; top: number }; colors: { hair: string; shirt: string; pants: string; skin: string };
-  label: string; bubble?: string; walking: boolean;
+/* ========== SPRITE CONSTANTS ========== */
+// 12-col × 22-row chibi RPG sprite at 4× scale = 48×88 canvas
+// Matches pixel-agents reference: big head, chunky body, detailed face
+const S  = 4;        // canvas px per art px
+const CW = 12 * S;   // 48
+const CH = 22 * S;   // 88
+
+// Key: ' '=transparent  H=hair  D=hairDark  K=skin  E=eyeWhite  P=pupil  U=blush
+//      N=neck  T=shirt  A=armShade  W=beltLight  L=beltDark  X=pants  Z=pantsShad  O=shoe
+type SpriteFrame = string[];
+
+function makeFrames(
+  _hair: string, _skin: string, _shirt: string, _pants: string
+): { idle: SpriteFrame; walk: SpriteFrame[] } {
+  void [_hair, _skin, _shirt, _pants];
+
+  // 14 rows = big head (0-8) + neck/torso/belt (9-13)
+  const upper: SpriteFrame = [
+    '   HHHHHHHH   ', //  0 hair crown
+    '  DHHHHHHHHD  ', //  1 hair band (D=darker)
+    '  KKKKKKKKKK  ', //  2 forehead
+    ' KKKKKKKKKKKK ', //  3 upper face
+    ' KKEPKKKPEKKK ', //  4 eyes (E=white, P=pupil)
+    ' KKKKKKKKKKKK ', //  5 mid face
+    ' KKUKKKKKKUKK ', //  6 blush cheeks (U=pink)
+    ' KKKKKKKKKKKK ', //  7 lower face/smile
+    '  KKKKKKKKKK  ', //  8 chin
+    '   NTTTTTTN   ', //  9 neck+collar
+    '  ATTTTTTTTAA ', // 10 shoulders
+    '  ATTTTTTTTAA ', // 11 torso
+    '  ATTTTTTTTAA ', // 12 lower torso
+    '  WLLLLLLLW   ', // 13 belt
+  ];
+
+  // 8 rows = pants + shoes (two leg columns)
+  const idle: string[] = [
+    '   XXX  XXX   ', // 14
+    '   XXX  XXX   ', // 15
+    '   XXX  XXX   ', // 16
+    '   ZXX  XXZ   ', // 17 inner-leg shadow
+    '   OOO  OOO   ', // 18 shoe top
+    '  OOOOO OOOOO ', // 19 shoe toe
+    '  OOOOO OOOOO ', // 20
+    '               ', // 21 ground clearance
+  ];
+  const walk1: string[] = [
+    '    XXXXXX    ', // 14 legs crossing
+    '  XXXXXX XXX  ', // 15
+    '  ZZXXX  XXX  ', // 16
+    '  ZZXXX  ZXZ  ', // 17
+    '  OOOO   OOO  ', // 18
+    ' OOOOO   OOOO ', // 19
+    ' OOOOO   OOOO ', // 20
+    '               ', // 21
+  ];
+  const walk3: string[] = [
+    '    XXXXXX    ',
+    '  XXX XXXXXX  ',
+    '  XXX  XXXZZ  ',
+    '  ZXZ  XXXZZ  ',
+    '  OOO   OOOO  ',
+    ' OOOO   OOOOO ',
+    ' OOOO   OOOOO ',
+    '               ',
+  ];
+
+  const mk = (legs: string[]): SpriteFrame => [...upper, ...legs];
+  return {
+    idle: mk(idle),
+    walk: [mk(walk1), mk(idle), mk(walk3), mk(idle)],
+  };
+}
+
+function drawSpriteFrame(
+  ctx: CanvasRenderingContext2D, frame: SpriteFrame,
+  hairC: string, skinC: string, shirtC: string, pantsC: string,
+  bobY: number, active: boolean
+) {
+  // Build per-character palette
+  const hex2rgb = (h: string) => {
+    const n = parseInt(h.replace('#',''), 16);
+    return [(n>>16)&255, (n>>8)&255, n&255] as [number,number,number];
+  };
+  const darken = (h: string, a: number) => {
+    const [r,g,b] = hex2rgb(h);
+    return `rgb(${Math.max(0,r-a)},${Math.max(0,g-a)},${Math.max(0,b-a)})`;
+  };
+
+  const pal: Record<string, string> = {
+    H: hairC,
+    D: darken(hairC, 45),
+    K: skinC,
+    E: '#f5f0ee',
+    P: '#1a0e0e',
+    U: '#f0a8a8',
+    N: skinC,
+    T: shirtC,
+    A: darken(shirtC, 30),
+    W: '#e8dfc0',
+    L: '#2e1e0e',
+    X: pantsC,
+    Z: darken(pantsC, 35),
+    O: '#1c1410',
+  };
+
+  ctx.clearRect(0, 0, CW, CH);
+
+  // Warm yellow glow on active agent (matches wood floor aesthetic)
+  if (active) {
+    ctx.save();
+    ctx.shadowBlur = 28;
+    ctx.shadowColor = 'rgba(255,210,60,0.9)';
+    ctx.fillStyle = 'rgba(255,200,50,0.12)';
+    ctx.beginPath();
+    ctx.ellipse(CW / 2, CH - 8 + bobY, CW * 0.6, 14, 0, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
+  // Drop shadow on floor
+  ctx.save();
+  ctx.fillStyle = 'rgba(0,0,0,0.40)';
+  ctx.beginPath();
+  ctx.ellipse(CW / 2, CH - 2 + bobY, 20, 6, 0, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+
+  // Draw sprite pixels
+  for (let row = 0; row < frame.length; row++) {
+    const line = frame[row];
+    for (let col = 0; col < 12; col++) {
+      const ch = (line[col] ?? ' ');
+      if (ch === ' ') continue;
+      const color = pal[ch];
+      if (!color) continue;
+      ctx.fillStyle = color;
+      ctx.fillRect(col * S, row * S + bobY, S, S);
+    }
+  }
+
+  // 1-px highlight on top of each art-pixel block
+  ctx.save();
+  ctx.globalAlpha = 0.20;
+  ctx.fillStyle = '#ffffff';
+  for (let row = 0; row < frame.length; row++) {
+    const line = frame[row];
+    for (let col = 0; col < 12; col++) {
+      if ((line[col] ?? ' ') === ' ') continue;
+      ctx.fillRect(col * S, row * S + bobY, S, 1);
+    }
+  }
+  ctx.restore();
+}
+
+/* ========== PIXEL CHARACTER (canvas-based) ========== */
+function PixelChar({ pos, colors, label, bubble, walking, active }: {
+  pos: { left: number; top: number };
+  colors: { hair: string; shirt: string; pants: string; skin: string };
+  label: string; bubble?: string; walking: boolean; active: boolean;
 }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const frameRef = useRef(0);
+  const bobRef = useRef(0);
+  const bobDirRef = useRef(1);
+
+  useEffect(() => {
+    const frames = makeFrames(colors.hair, colors.skin, colors.shirt, colors.pants);
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d')!;
+    if (!ctx) return;
+
+    let rafId: number;
+    let lastTime = 0;
+    let elapsed = 0;
+
+    function tick(now: number) {
+      const dt = now - lastTime;
+      lastTime = now;
+      elapsed += dt;
+
+      if (walking) {
+        // Rhythmic bob tied to frame
+        bobRef.current = Math.sin(now / 120) * 1.5;
+      } else {
+        // Idle slow breathe
+        bobRef.current = Math.sin(now / 1100) * 0.7;
+      }
+
+      // Frame advance every 130ms while walking
+      if (elapsed >= 130) {
+        elapsed = 0;
+        if (walking) {
+          frameRef.current = (frameRef.current + 1) % 4;
+        } else {
+          frameRef.current = 0;
+        }
+      }
+
+      const frame = walking ? frames.walk[frameRef.current] : frames.idle;
+      drawSpriteFrame(ctx, frame, colors.hair, colors.skin, colors.shirt, colors.pants,
+        Math.round(bobRef.current), active);
+      rafId = requestAnimationFrame(tick);
+    }
+
+    rafId = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(rafId);
+  }, [walking, active, colors.hair, colors.shirt, colors.pants, colors.skin]);
+
   return (
-    <div className={`char-wrapper ${walking ? 'walking' : 'idle'}`} style={{ left: pos.left, top: pos.top }}>
-      {bubble && <div className="char-bubble">{bubble}</div>}
-      <div className="char-body">
-        <div className="char-shadow"></div>
-        <div className="char-hair" style={{ background: colors.hair }}></div>
-        <div className="char-head" style={{ background: colors.skin }}><div className="char-eyes"></div></div>
-        <div className="char-torso" style={{ background: colors.shirt }}></div>
-        <div className="char-arm-l" style={{ background: colors.shirt }}></div>
-        <div className="char-arm-r" style={{ background: colors.shirt }}></div>
-        <div className="char-leg-l" style={{ background: colors.pants }}></div>
-        <div className="char-leg-r" style={{ background: colors.pants }}></div>
+    <div
+      className="char-wrapper"
+      style={{ left: pos.left, top: pos.top }}
+    >
+      {/* ToolOverlay card — appears above character when active */}
+      {active && bubble && (
+        <div className="tool-overlay-card">
+          <div className="toc-name">{label}</div>
+          <div className="toc-activity">{bubble}</div>
+        </div>
+      )}
+      {/* fallback bubble when not active but bubble exists */}
+      {!active && bubble && <div className="char-bubble">{bubble}</div>}
+      <canvas ref={canvasRef} width={CW} height={CH} style={{ imageRendering: 'pixelated', display: 'block' }} />
+      <div className="char-label" style={{ borderColor: active ? colors.shirt : 'rgba(96,48,255,0.4)', color: active ? colors.shirt : undefined }}>
+        {label}
       </div>
-      <div className="char-label">{label}</div>
     </div>
+  );
+}
+
+/* ========== MATRIX RAIN EFFECT ========== */
+function MatrixEffect({ trigger }: { trigger: number | undefined }) {
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const runningRef = useRef(false);
+
+  useEffect(() => {
+    if (!trigger) return;
+    const canvas = canvasRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    if (runningRef.current) return;
+    runningRef.current = true;
+
+    const W = canvas.offsetWidth || canvas.width;
+    const H = canvas.offsetHeight || canvas.height;
+    canvas.width = W;
+    canvas.height = H;
+
+    const fontSize = 14;
+    const cols = Math.floor(W / fontSize);
+    const drops: number[] = Array(cols).fill(0).map(() => Math.random() * -H / fontSize);
+    const speeds: number[] = Array(cols).fill(0).map(() => 0.5 + Math.random() * 1.5);
+    // Purple-tinted matrix rain matching accent (#6030ff)
+    const chars = 'アイウエオカキクケコサシスセソタナニヌネノ01ABCDEF▓▒░█';
+
+    const totalMs = 1400;
+    const fadeInMs = 350;
+    const fadeOutMs = 400;
+    const start = performance.now();
+
+    let rafId: number;
+    function draw(now: number) {
+      const elapsed = now - start;
+      if (elapsed > totalMs) {
+        ctx!.clearRect(0, 0, W, H);
+        runningRef.current = false;
+        return;
+      }
+
+      let alpha = 1;
+      if (elapsed < fadeInMs) alpha = elapsed / fadeInMs;
+      else if (elapsed > totalMs - fadeOutMs) alpha = (totalMs - elapsed) / fadeOutMs;
+
+      ctx!.fillStyle = `rgba(0,0,0,${0.14 * alpha})`;
+      ctx!.fillRect(0, 0, W, H);
+
+      ctx!.font = `bold ${fontSize}px monospace`;
+      for (let i = 0; i < cols; i++) {
+        const ch = chars[Math.floor(Math.random() * chars.length)];
+        const bright = Math.random() > 0.88;
+        const r = bright ? 200 : Math.floor(80 + Math.random() * 60);
+        const g = bright ? 160 : Math.floor(30 + Math.random() * 40);
+        const b = bright ? 255 : Math.floor(180 + Math.random() * 75);
+        ctx!.fillStyle = bright
+          ? `rgba(${r},${g},${b},${alpha})`
+          : `rgba(${r},${g},${b},${alpha * 0.7})`;
+        ctx!.fillText(ch, i * fontSize, drops[i] * fontSize);
+        drops[i] += speeds[i];
+        if (drops[i] * fontSize > H && Math.random() > 0.96) drops[i] = 0;
+      }
+      rafId = requestAnimationFrame(draw);
+    }
+
+    rafId = requestAnimationFrame(draw);
+    return () => { cancelAnimationFrame(rafId); runningRef.current = false; };
+  }, [trigger]);
+
+  return (
+    <canvas
+      ref={canvasRef}
+      style={{
+        position: 'absolute', inset: 0, width: '100%', height: '100%',
+        pointerEvents: 'none', zIndex: 50,
+      }}
+    />
   );
 }
 

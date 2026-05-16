@@ -37,6 +37,7 @@ create table if not exists quotations (
     ai_assessment text,
     predicted_low numeric,
     predicted_high numeric,
+    rate_label text default '',  -- e.g. '20FT FCL', '40FT HC', 'Air Freight'
     is_selected boolean default false
 );
 

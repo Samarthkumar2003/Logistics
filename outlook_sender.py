@@ -1,35 +1,43 @@
 """
-email_sender.py
----------------
-Sends RFQ emails via Gmail SMTP (default) or Microsoft Graph API.
+outlook_sender.py
+-----------------
+Sends emails via Microsoft Graph API (Office 365 / Outlook).
 
-Set EMAIL_PROVIDER=outlook in .env to route all sends through
-Microsoft Graph API instead of Gmail SMTP.
+Implements the same public interface as email_sender.py:
+  - send_rfq_email(to_addr, subject, body) -> dict
+  - send_rfq_emails_batch(drafts) -> list[dict]
+
+Return shapes are identical to the Gmail implementation so that
+api.py and automation.py require no changes.
 """
 
-import os
-import ssl
-import smtplib
 import logging
-from email.mime.multipart import MIMEMultipart
-from email.mime.text import MIMEText
+import os
 
+import requests
 from dotenv import load_dotenv
+
+from graph_auth import get_graph_token
 
 load_dotenv()
 
 logger = logging.getLogger(__name__)
 
-EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
-EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "gmail").lower()
+OUTLOOK_MAILBOX = os.getenv("OUTLOOK_MAILBOX", "")
+
+
+def _mailbox() -> str:
+    if not OUTLOOK_MAILBOX:
+        raise ValueError(
+            "OUTLOOK_MAILBOX env var must be set when EMAIL_PROVIDER=outlook"
+        )
+    return OUTLOOK_MAILBOX
 
 
 def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
-    """Send a single RFQ email and return a status dict.
+    """Send a single email via Graph API sendMail endpoint.
 
     Parameters
     ----------
@@ -46,47 +54,56 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         {"status": "sent", "to": to_addr} on success, or
         {"status": "failed", "to": to_addr, "error": "<message>"} on failure.
     """
-    if EMAIL_PROVIDER == "outlook":
-        from outlook_sender import send_rfq_email as _outlook_send
-        return _outlook_send(to_addr=to_addr, subject=subject, body=body)
+    try:
+        mailbox = _mailbox()
+    except ValueError as exc:
+        logger.error(str(exc))
+        return {"status": "failed", "to": to_addr, "error": str(exc)}
 
-    if not EMAIL_ACCOUNT or not EMAIL_PASSWORD:
-        error_msg = "EMAIL_ACCOUNT or EMAIL_PASSWORD not set in environment"
-        logger.error(error_msg)
-        return {"status": "failed", "to": to_addr, "error": error_msg}
-
-    msg = MIMEMultipart()
-    msg["From"] = EMAIL_ACCOUNT
-    msg["To"] = to_addr
-    msg["Subject"] = subject
-    msg.attach(MIMEText(body, "plain"))
+    url = f"{GRAPH_BASE}/users/{mailbox}/sendMail"
+    payload = {
+        "message": {
+            "subject": subject,
+            "body": {
+                "contentType": "Text",
+                "content": body,
+            },
+            "toRecipients": [
+                {"emailAddress": {"address": to_addr}}
+            ],
+        },
+        "saveToSentItems": True,
+    }
 
     try:
-        context = ssl.create_default_context()
-        with smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30) as server:
-            server.ehlo()
-            server.starttls(context=context)
-            server.ehlo()
-            server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_ACCOUNT, to_addr, msg.as_string())
-        logger.info("Email sent successfully to %s", to_addr)
-        return {"status": "sent", "to": to_addr}
-    except smtplib.SMTPAuthenticationError as exc:
-        error_msg = f"SMTP authentication failed: {exc}"
-        logger.error(error_msg)
+        token = get_graph_token()
+        resp = requests.post(
+            url,
+            headers={
+                "Authorization": f"Bearer {token}",
+                "Content-Type": "application/json",
+            },
+            json=payload,
+            timeout=30,
+        )
+
+        # Graph returns 202 Accepted with no body on success.
+        if resp.status_code == 202:
+            logger.info("Email sent via Graph API to %s", to_addr)
+            return {"status": "sent", "to": to_addr}
+
+        error_msg = f"Graph API {resp.status_code}: {resp.text[:200]}"
+        logger.error("Failed to send email to %s: %s", to_addr, error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
-    except smtplib.SMTPException as exc:
-        error_msg = f"SMTP error: {exc}"
-        logger.error(error_msg)
-        return {"status": "failed", "to": to_addr, "error": error_msg}
+
     except Exception as exc:
-        error_msg = f"Unexpected error sending email: {exc}"
+        error_msg = f"Unexpected error sending email via Graph: {exc}"
         logger.error(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
 
 
 def send_rfq_emails_batch(drafts: list[dict]) -> list[dict]:
-    """Send a batch of RFQ emails.
+    """Send a batch of RFQ emails via Graph API.
 
     Parameters
     ----------
@@ -103,10 +120,6 @@ def send_rfq_emails_batch(drafts: list[dict]) -> list[dict]:
     list[dict]
         One result dict per draft with status "sent", "failed", or "skipped".
     """
-    if EMAIL_PROVIDER == "outlook":
-        from outlook_sender import send_rfq_emails_batch as _outlook_batch
-        return _outlook_batch(drafts)
-
     results: list[dict] = []
 
     for draft in drafts:

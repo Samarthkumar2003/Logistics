@@ -17,7 +17,7 @@ from supabase import create_client
 from intake_agent import run_intake_agent, ShipmentDetails
 from agents_lookup import lookup_agents, AgentMatch
 from rfq_agent import generate_rfq_drafts
-from email_connector import fetch_latest_emails, fetch_emails_by_subject
+from email_connector import fetch_latest_emails, fetch_emails_by_subject, fetch_unseen_emails
 from email_sender import send_rfq_email, send_rfq_emails_batch
 from quotation_agent import parse_quotation_email
 from price_predictor import predict_price, assess_quotation, PricePrediction
@@ -152,11 +152,12 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
         result = fetch_latest_emails(limit=limit, offset=offset)
         emails_list = result["emails"]
         total = result["total"]
-        # Classify each email (rules only — fast, free, no API call unless ambiguous)
-        classified = classify_emails_batch([
-            {"id": e["id"], "subject": e["subject"], "body": e["body"], "sender": e["from"]}
-            for e in emails_list
-        ])
+        # Rules-only: instant regex, zero network calls, no rate limits
+        classified = classify_emails_batch(
+            [{"id": e["id"], "subject": e["subject"], "body": e["body"], "sender": e["from"]}
+             for e in emails_list],
+            rules_only=True,
+        )
         label_map = {c["id"]: c for c in classified}
         return {
             "emails": [
@@ -362,25 +363,51 @@ def check_quotations(reference: str):
         if email and name in agents_contacted:
             email_to_agent[email] = name
 
-    # Fetch emails matching this reference
+    # Fetch emails matching this reference (exact subject search)
     try:
-        reply_emails = fetch_emails_by_subject(reference)
+        reply_emails_by_ref = fetch_emails_by_subject(reference)
     except Exception as e:
         logger.error("Failed to fetch emails for %s: %s", reference, e)
         raise AppException(status_code=500, detail=f"Failed to fetch reply emails: {e}")
 
+    # Fuzzy fallback: also check unseen emails from contacted agent addresses.
+    # Vendors often reply without the RFQ reference in the subject line.
+    contacted_addresses = set(email_to_agent.keys())
+    fuzzy_emails: list[dict] = []
+    if contacted_addresses:
+        try:
+            unseen = fetch_unseen_emails(limit=50)
+            fuzzy_emails = [
+                e for e in unseen
+                if e.get("from", "").lower() in contacted_addresses
+            ]
+        except Exception as e:
+            logger.warning("Fuzzy email fetch failed: %s", e)
+
+    # Merge by email id — subject-match emails take priority
+    seen_email_ids: set[str] = {e["id"] for e in reply_emails_by_ref}
+    reply_emails = list(reply_emails_by_ref)
+    for e in fuzzy_emails:
+        if e["id"] not in seen_email_ids:
+            seen_email_ids.add(e["id"])
+            reply_emails.append(e)
+
     # Load already-stored quotations to avoid duplicates
+    # Dedup key: (agent_email, rate, rate_label) — handles multi-rate emails correctly
     try:
         existing_result = (
             supabase.table("quotations")
-            .select("raw_email_subject")
+            .select("agent_email, rate, rate_label")
             .eq("rfq_reference", reference)
             .execute()
         )
-        existing_subjects = {row["raw_email_subject"] for row in existing_result.data}
+        existing_keys: set[tuple] = {
+            (row["agent_email"], row["rate"], row.get("rate_label", ""))
+            for row in existing_result.data
+        }
     except Exception as e:
         logger.error("Failed to load existing quotations: %s", e)
-        existing_subjects = set()
+        existing_keys = set()
 
     # Get price prediction for assessment
     try:
@@ -405,54 +432,61 @@ def check_quotations(reference: str):
         body = email.get("body", "")
         sender_email = email.get("from", "").lower()
 
-        # Skip if already processed
-        if subject in existing_subjects:
-            continue
-
-        # Parse the quotation
+        # Parse — returns list[QuotationDetails], one per rate line
         try:
-            parsed = parse_quotation_email(body, subject)
+            parsed_rates = parse_quotation_email(body, subject)
         except Exception as e:
             logger.warning("Failed to parse quotation from %s: %s", sender_email, e)
+            continue
+
+        if not parsed_rates:
+            logger.warning("No rates extracted from email by %s", sender_email)
             continue
 
         # Determine the agent name from the sender
         agent_name = email_to_agent.get(sender_email, sender_email)
 
-        # Assess the quotation against the prediction
-        assessment = None
-        pred_low = None
-        pred_high = None
-        if prediction and parsed.rate is not None:
+        for parsed in parsed_rates:
+            dedup_key = (sender_email, parsed.rate, parsed.rate_label)
+            if dedup_key in existing_keys:
+                continue
+            existing_keys.add(dedup_key)
+
+            # Assess each rate line against the prediction
+            assessment = None
+            pred_low = None
+            pred_high = None
+            if prediction and parsed.rate is not None:
+                try:
+                    assessment = assess_quotation(parsed.rate, prediction)
+                    pred_low = prediction.predicted_low
+                    pred_high = prediction.predicted_high
+                except Exception as e:
+                    logger.warning("Assessment failed for %s [%s]: %s", agent_name, parsed.rate_label, e)
+
+            quotation_record = {
+                "rfq_reference": reference,
+                "agent_name": agent_name,
+                "agent_email": sender_email,
+                "raw_email_subject": subject,
+                "raw_email_body": body,
+                "rate": parsed.rate,
+                "currency": parsed.currency,
+                "transit_time_days": parsed.transit_time_days,
+                "validity": parsed.validity,
+                "terms": parsed.terms,
+                "rate_label": parsed.rate_label,
+                "ai_assessment": assessment,
+                "predicted_low": pred_low,
+                "predicted_high": pred_high,
+                "is_selected": False,
+            }
+
             try:
-                assessment = assess_quotation(parsed.rate, prediction)
-                pred_low = prediction.predicted_low
-                pred_high = prediction.predicted_high
+                supabase.table("quotations").insert(quotation_record).execute()
+                new_quotations.append(quotation_record)
             except Exception as e:
-                logger.warning("Assessment failed for %s: %s", agent_name, e)
-
-        quotation_record = {
-            "rfq_reference": reference,
-            "agent_name": agent_name,
-            "agent_email": sender_email,
-            "raw_email_subject": subject,
-            "raw_email_body": body,
-            "rate": parsed.rate,
-            "currency": parsed.currency,
-            "transit_time_days": parsed.transit_time_days,
-            "validity": parsed.validity,
-            "terms": parsed.terms,
-            "ai_assessment": assessment,
-            "predicted_low": pred_low,
-            "predicted_high": pred_high,
-            "is_selected": False,
-        }
-
-        try:
-            supabase.table("quotations").insert(quotation_record).execute()
-            new_quotations.append(quotation_record)
-        except Exception as e:
-            logger.error("Failed to store quotation from %s: %s", agent_name, e)
+                logger.error("Failed to store quotation from %s [%s]: %s", agent_name, parsed.rate_label, e)
 
     # Update job status if new quotations were found
     if new_quotations:

@@ -5,3 +5,20 @@ __pycache__/
 node_modules/
 .next/
 sitecustomize_debug.txt
+service_account.json
+
+# Logs
+*.log
+uvicorn.log
+uvicorn_test.log
+uvicorn_err.log
+frontend.log
+
+# Generated files
+*.xlsx
+automation_state.json
+reports/
+whatsapp_exports/
+
+# Claude
+.claude/scheduled_tasks.lock
