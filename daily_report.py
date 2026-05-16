@@ -99,8 +99,19 @@ def _fetch_emails(since: str, before: str | None = None, backfill: bool = False)
                 break
 
         logger.info("Found %d emails (%s)", len(refs), "backfill" if backfill else "daily")
+
+        # Deduplicate by threadId — keep only the first (oldest) email per thread
+        seen_threads: set[str] = set()
+        unique_refs = []
+        for ref in reversed(refs):  # reversed = oldest first
+            tid = ref.get("threadId", ref["id"])
+            if tid not in seen_threads:
+                seen_threads.add(tid)
+                unique_refs.append(ref)
+        logger.info("Unique threads: %d (deduplicated from %d)", len(unique_refs), len(refs))
+
         emails = []
-        for i, ref in enumerate(refs, 1):
+        for i, ref in enumerate(unique_refs, 1):
             for attempt in range(3):
                 try:
                     msg = service.users().messages().get(
@@ -112,6 +123,7 @@ def _fetch_emails(since: str, before: str | None = None, backfill: bool = False)
                     if body and len(body) >= 20:
                         emails.append({
                             "id": msg["id"],
+                            "thread_id": ref.get("threadId", msg["id"]),
                             "from": headers.get("From", ""),
                             "subject": _decode_header_value(headers.get("Subject", "")),
                             "body": body,
@@ -128,7 +140,7 @@ def _fetch_emails(since: str, before: str | None = None, backfill: bool = False)
                     else:
                         logger.error("Failed %s after 3 attempts: %s", ref["id"], e)
             if i % 100 == 0:
-                logger.info("  fetched %d/%d", i, len(refs))
+                logger.info("  fetched %d/%d", i, len(unique_refs))
         return emails
 
     # Fallback: IMAP/Outlook
