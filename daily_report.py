@@ -37,7 +37,12 @@ load_dotenv()
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
 logger = logging.getLogger(__name__)
 
-openai_client = OpenAI(api_key=(os.environ.get("OPENAI_API_KEY") or "").strip())
+_api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
+if not _api_key:
+    raise RuntimeError("OPENAI_API_KEY is not set or is empty")
+logger_pre = logging.getLogger(__name__)
+logger_pre.info("OPENAI_API_KEY loaded: starts=%s len=%d", _api_key[:8], len(_api_key))
+openai_client = OpenAI(api_key=_api_key)
 
 REPORT_RECIPIENT = (os.environ.get("REPORT_RECIPIENT") or "").strip()
 VALID_LABELS = {"customer_requirement", "quotation_rate_card", "general", "skip"}
@@ -182,7 +187,7 @@ def _classify_email(email: dict) -> tuple[str, float]:
             label = "skip"
         return label, float(data.get("confidence", 0.0))
     except Exception as e:
-        logger.warning("Classify failed for '%s': %s", email.get("subject", "")[:40], e)
+        logger.warning("Classify failed for '%s': [%s] %s", email.get("subject", "")[:40], type(e).__name__, e)
         return "skip", 0.0
 
 
@@ -255,7 +260,7 @@ def _extract_fields(email: dict, label: str) -> dict:
         fields["date"] = email.get("date", "")
         return fields
     except Exception as e:
-        logger.warning("Extract failed for '%s': %s", email.get("subject", "")[:40], e)
+        logger.warning("Extract failed for '%s': [%s] %s", email.get("subject", "")[:40], type(e).__name__, e)
         return {
             "subject": email["subject"],
             "from": email["from"],
