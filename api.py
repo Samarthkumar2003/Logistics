@@ -152,11 +152,11 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
         result = fetch_latest_emails(limit=limit, offset=offset)
         emails_list = result["emails"]
         total = result["total"]
-        # Rules-only: instant regex, zero network calls, no rate limits
+        # Full classification: SVM is local (no network), only falls to GPT on low confidence
         classified = classify_emails_batch(
             [{"id": e["id"], "subject": e["subject"], "body": e["body"], "sender": e["from"]}
              for e in emails_list],
-            rules_only=True,
+            rules_only=False,
         )
         label_map = {c["id"]: c for c in classified}
         return {
