@@ -9,8 +9,6 @@ Requires:
 import base64
 import logging
 import os
-import re
-from email import message_from_bytes
 from email.header import decode_header
 
 from dotenv import load_dotenv
@@ -75,13 +73,13 @@ def _extract_body(payload: dict) -> str:
 def _map_message(msg: dict) -> dict | None:
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
     body = _extract_body(msg.get("payload", {})).strip()
-    if not body:
-        return None
+    # Keep emails even with no plain-text body (e.g. attachments-only) — show subject
     return {
         "id": msg["id"],
+        "threadId": msg.get("threadId", msg["id"]),
         "from": headers.get("From", ""),
         "subject": _decode_header_value(headers.get("Subject", "")),
-        "body": body,
+        "body": body or "[No plain-text body — may contain attachments only]",
     }
 
 

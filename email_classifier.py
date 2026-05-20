@@ -111,7 +111,16 @@ def _classify_by_rules(subject: str, _body: str, sender: str) -> Optional[Classi
             details="RFQ reference pattern in subject — agent reply",
         )
 
-    return None  # Pass to KNN → GPT
+    # Hard rule 4: Internal Bhatia Shipping domain → always operational/general
+    if sender_email.endswith("@bhatiashipping.com") or sender_email.endswith("@bhatiashippinggroup.com"):
+        return ClassificationResult(
+            label="general",
+            confidence=0.97,
+            method="rule",
+            details=f"Internal sender ({sender_email}) — operational email",
+        )
+
+    return None  # Pass to SVM → GPT
 
 
 # ---------------------------------------------------------------------------

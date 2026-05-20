@@ -386,11 +386,12 @@ def _send_report(excel_bytes: bytes, today: str, crq_count: int, rcq_count: int)
     password = os.environ["EMAIL_PASSWORD"]
     smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
     smtp_port = int(os.getenv("SMTP_PORT", "587"))
-    recipient = os.environ["REPORT_RECIPIENT"]
+    # Support comma-separated recipients
+    recipients = [r.strip() for r in os.environ["REPORT_RECIPIENT"].split(",") if r.strip()]
 
     msg = MIMEMultipart()
     msg["From"] = account
-    msg["To"] = recipient
+    msg["To"] = ", ".join(recipients)
     msg["Subject"] = f"Daily Logistics Report — {today}"
 
     body = (
@@ -417,8 +418,8 @@ def _send_report(excel_bytes: bytes, today: str, crq_count: int, rcq_count: int)
         server.ehlo()
         server.starttls(context=context)
         server.login(account, password)
-        server.sendmail(account, recipient, msg.as_string())
-    logger.info("Report emailed to %s", recipient)
+        server.sendmail(account, recipients, msg.as_string())
+    logger.info("Report emailed to %s", ", ".join(recipients))
 
 
 # ---------------------------------------------------------------------------
