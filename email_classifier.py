@@ -74,10 +74,23 @@ def _load_agent_emails() -> set[str]:
 # RFQ reference pattern — our system generates these, so presence = agent reply
 RFQ_PATTERN = re.compile(r"RFQ-\d{8}-[a-f0-9]{4}", re.IGNORECASE)
 
+# Internal job reference: EN001103, EN000845 etc. — Bhatia Shipping's own job numbers
+# Presence in subject means the email is about an existing job, never a new request
+JOB_REF_PATTERN = re.compile(r"\bEN\d{5,}\b")
 
-def _classify_by_rules(subject: str, _body: str, sender: str) -> Optional[ClassificationResult]:
+# Signals that the sender is ASKING for rates (even if they're a known agent acting as customer)
+ASKING_FOR_RATES = re.compile(
+    r"\b(rfp\b|r\.f\.p|enquir|enquier|kindly share|please share|request for (quote|quotation|rate|proposal)|"
+    r"seeking (rate|quote)|require (rate|quote)|need (rate|quote)|logistics requirement|"
+    r"freight requirement|shipping requirement)\b",
+    re.IGNORECASE,
+)
+
+
+def _classify_by_rules(subject: str, body: str, sender: str) -> Optional[ClassificationResult]:
+    _body = body
     """Tier 1: Hard rules only — high-certainty structural signals, no keyword counting.
-    Anything not caught here goes to KNN then GPT.
+    Anything not caught here goes to fine-tuned model → SVM → GPT.
     """
     sender_lower = sender.strip().lower()
     email_match = re.search(r"<([^>]+)>", sender_lower)
@@ -93,8 +106,10 @@ def _classify_by_rules(subject: str, _body: str, sender: str) -> Optional[Classi
             details=f"RFQ reference in subject + known agent sender ({sender_email})",
         )
 
-    # Hard rule 2: Known agent sender → quotation (agent database is ground truth)
-    if sender_email in agent_emails:
+    # Hard rule 2: Known agent sender → quotation, UNLESS they're asking for rates themselves
+    # (agents sometimes act as customers, forwarding their client's RFP to us)
+    asking = ASKING_FOR_RATES.search(subject) or ASKING_FOR_RATES.search(_body[:500])
+    if sender_email in agent_emails and not asking:
         return ClassificationResult(
             label="quotation_rate_card",
             confidence=0.92,
@@ -103,7 +118,7 @@ def _classify_by_rules(subject: str, _body: str, sender: str) -> Optional[Classi
         )
 
     # Hard rule 3: RFQ reference pattern in subject (unknown sender) → reply to our RFQ
-    if RFQ_PATTERN.search(subject):
+    if RFQ_PATTERN.search(subject) and not asking:
         return ClassificationResult(
             label="quotation_rate_card",
             confidence=0.85,
@@ -118,6 +133,15 @@ def _classify_by_rules(subject: str, _body: str, sender: str) -> Optional[Classi
             confidence=0.97,
             method="rule",
             details=f"Internal sender ({sender_email}) — operational email",
+        )
+
+    # Hard rule 5: Bhatia Shipping's own job reference in subject → existing job, not a new request
+    if JOB_REF_PATTERN.search(subject):
+        return ClassificationResult(
+            label="general",
+            confidence=0.96,
+            method="rule",
+            details="Internal job reference (EN0XXXXX) in subject — operational thread",
         )
 
     return None  # Pass to SVM → GPT
@@ -189,6 +213,7 @@ HYDE_LENGTH_THRESHOLD = 200
 SVM_MIN_CONFIDENCE = 0.70
 
 import json as _json
+import threading as _threading
 import numpy as _np
 from sklearn.svm import SVC as _SVC
 from sklearn.preprocessing import LabelEncoder as _LabelEncoder
@@ -196,7 +221,8 @@ from sklearn.preprocessing import LabelEncoder as _LabelEncoder
 # Module-level model cache — trained once, reused for every email
 _svm_model: Optional[_SVC] = None
 _svm_encoder: Optional[_LabelEncoder] = None
-_svm_training_count: int = 0   # track when to retrain after new examples added
+_svm_training_count: int = 0
+_svm_lock = _threading.Lock()  # prevent concurrent retraining from parallel classifier threads
 
 
 def _get_embedding(text: str) -> list[float]:
@@ -233,16 +259,23 @@ def _load_svm() -> tuple[Optional[_SVC], Optional[_LabelEncoder], int]:
 
 
 def _get_svm() -> tuple[Optional[_SVC], Optional[_LabelEncoder]]:
-    """Return cached SVM, retraining if Supabase has new examples since last train."""
+    """Return cached SVM. Lock ensures only one thread trains at a time."""
     global _svm_model, _svm_encoder, _svm_training_count
 
-    try:
-        current_count = supabase.table("email_training_data").select("id", count="exact").limit(1).execute().count or 0
-    except Exception:
-        current_count = _svm_training_count
+    # Fast path: model loaded and likely fresh — skip Supabase count check
+    if _svm_model is not None:
+        return _svm_model, _svm_encoder
 
-    if _svm_model is None or current_count != _svm_training_count:
-        _svm_model, _svm_encoder, _svm_training_count = _load_svm()
+    with _svm_lock:
+        # Re-check inside lock in case another thread just trained it
+        if _svm_model is not None:
+            return _svm_model, _svm_encoder
+        try:
+            current_count = supabase.table("email_training_data").select("id", count="exact").limit(1).execute().count or 0
+        except Exception:
+            current_count = _svm_training_count
+        if _svm_model is None or current_count != _svm_training_count:
+            _svm_model, _svm_encoder, _svm_training_count = _load_svm()
 
     return _svm_model, _svm_encoder
 
@@ -278,49 +311,6 @@ def _hyde_expand(subject: str, body: str) -> str:
     except Exception as e:
         logger.warning("HyDE expansion failed, using raw text: %s", e)
         return short_text
-
-
-def _classify_by_svm(subject: str, body: str) -> Optional[ClassificationResult]:
-    """Tier 3: SVM RBF classifier with HyDE expansion and confidence gating.
-
-    SVM trains in-memory from Supabase vectors at first call, then caches.
-    Retrains automatically when new training examples are added (feedback loop).
-    HyDE expands short messages before embedding to bridge vocabulary gap.
-    Confidence gate: low-probability predictions fall through to GPT.
-    """
-    model, encoder = _get_svm()
-    if model is None:
-        return None
-
-    raw_text = f"Subject: {subject}\n\n{body[:2000]}"
-    hyde_used = len(raw_text.strip()) < HYDE_LENGTH_THRESHOLD
-
-    embed_text = _hyde_expand(subject, body) if hyde_used else raw_text
-
-    try:
-        vec = _np.array([_get_embedding(embed_text)])
-        proba = model.predict_proba(vec)[0]
-        best_idx = int(_np.argmax(proba))
-        confidence = float(proba[best_idx])
-        label = encoder.classes_[best_idx]
-
-        if confidence < SVM_MIN_CONFIDENCE:
-            logger.info(
-                "SVM gated out: confidence %.2f < %.2f for label '%s' — routing to GPT",
-                confidence, SVM_MIN_CONFIDENCE, label,
-            )
-            return None
-
-        proba_str = ", ".join(f"{encoder.classes_[i]}={proba[i]:.2f}" for i in range(len(proba)))
-        return ClassificationResult(
-            label=label,
-            confidence=confidence,
-            method="svm+hyde" if hyde_used else "svm",
-            details=f"SVM RBF probabilities: [{proba_str}], hyde={hyde_used}",
-        )
-    except Exception as e:
-        logger.warning("SVM classification failed: %s", e)
-        return None
 
 
 # ---------------------------------------------------------------------------
@@ -393,12 +383,14 @@ def classify_email(
     body: str,
     sender: str = "",
     rules_only: bool = False,
+    no_gpt_fallback: bool = False,
 ) -> ClassificationResult:
     """Classify an email using the hybrid approach:
-    Tier 1: Rules → Tier 2: Fine-tuned model → Tier 3: KNN → Tier 4: Few-shot
+    Tier 1: Rules → Tier 2: Fine-tuned model → Tier 3: SVM → Tier 4: Few-shot
 
-    Pass rules_only=True to skip all network/API calls (instant, free).
-    Emails that can't be classified by rules return label='general'.
+    rules_only=True  : only hard rules, instant, zero network calls.
+    no_gpt_fallback=True : rules + SVM embedding only; skips HyDE + few-shot GPT.
+                           Low-confidence SVM defaults to 'general'. Use for inbox display.
     """
     # Tier 1: Rules (instant, free, no network)
     result = _classify_by_rules(subject, body, sender)
@@ -420,13 +412,44 @@ def classify_email(
         logger.info("Classified by fine-tuned model: %s (%.0f%%)", result.label, result.confidence * 100)
         return result
 
-    # Tier 3: KNN via pgvector (needs training data)
-    result = _classify_by_svm(subject, body)
-    if result:
-        logger.info("Classified by KNN: %s (%.0f%%)", result.label, result.confidence * 100)
-        return result
+    # Tier 3: SVM (embedding API call, ~50ms; skips HyDE when no_gpt_fallback)
+    raw_text = f"Subject: {subject}\n\n{body[:2000]}"
+    hyde_used = not no_gpt_fallback and len(raw_text.strip()) < HYDE_LENGTH_THRESHOLD
+    embed_text = _hyde_expand(subject, body) if hyde_used else raw_text
 
-    # Tier 4: Few-shot fallback (always works)
+    model, encoder = _get_svm()
+    if model is not None:
+        try:
+            vec = _np.array([_get_embedding(embed_text)])
+            proba = model.predict_proba(vec)[0]
+            best_idx = int(_np.argmax(proba))
+            confidence = float(proba[best_idx])
+            label = encoder.classes_[best_idx]
+
+            if confidence >= SVM_MIN_CONFIDENCE:
+                proba_str = ", ".join(f"{encoder.classes_[i]}={proba[i]:.2f}" for i in range(len(proba)))
+                svm_result = ClassificationResult(
+                    label=label,
+                    confidence=confidence,
+                    method="svm+hyde" if hyde_used else "svm",
+                    details=f"SVM RBF probabilities: [{proba_str}], hyde={hyde_used}",
+                )
+                logger.info("Classified by SVM: %s (%.0f%%)", svm_result.label, svm_result.confidence * 100)
+                return svm_result
+            else:
+                logger.info("SVM gated out: confidence %.2f < %.2f for label '%s'", confidence, SVM_MIN_CONFIDENCE, label)
+        except Exception as e:
+            logger.warning("SVM classification failed: %s", e)
+
+    if no_gpt_fallback:
+        return ClassificationResult(
+            label="general",
+            confidence=0.45,
+            method="svm",
+            details="SVM inconclusive; no_gpt_fallback=True so defaulting to general",
+        )
+
+    # Tier 4: Few-shot fallback (always works, uses GPT)
     result = _classify_by_few_shot(subject, body, sender)
     logger.info("Classified by few-shot: %s (%.0f%%)", result.label, result.confidence * 100)
     return result
@@ -483,25 +506,51 @@ def submit_feedback(
 # BATCH: Classify multiple emails
 # ---------------------------------------------------------------------------
 
-def classify_emails_batch(emails: list[dict], rules_only: bool = False) -> list[dict]:
-    """Classify a list of emails. Each dict should have: subject, body, sender (optional).
+def classify_emails_batch(
+    emails: list[dict],
+    rules_only: bool = False,
+    _no_gpt_fallback: bool = False,
+) -> list[dict]:
+    """Classify a list of emails in parallel. Each dict must have: subject, body, sender.
 
-    Pass rules_only=True to use only regex rules — instant, no API calls, no network.
+    rules_only=True   : hard rules only, instant, zero network.
+    _no_gpt_fallback  : deprecated, kept for call-site compatibility — parallel full pipeline used.
+    All API calls (embeddings + GPT few-shot) run concurrently so total time ≈ slowest single email.
     """
-    results = []
-    for email in emails:
+    from concurrent.futures import ThreadPoolExecutor, as_completed
+
+    def _classify_one(email: dict) -> dict:
         result = classify_email(
             subject=email.get("subject", ""),
             body=email.get("body", ""),
             sender=email.get("sender", email.get("from", "")),
             rules_only=rules_only,
         )
-        results.append({
+        return {
             "id": email.get("id", ""),
             "subject": email.get("subject", ""),
             "label": result.label,
             "confidence": result.confidence,
             "method": result.method,
             "details": result.details,
-        })
+        }
+
+    results: list[dict] = [{}] * len(emails)
+    with ThreadPoolExecutor(max_workers=min(len(emails), 20)) as pool:
+        future_to_idx = {pool.submit(_classify_one, e): i for i, e in enumerate(emails)}
+        for future in as_completed(future_to_idx):
+            idx = future_to_idx[future]
+            try:
+                results[idx] = future.result()
+            except Exception as exc:
+                email = emails[idx]
+                logger.warning("classify_emails_batch failed for email %s: %s", email.get("id"), exc)
+                results[idx] = {
+                    "id": email.get("id", ""),
+                    "subject": email.get("subject", ""),
+                    "label": "general",
+                    "confidence": 0.0,
+                    "method": "error",
+                    "details": str(exc),
+                }
     return results

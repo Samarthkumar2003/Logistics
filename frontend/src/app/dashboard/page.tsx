@@ -112,28 +112,162 @@ function LabelPill({ label, confidence }: { label?: string; confidence?: number 
   return <span className="pill pill-gray">📋 General</span>;
 }
 
+/* ─── Helpers ─────────────────────────────────────────────────── */
+function decodeEntities(str: string): string {
+  return str
+    .replace(/&amp;/g, '&')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&nbsp;/g, ' ');
+}
+
 /* ─── Email Card ─────────────────────────────────────────────── */
-function EmailCard({ email, expanded, onToggle }: {
+function EmailCard({ email, expanded, onToggle, onProcessed }: {
   email: Email;
   expanded: boolean;
   onToggle: () => void;
+  onProcessed?: () => void;
 }) {
+  const [correcting, setCorrecting] = useState(false);
+  const [correctedLabel, setCorrectedLabel] = useState<string | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [fullBody, setFullBody] = useState<string | null>(null);
+  const [loadingBody, setLoadingBody] = useState(false);
+  const [processing, setProcessing] = useState(false);
+  const [processResult, setProcessResult] = useState<string | null>(null);
+
+  async function submitCorrection(newLabel: string) {
+    setSaving(true);
+    try {
+      await fetch(`${API_BASE}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          email_id: email.id,
+          subject: email.subject,
+          body: email.body,
+          sender: email.sender,
+          predicted_label: email.label,
+          correct_label: newLabel,
+        }),
+      });
+      setCorrectedLabel(newLabel);
+    } finally {
+      setSaving(false);
+      setCorrecting(false);
+    }
+  }
+
+  async function handleToggle() {
+    onToggle();
+    if (!expanded && fullBody === null) {
+      setLoadingBody(true);
+      try {
+        const r = await fetch(`${API_BASE}/email-body/${email.id}`);
+        if (r.ok) {
+          const d = await r.json();
+          setFullBody(decodeEntities(d.body ?? ''));
+        }
+      } catch {
+        setFullBody(null);
+      } finally {
+        setLoadingBody(false);
+      }
+    }
+  }
+
+  async function processEmail() {
+    setProcessing(true);
+    setProcessResult(null);
+    try {
+      const body = fullBody ?? email.body;
+      const r = await fetch(`${API_BASE}/process-email`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sender: email.sender, subject: email.subject, body }),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        setProcessResult(`✅ RFQ created: ${d.reference}`);
+        onProcessed?.();
+      } else {
+        setProcessResult(`❌ ${d.detail ?? 'Failed'}`);
+      }
+    } catch {
+      setProcessResult('❌ Network error');
+    } finally {
+      setProcessing(false);
+    }
+  }
+
+  const displayLabel = correctedLabel ?? email.label;
+  const bodyText = fullBody ?? decodeEntities(email.body ?? '');
+
   return (
-    <div className={`ecard ${expanded ? 'ecard-open' : ''}`} onClick={onToggle}>
+    <div className={`ecard ${expanded ? 'ecard-open' : ''}`} onClick={handleToggle}>
       <div className="ecard-top">
         <div className="ecard-avatar">{senderName(email.sender)[0].toUpperCase()}</div>
         <div className="ecard-meta">
           <div className="ecard-sender">{senderName(email.sender)}</div>
           <div className="ecard-addr">{email.sender.match(/<(.+)>/)?.[1] ?? email.sender}</div>
         </div>
-        <div className="ecard-right">
-          <LabelPill label={email.label} confidence={email.label_confidence} />
+        <div className="ecard-right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <LabelPill label={displayLabel} confidence={correctedLabel ? undefined : email.label_confidence} />
+          {correctedLabel ? (
+            <span style={{ fontSize: 11, color: '#34d399' }}>✓ Corrected</span>
+          ) : correcting ? (
+            <select
+              autoFocus
+              disabled={saving}
+              defaultValue=""
+              style={{ fontSize: 12, borderRadius: 6, padding: '3px 6px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', cursor: 'pointer' }}
+              onClick={e => e.stopPropagation()}
+              onChange={e => { if (e.target.value) submitCorrection(e.target.value); }}
+            >
+              <option value="" disabled>Select correct label…</option>
+              <option value="customer_requirement">📦 Customer Request</option>
+              <option value="quotation_rate_card">💰 Rate Card</option>
+              <option value="general">📋 General</option>
+            </select>
+          ) : (
+            <button
+              style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid #334155', background: 'transparent', color: '#94a3b8', cursor: 'pointer', whiteSpace: 'nowrap' }}
+              onClick={e => { e.stopPropagation(); setCorrecting(true); }}
+            >
+              Correct label
+            </button>
+          )}
         </div>
       </div>
-      <div className="ecard-subject">{email.subject}</div>
+      <div className="ecard-subject">{decodeEntities(email.subject)}</div>
       {expanded && (
-        <div className="ecard-body">
-          <pre className="ecard-pre">{email.body?.slice(0, 1200)}{email.body?.length > 1200 ? '\n…' : ''}</pre>
+        <div className="ecard-body" onClick={e => e.stopPropagation()}>
+          {loadingBody
+            ? <div style={{ color: '#64748b', fontSize: 13, padding: '8px 0' }}>Loading full message…</div>
+            : <pre className="ecard-pre">{bodyText?.slice(0, 3000)}{bodyText?.length > 3000 ? '\n…' : ''}</pre>
+          }
+          {(displayLabel === 'customer_requirement' || correctedLabel === 'customer_requirement') && (
+            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+              <button
+                disabled={processing || loadingBody}
+                style={{
+                  padding: '7px 16px', borderRadius: 8, border: 'none',
+                  background: processing ? '#334155' : '#3b82f6', color: '#fff',
+                  fontSize: 13, fontWeight: 600, cursor: processing ? 'default' : 'pointer',
+                }}
+                onClick={e => { e.stopPropagation(); processEmail(); }}
+              >
+                {processing ? '⏳ Processing…' : '🚀 Process this email → Send RFQs'}
+              </button>
+              {processResult && (
+                <span style={{ fontSize: 12, color: processResult.startsWith('✅') ? '#34d399' : '#f87171' }}>
+                  {processResult}
+                </span>
+              )}
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -146,7 +280,10 @@ function ShipmentCard({ job }: { job: RFQJob }) {
   const [quotes, setQuotes] = useState<Quotation[]>([]);
   const [loadingQ, setLoadingQ] = useState(false);
   const [fetched, setFetched] = useState(false);
-  const si = statusInfo(job.status);
+  const [approving, setApproving] = useState<string | null>(null);
+  const [approveResult, setApproveResult] = useState<string | null>(null);
+  const [jobStatus, setJobStatus] = useState(job.status);
+  const si = statusInfo(jobStatus);
 
   async function loadQuotes() {
     if (fetched) { setOpen(o => !o); return; }
@@ -159,6 +296,30 @@ function ShipmentCard({ job }: { job: RFQJob }) {
       setFetched(true);
     } finally {
       setLoadingQ(false);
+    }
+  }
+
+  async function approveQuote(agentName: string) {
+    setApproving(agentName);
+    setApproveResult(null);
+    try {
+      const r = await fetch(`${API_BASE}/jobs/${job.reference}/approve`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ selected_agent: agentName }),
+      });
+      const d = await r.json();
+      if (r.ok) {
+        setQuotes(prev => prev.map(q => ({ ...q, is_selected: q.agent_name === agentName })));
+        setJobStatus('approved');
+        setApproveResult(`✅ Approved ${agentName}`);
+      } else {
+        setApproveResult(`❌ ${d.detail ?? 'Failed'}`);
+      }
+    } catch {
+      setApproveResult('❌ Network error');
+    } finally {
+      setApproving(null);
     }
   }
 
@@ -222,13 +383,34 @@ function ShipmentCard({ job }: { job: RFQJob }) {
           )}
           {!loadingQ && quotes.length > 0 && (
             <div className="q-list">
+              {approveResult && (
+                <div style={{ fontSize: 13, marginBottom: 8, color: approveResult.startsWith('✅') ? '#34d399' : '#f87171' }}>
+                  {approveResult}
+                </div>
+              )}
               {quotes.map(q => {
                 const ai = assessInfo(q.ai_assessment);
+                const isApproving = approving === q.agent_name;
                 return (
                   <div key={q.id} className={`q-card ${q.is_selected ? 'q-selected' : ''}`}>
                     <div className="q-top">
                       <span className="q-agent">{q.agent_name}</span>
-                      {q.is_selected && <span className="q-winner">✅ Selected</span>}
+                      {q.is_selected
+                        ? <span className="q-winner">✅ Selected</span>
+                        : jobStatus !== 'approved' && (
+                          <button
+                            disabled={!!approving}
+                            onClick={() => approveQuote(q.agent_name)}
+                            style={{
+                              fontSize: 11, padding: '3px 10px', borderRadius: 6,
+                              border: 'none', background: isApproving ? '#334155' : '#059669',
+                              color: '#fff', cursor: approving ? 'default' : 'pointer', fontWeight: 600,
+                            }}
+                          >
+                            {isApproving ? '⏳…' : 'Approve'}
+                          </button>
+                        )
+                      }
                     </div>
                     <div className="q-rate">
                       {q.currency} {q.rate?.toLocaleString()}
@@ -292,35 +474,94 @@ function SummaryBar({ emails, jobs }: { emails: Email[]; jobs: RFQJob[] }) {
 export default function Dashboard() {
   const [tab, setTab] = useState<Tab>('inbox');
   const [emails, setEmails] = useState<Email[]>([]);
+  const [emailTotal, setEmailTotal] = useState(0);
+  const [emailOffset, setEmailOffset] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [jobs, setJobs] = useState<RFQJob[]>([]);
   const [loading, setLoading] = useState(true);
+  const [inboxError, setInboxError] = useState('');
+  const [inboxLoading, setInboxLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
   const [refreshing, setRefreshing] = useState(false);
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
+  const [automationEnabled, setAutomationEnabled] = useState<boolean | null>(null);
+  const [togglingAutomation, setTogglingAutomation] = useState(false);
+
+  const PAGE = 20;
+
+  async function toggleAutomation() {
+    if (automationEnabled === null) return;
+    setTogglingAutomation(true);
+    try {
+      const r = await fetch(`${API_BASE}/automation/toggle`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ enabled: !automationEnabled }),
+      });
+      if (r.ok) setAutomationEnabled(!automationEnabled);
+    } finally {
+      setTogglingAutomation(false);
+    }
+  }
 
   const fetchData = useCallback(async (showRefreshing = false) => {
     if (showRefreshing) setRefreshing(true);
 
-    // Jobs load first — unblocks UI immediately
+    // Jobs + automation status load first — unblocks UI immediately
     try {
-      const jr = await fetch(`${API_BASE}/jobs`);
+      const [jr, ar] = await Promise.all([
+        fetch(`${API_BASE}/jobs`),
+        fetch(`${API_BASE}/automation/status`),
+      ]);
       if (jr.ok) setJobs(await jr.json());
+      if (ar.ok) {
+        const ad = await ar.json();
+        setAutomationEnabled(ad.enabled ?? false);
+      }
       setLastRefresh(new Date());
       setError('');
     } catch {
       setError('Cannot reach the backend. Make sure the server is running.');
     } finally {
-      setLoading(false);      // show UI as soon as jobs arrive
+      setLoading(false);
       setRefreshing(false);
     }
 
-    // Inbox fetches in background — IMAP is slow, don't block render
+    // Inbox fetches in background
+    setInboxLoading(true);
+    setInboxError('');
     try {
-      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=20`);
-      if (ir.ok) { const d = await ir.json(); setEmails(d.emails ?? []); }
-    } catch { /* non-critical */ }
+      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=0`);
+      if (ir.ok) {
+        const d = await ir.json();
+        setEmails(d.emails ?? []);
+        setEmailTotal(d.total ?? 0);
+        setEmailOffset(PAGE);
+      } else {
+        const d = await ir.json().catch(() => ({}));
+        setInboxError(d.detail ?? 'Failed to load inbox');
+      }
+    } catch {
+      setInboxError('Cannot reach backend');
+    } finally {
+      setInboxLoading(false);
+    }
   }, []);
+
+  const loadMoreEmails = useCallback(async () => {
+    setLoadingMore(true);
+    try {
+      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=${emailOffset}`);
+      if (ir.ok) {
+        const d = await ir.json();
+        setEmails(prev => [...prev, ...(d.emails ?? [])]);
+        setEmailOffset(prev => prev + PAGE);
+      }
+    } finally {
+      setLoadingMore(false);
+    }
+  }, [emailOffset]);
 
   useEffect(() => {
     fetchData();
@@ -331,16 +572,34 @@ export default function Dashboard() {
   const requests  = emails.filter(e => e.label === 'customer_requirement');
   const rateCards = emails.filter(e => e.label === 'quotation_rate_card');
 
-  function renderEmails(list: Email[], emptyMsg: string) {
+  function renderEmails(list: Email[], emptyMsg: string, showLoadMore = false) {
     if (list.length === 0) return <div className="empty-state">{emptyMsg}</div>;
-    return list.map(e => (
-      <EmailCard
-        key={e.id}
-        email={e}
-        expanded={expandedEmail === e.id}
-        onToggle={() => setExpandedEmail(expandedEmail === e.id ? null : e.id)}
-      />
-    ));
+    return (
+      <>
+        {list.map(e => (
+          <EmailCard
+            key={e.id}
+            email={e}
+            expanded={expandedEmail === e.id}
+            onToggle={() => setExpandedEmail(expandedEmail === e.id ? null : e.id)}
+            onProcessed={() => fetchData()}
+          />
+        ))}
+        {showLoadMore && emailOffset < emailTotal && (
+          <button
+            onClick={loadMoreEmails}
+            disabled={loadingMore}
+            style={{
+              width: '100%', marginTop: 12, padding: '10px 0',
+              background: 'transparent', border: '1px solid #334155',
+              borderRadius: 8, color: '#94a3b8', cursor: 'pointer', fontSize: 13,
+            }}
+          >
+            {loadingMore ? 'Loading…' : `Load more (${emailTotal - emailOffset} remaining)`}
+          </button>
+        )}
+      </>
+    );
   }
 
   const NAV = [
@@ -388,6 +647,20 @@ export default function Dashboard() {
           <button className="btn-refresh" onClick={() => fetchData(true)} disabled={refreshing}>
             {refreshing ? '⏳ Refreshing…' : '↻ Refresh Now'}
           </button>
+          <button
+            onClick={toggleAutomation}
+            disabled={togglingAutomation || automationEnabled === null}
+            style={{
+              width: '100%', padding: '9px 0', borderRadius: 8,
+              border: `1px solid ${automationEnabled ? '#059669' : '#334155'}`,
+              background: automationEnabled ? '#065f4644' : '#1e293b',
+              color: automationEnabled ? '#34d399' : '#94a3b8',
+              fontSize: 13, fontWeight: 600, cursor: 'pointer',
+              marginTop: 4,
+            }}
+          >
+            {togglingAutomation ? '⏳…' : automationEnabled ? '🤖 Automation ON' : '⏸ Automation OFF'}
+          </button>
           <Link href="/" className="btn-office">🏢 Office View</Link>
         </div>
       </aside>
@@ -422,9 +695,11 @@ export default function Dashboard() {
                       <span className="pill pill-gray">📋 General</span>
                     </div>
                   </div>
-                  {emails.length === 0
+                  {inboxLoading
                     ? <div className="empty-state">⏳ Loading emails from inbox…</div>
-                    : <div className="email-list">{renderEmails(emails, 'No emails.')}</div>
+                    : inboxError
+                      ? <div className="empty-state" style={{color:'#f87171'}}>⚠️ {inboxError}</div>
+                      : <div className="email-list">{renderEmails(emails, 'No emails in inbox.', true)}</div>
                   }
                 </div>
               )}

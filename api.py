@@ -1,13 +1,12 @@
 import logging
 import os
 import uuid
-from contextlib import asynccontextmanager
 from datetime import datetime
 from typing import List
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
@@ -23,7 +22,7 @@ from quotation_agent import parse_quotation_email
 from price_predictor import predict_price, assess_quotation, PricePrediction
 from history_agent import find_similar_shipments
 from email_classifier import classify_email, classify_emails_batch, submit_feedback
-from automation import run_daily_scan, get_status as automation_get_status, set_enabled as automation_set_enabled
+from automation import run_scan, get_status as automation_get_status, set_enabled as automation_set_enabled
 
 load_dotenv()
 
@@ -48,20 +47,29 @@ class AppException(Exception):
         self.detail = detail
 
 
-scheduler = BackgroundScheduler(timezone="UTC")
+def _warmup():
+    try:
+        from email_classifier import _get_svm
+        _get_svm()
+        logger.info("SVM warmed up on startup")
+    except Exception as e:
+        logger.warning("SVM warmup failed: %s", e)
 
+def _run_scan_job():
+    try:
+        run_scan(supabase)
+    except Exception as e:
+        logger.error("Scheduled scan error: %s", e)
 
-@asynccontextmanager
-async def lifespan(_app: FastAPI):
-    scheduler.add_job(run_daily_scan, "cron", hour=7, minute=0, id="daily_scan", replace_existing=True)
-    scheduler.start()
-    logger.info("Scheduler started — daily scan at 07:00 UTC")
-    yield
-    scheduler.shutdown()
-    logger.info("Scheduler stopped")
+import threading as _t
+_t.Thread(target=_warmup, daemon=True).start()
 
+_scheduler = BackgroundScheduler(timezone="UTC")
+_scheduler.add_job(_run_scan_job, "interval", minutes=5, id="inbox_scan", replace_existing=True)
+_scheduler.start()
+logger.info("Automation scheduler started — scanning every 5 minutes")
 
-app = FastAPI(title="Logistics Copilot API", lifespan=lifespan)
+app = FastAPI(title="Logistics Copilot API")
 
 
 @app.exception_handler(AppException)
@@ -152,11 +160,12 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
         result = fetch_latest_emails(limit=limit, offset=offset)
         emails_list = result["emails"]
         total = result["total"]
-        # Full classification: SVM is local (no network), only falls to GPT on low confidence
+        # Full parallel classification — use snippet as body proxy (metadata-only fetch)
         classified = classify_emails_batch(
-            [{"id": e["id"], "subject": e["subject"], "body": e["body"], "sender": e["from"]}
+            [{"id": e["id"], "subject": e["subject"],
+              "body": e.get("snippet", "") or e.get("body", ""),
+              "sender": e["from"]}
              for e in emails_list],
-            rules_only=False,
         )
         label_map = {c["id"]: c for c in classified}
         return {
@@ -165,7 +174,7 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
                     "id": e["id"],
                     "sender": e["from"],
                     "subject": e["subject"],
-                    "body": e["body"],
+                    "body": e.get("snippet", ""),
                     "label": label_map.get(e["id"], {}).get("label", "general"),
                     "label_confidence": label_map.get(e["id"], {}).get("confidence", 0.0),
                     "label_method": label_map.get(e["id"], {}).get("method", ""),
@@ -177,6 +186,17 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
         }
     except Exception as e:
         raise AppException(status_code=500, detail=f"Failed to fetch inbox: {e}")
+
+
+@app.get("/email-body/{message_id}")
+def get_email_body(message_id: str):
+    """Fetch full body of a single email on-demand (when user expands the email card)."""
+    try:
+        from gmail_connector import fetch_full_message
+        msg = fetch_full_message(message_id)
+        return {"body": msg["body"]}
+    except Exception as e:
+        raise AppException(status_code=500, detail=f"Failed to fetch email body: {e}")
 
 
 @app.post("/process-email")
@@ -794,40 +814,25 @@ class AutomationToggle(BaseModel):
 
 @app.get("/automation/status")
 def automation_status():
-    """Return scheduler state, last scan stats, and next run time."""
-    status = automation_get_status()
-    job = scheduler.get_job("daily_scan")
-    next_run = job.next_run_time.isoformat() if job and job.next_run_time else None
-    return {**status, "next_run": next_run}
+    try:
+        return automation_get_status()
+    except Exception as e:
+        raise AppException(status_code=500, detail=str(e))
 
 
 @app.post("/automation/run-now")
 def automation_run_now():
-    """Trigger the daily scan immediately without waiting for 7 AM."""
     try:
-        stats = run_daily_scan()
+        stats = run_scan(supabase)
+        return stats
     except Exception as e:
-        raise AppException(status_code=500, detail=f"Scan failed: {e}")
-    return {
-        "message": "Scan complete",
-        "emails_scanned": stats.emails_scanned,
-        "new_emails": stats.new_emails,
-        "customer_requirements": stats.customer_requirements,
-        "quotation_rate_cards": stats.quotation_rate_cards,
-        "errors": stats.errors,
-        "duration_seconds": stats.duration_seconds,
-        "customer_emails": stats.customer_emails,
-    }
+        raise AppException(status_code=500, detail=str(e))
 
 
 @app.post("/automation/toggle")
-def automation_toggle(body: AutomationToggle):
-    """Enable or disable the daily scheduler."""
-    automation_set_enabled(body.enabled)
-    job = scheduler.get_job("daily_scan")
-    if job:
-        if body.enabled:
-            job.resume()
-        else:
-            job.pause()
-    return {"enabled": body.enabled}
+def automation_toggle(payload: AutomationToggle):
+    try:
+        automation_set_enabled(payload.enabled)
+        return {"enabled": payload.enabled}
+    except Exception as e:
+        raise AppException(status_code=500, detail=str(e))

@@ -1,20 +1,24 @@
 """
 Gmail connector using service account + Domain-Wide Delegation.
 
+Uses google.auth + requests directly (no googleapiclient overhead).
+AuthorizedSession is thread-safe → enables parallel message fetches.
+
 Requires:
-  - service_account.json in the project root (downloaded from GCP)
-  - GMAIL_MAILBOX env var set to the client's mailbox (e.g. logistics@client.com)
-  - DWD granted in client's Google Admin Console for our service account client_id
+  - service_account.json in the project root
+  - GMAIL_MAILBOX env var (e.g. dhaval.shah@bhatiashipping.com)
+  - DWD granted in Google Workspace Admin Console
 """
 import base64
 import logging
 import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
 
+import requests as _requests
 from dotenv import load_dotenv
 from google.oauth2 import service_account
-from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
+from google.auth.transport.requests import AuthorizedSession
 
 load_dotenv()
 
@@ -26,22 +30,34 @@ SCOPES = [
     "https://www.googleapis.com/auth/gmail.modify",
 ]
 
+GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
 SERVICE_ACCOUNT_FILE = os.path.join(os.path.dirname(__file__), "service_account.json")
 GMAIL_MAILBOX = (os.getenv("GMAIL_MAILBOX") or "").strip()
 
+_session: AuthorizedSession | None = None
 
-def _get_service():
+
+def _get_session() -> AuthorizedSession:
+    global _session
+    if _session is not None:
+        return _session
     if not GMAIL_MAILBOX:
-        raise ValueError("GMAIL_MAILBOX not set in .env (e.g. logistics@client.com)")
+        raise ValueError("GMAIL_MAILBOX not set in .env")
     if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        raise FileNotFoundError(
-            f"service_account.json not found at {SERVICE_ACCOUNT_FILE}. "
-            "Download it from GCP Console → IAM → Service Accounts → Keys."
-        )
+        raise FileNotFoundError(f"service_account.json not found at {SERVICE_ACCOUNT_FILE}")
     creds = service_account.Credentials.from_service_account_file(
         SERVICE_ACCOUNT_FILE, scopes=SCOPES
     ).with_subject(GMAIL_MAILBOX)
-    return build("gmail", "v1", credentials=creds, cache_discovery=False)
+    _session = AuthorizedSession(creds)
+    return _session
+
+
+def _gmail_get(path: str, params: dict | None = None) -> dict:
+    """GET request to Gmail API, raises on non-200."""
+    session = _get_session()
+    resp = session.get(f"{GMAIL_BASE}/{path}", params=params, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _decode_header_value(raw: str) -> str:
@@ -56,7 +72,6 @@ def _decode_header_value(raw: str) -> str:
 
 
 def _extract_body(payload: dict) -> str:
-    """Recursively extract plain-text body from Gmail message payload."""
     mime = payload.get("mimeType", "")
     if mime == "text/plain":
         data = payload.get("body", {}).get("data", "")
@@ -70,10 +85,9 @@ def _extract_body(payload: dict) -> str:
     return ""
 
 
-def _map_message(msg: dict) -> dict | None:
+def _map_message(msg: dict) -> dict:
     headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
     body = _extract_body(msg.get("payload", {})).strip()
-    # Keep emails even with no plain-text body (e.g. attachments-only) — show subject
     return {
         "id": msg["id"],
         "threadId": msg.get("threadId", msg["id"]),
@@ -83,79 +97,83 @@ def _map_message(msg: dict) -> dict | None:
     }
 
 
-def fetch_latest_emails(limit: int = 5, offset: int = 0) -> dict:
-    service = _get_service()
-    try:
-        result = service.users().messages().list(
-            userId="me",
-            maxResults=limit + offset,
-            labelIds=["INBOX"],
-        ).execute()
-        messages = result.get("messages", [])
-        total_estimate = result.get("resultSizeEstimate", 0)
-        page = messages[offset:offset + limit]
-        emails = []
-        for ref in page:
+def _fetch_metadata(msg_id: str) -> dict:
+    """Fetch sender+subject for one message. Fast — metadata only, no body."""
+    msg = _gmail_get(f"messages/{msg_id}", params={
+        "format": "metadata",
+        "metadataHeaders": ["From", "Subject"],
+        "fields": "id,threadId,snippet,payload/headers",
+    })
+    headers = {h["name"]: h["value"] for h in msg.get("payload", {}).get("headers", [])}
+    return {
+        "id": msg["id"],
+        "threadId": msg.get("threadId", msg["id"]),
+        "from": headers.get("From", ""),
+        "subject": _decode_header_value(headers.get("Subject", "")),
+        "body": "",
+        "snippet": msg.get("snippet", ""),
+    }
+
+
+def fetch_latest_emails(limit: int = 10, offset: int = 0) -> dict:
+    """Fetch inbox metadata in parallel. Body loads on-demand via /email-body/<id>."""
+    result = _gmail_get("messages", params={
+        "maxResults": limit + offset,
+        "labelIds": "INBOX",
+        "fields": "messages/id,resultSizeEstimate",
+    })
+    messages = result.get("messages", [])
+    total_estimate = result.get("resultSizeEstimate", 0)
+    page = messages[offset:offset + limit]
+
+    emails: list[dict] = []
+    with ThreadPoolExecutor(max_workers=min(len(page), 10)) as pool:
+        future_map = {pool.submit(_fetch_metadata, ref["id"]): ref["id"] for ref in page}
+        for future in as_completed(future_map):
             try:
-                msg = service.users().messages().get(
-                    userId="me", id=ref["id"], format="full"
-                ).execute()
-                parsed = _map_message(msg)
-                if parsed:
-                    emails.append(parsed)
-            except HttpError as e:
-                logger.warning("Skipping message %s: %s", ref["id"], e)
-        return {"emails": emails, "total": total_estimate}
-    except HttpError as e:
-        raise RuntimeError(f"Gmail API error: {e}") from e
+                emails.append(future.result())
+            except Exception as e:
+                logger.warning("Skipping message %s: %s", future_map[future], e)
+
+    return {"emails": emails, "total": total_estimate}
 
 
 def fetch_emails_by_subject(search_term: str, limit: int = 20) -> list[dict]:
-    service = _get_service()
-    try:
-        result = service.users().messages().list(
-            userId="me",
-            q=f"subject:{search_term}",
-            maxResults=limit,
-        ).execute()
-        messages = result.get("messages", [])
-        emails = []
-        for ref in messages:
-            try:
-                msg = service.users().messages().get(
-                    userId="me", id=ref["id"], format="full"
-                ).execute()
-                parsed = _map_message(msg)
-                if parsed:
-                    emails.append(parsed)
-            except HttpError as e:
-                logger.warning("Skipping message %s: %s", ref["id"], e)
-        return emails
-    except HttpError as e:
-        raise RuntimeError(f"Gmail API error: {e}") from e
+    result = _gmail_get("messages", params={
+        "q": f"subject:{search_term}",
+        "maxResults": limit,
+        "fields": "messages/id",
+    })
+    messages = result.get("messages", [])
+    emails = []
+    for ref in messages:
+        try:
+            msg = _gmail_get(f"messages/{ref['id']}", params={"format": "full"})
+            emails.append(_map_message(msg))
+        except Exception as e:
+            logger.warning("Skipping message %s: %s", ref["id"], e)
+    return emails
 
 
 def fetch_unseen_emails(limit: int = 20) -> list[dict]:
-    service = _get_service()
-    try:
-        result = service.users().messages().list(
-            userId="me",
-            q="is:unread",
-            labelIds=["INBOX"],
-            maxResults=limit,
-        ).execute()
-        messages = result.get("messages", [])
-        emails = []
-        for ref in messages:
-            try:
-                msg = service.users().messages().get(
-                    userId="me", id=ref["id"], format="full"
-                ).execute()
-                parsed = _map_message(msg)
-                if parsed:
-                    emails.append(parsed)
-            except HttpError as e:
-                logger.warning("Skipping message %s: %s", ref["id"], e)
-        return emails
-    except HttpError as e:
-        raise RuntimeError(f"Gmail API error: {e}") from e
+    result = _gmail_get("messages", params={
+        "q": "is:unread",
+        "labelIds": "INBOX",
+        "maxResults": limit,
+        "fields": "messages/id",
+    })
+    messages = result.get("messages", [])
+    emails = []
+    for ref in messages:
+        try:
+            msg = _gmail_get(f"messages/{ref['id']}", params={"format": "full"})
+            emails.append(_map_message(msg))
+        except Exception as e:
+            logger.warning("Skipping message %s: %s", ref["id"], e)
+    return emails
+
+
+def fetch_full_message(msg_id: str) -> dict:
+    """Fetch full message body for a single email (on-demand when user expands)."""
+    msg = _gmail_get(f"messages/{msg_id}", params={"format": "full"})
+    return _map_message(msg)

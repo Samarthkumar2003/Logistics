@@ -26,6 +26,7 @@ SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
 SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
 
 EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "gmail").lower()
+EMAIL_REDIRECT = (os.getenv("EMAIL_REDIRECT") or "").strip()
 
 
 def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
@@ -55,10 +56,14 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         logger.error(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
 
+    actual_to = EMAIL_REDIRECT if EMAIL_REDIRECT else to_addr
+    if EMAIL_REDIRECT:
+        logger.info("EMAIL_REDIRECT active — sending to %s instead of %s", actual_to, to_addr)
+
     msg = MIMEMultipart()
     msg["From"] = EMAIL_ACCOUNT
-    msg["To"] = to_addr
-    msg["Subject"] = subject
+    msg["To"] = actual_to
+    msg["Subject"] = f"[TEST → {to_addr}] {subject}" if EMAIL_REDIRECT else subject
     msg.attach(MIMEText(body, "plain"))
 
     try:
@@ -68,8 +73,8 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
             server.starttls(context=context)
             server.ehlo()
             server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_ACCOUNT, to_addr, msg.as_string())
-        logger.info("Email sent successfully to %s", to_addr)
+            server.sendmail(EMAIL_ACCOUNT, actual_to, msg.as_string())
+        logger.info("Email sent successfully to %s", actual_to)
         return {"status": "sent", "to": to_addr}
     except smtplib.SMTPAuthenticationError as exc:
         error_msg = f"SMTP authentication failed: {exc}"

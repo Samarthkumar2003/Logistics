@@ -1,17 +1,111 @@
-agent_name,country,email,contact_person,phone,specialty,modes
-Kuehne+Nagel,India,kn.mumbai@kuehne-nagel.example.com,Rajesh Sharma,+91-22-6789-0123,general cargo and oversized freight,"sea_freight,air_freight,road"
-Kuehne+Nagel,Germany,kn.hamburg@kuehne-nagel.example.com,Thomas Mueller,+49-40-3692-5810,automotive parts and machinery,"sea_freight,air_freight,road"
-DB Schenker,Germany,ops.frankfurt@dbschenker.example.com,Katrin Weber,+49-69-7540-2200,industrial equipment and chemicals,"sea_freight,air_freight,road"
-DB Schenker,China,ops.shenzhen@dbschenker.example.com,Wei Zhang,+86-755-8832-4400,electronics and consumer goods,"sea_freight,air_freight"
-Flexport,United States,bookings.la@flexport.example.com,Sarah Chen,+1-213-555-0147,e-commerce and consumer electronics,"sea_freight,air_freight"
-Flexport,China,bookings.shenzhen@flexport.example.com,Li Ming,+86-755-2233-6688,tech hardware and components,"sea_freight,air_freight"
-DSV,Denmark,cargo.copenhagen@dsv.example.com,Henrik Larsen,+45-43-20-3040,pharmaceuticals and temperature-controlled,"sea_freight,air_freight,road"
-DSV,United States,cargo.chicago@dsv.example.com,Michael Torres,+1-312-555-0289,retail and FMCG distribution,"sea_freight,air_freight,road"
-Bollore,France,logistics.paris@bollore.example.com,Jean-Pierre Duval,+33-1-4678-9012,luxury goods and fashion,"sea_freight,air_freight,road"
-Bollore,UAE,logistics.dubai@bollore.example.com,Ahmed Al-Rashid,+971-4-338-7700,project cargo and oil field equipment,"sea_freight,air_freight"
-Expeditors,United States,freight.seattle@expeditors.example.com,David Park,+1-206-555-0331,aerospace components and high-value cargo,"sea_freight,air_freight"
-Expeditors,Singapore,freight.sg@expeditors.example.com,Priya Nair,+65-6332-8800,semiconductor and precision instruments,"sea_freight,air_freight"
-Nippon Express,Japan,nex.tokyo@nipponexpress.example.com,Takeshi Yamamoto,+81-3-6251-1500,automotive and electronics,"sea_freight,air_freight,road"
-DHL Global Forwarding,UK,dgf.london@dhl.example.com,James Whitfield,+44-20-7960-3300,life sciences and healthcare,"sea_freight,air_freight,road"
-Agility Logistics,UAE,agility.dubai@agility.example.com,Fatima Al-Khoori,+971-4-405-2000,project cargo and heavy machinery,"sea_freight,air_freight,road"
-CEVA Logistics,Singapore,ceva.sg@cevalogistics.example.com,Daniel Tan,+65-6439-8800,automotive and consumer goods,"sea_freight,air_freight,road"
+agent_name,location,country,email,contact_person,phone,specialty,modes,category
+Rightway Logistics,Ludhiana,India,cb.importdocs@gmail.com,Gurjeet,8837746834,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+Pipil Freight,Delhi,India,vasu@pipilfright.com,Vasu Pipil,8763676993,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+ATC,Kolkata,India,atcei@atc.co.in,Animesh,9321354483,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+ATC,Ahmedabad,India,amd@atc.co.in,Kurush Gazdar,9825066949,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+Aaron Logistics,Cochin,India,rdileep@aaronlogistics.in,Dileep,9846129936,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+Reliance Maritime,Chennai,India,dinesh@reliancemaritime.net,Dinesh,9789051127,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+A S Vasan,Chennai,India,vishal@asvasan.in,Vishal Dadda,9791157911,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+ATC,Nagpur,India,nagpur@atc.co.in,Pornima,9764441220,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+Unique Logistics,Hyderabad,India,unique.log14@gmail.com,Syed,9348333617,custom clearance and freight forwarding,"sea_freight,air_freight,road",CHA
+MSC,Mumbai,India,jitesh.dubey@msc.com,Jitesh Dubey,8657884688,sea freight carrier,sea_freight,CARRIER
+CMA CGM,Mumbai,India,mby.ishaikh@cma-cgm.com,Ismail Shaikh,9004246431,sea freight carrier,sea_freight,CARRIER
+Radiant,Mumbai,India,jignesh@radiant-india.net,Jignesh Rathod,9979884578,sea freight carrier,sea_freight,CARRIER
+DP World,Mumbai,India,aaditya.kothari@dpworld.com,Aaditya Kothari,8779145587,sea freight carrier,sea_freight,CARRIER
+Blue Water Lines,Mumbai,India,teesha_sen@abraogroup.com,Teesha Sen,8269285745,sea freight carrier,sea_freight,CARRIER
+COSCO,Mumbai,India,rajnish.Kumar@coscon.com,Rajnish,9022660919,sea freight carrier,sea_freight,CARRIER
+Evergreen,Mumbai,India,sgogarkar@evergreen-shipping.co.in,Santhosh,9833073652,sea freight carrier,sea_freight,CARRIER
+DP World,Mundra,India,Sunil.Fernandez@unifeeder.com,Sunil Fernandes,9825227028,sea freight carrier,sea_freight,CARRIER
+CU Lines,Mumbai,India,sadiq.zaidi@culshipping.in,Sadiq Zaidi,9453821873,sea freight carrier,sea_freight,CARRIER
+HMM,Mumbai,India,jagtar@hmm21.com,Jagtar,9582212842,sea freight carrier,sea_freight,CARRIER
+Navio,Mumbai,India,sagar.mum@navio-shipping.com,Sagar Timmanpyati,9225494056,sea freight carrier,sea_freight,CARRIER
+Turkon,Mumbai,India,ashwin_herole@abraogroup.com,Ashwin,9920198068,sea freight carrier,sea_freight,CARRIER
+HMM,Mundra,India,binit@hmm21.com,Binit,9979777080,sea freight carrier,sea_freight,CARRIER
+TS Lines,Mumbai,India,PranavJani@tslineindia.com,Pranav Jani,9619974821,sea freight carrier,sea_freight,CARRIER
+PIL,Mumbai,India,diyesh.l@inmum.pilship.com,Diyesh Lotlikar,9172323580,sea freight carrier,sea_freight,CARRIER
+SCI,Mumbai,India,aakashl.mum@cmtindia.com,Aakash Lodaya,7977705920,sea freight carrier,sea_freight,CARRIER
+DP World,Chennai,India,prasanna.sivaraman@unifeeder.com,Prasanna Shivaram,9176083342,sea freight carrier,sea_freight,CARRIER
+Akkon,Mundra,India,jayesh.khapandi@samsarashipping.com,Jayesh Khapandi,8347626564,sea freight carrier,sea_freight,CARRIER
+Akkon,Mumbai,India,mayur.jadav@akkonlines.com,Mayur Jadhav,9769337726,sea freight carrier,sea_freight,CARRIER
+Econ,Mumbai,India,manisha@econshipping.com,Manisha Saini,8799808283,sea freight carrier,sea_freight,CARRIER
+COSCO,Mundra,India,harsh.soni@coscon.com,Harsh Soni,9601644244,sea freight carrier,sea_freight,CARRIER
+Cliff Line,Mumbai,India,mktg4.mum@clifflineshipping.com,Siddhesh Karekar,7506088032,sea freight carrier,sea_freight,CARRIER
+Radiant,Mundra,India,vinod@radiant-india.net,Vinod Nair,9909122012,sea freight carrier,sea_freight,CARRIER
+Unifeeder,Cochin,India,nishad.kakkanattu@unifeeder.com,Nishad,9895555799,sea freight carrier,sea_freight,CARRIER
+MSC,Chennai,India,venkata.ramanan@msc.com,Venkata Raman,9840964313,sea freight carrier,sea_freight,CARRIER
+MSC,Delhi,India,E-chahat.gupta@msc.com,Chahat Gupta,9958600154,sea freight carrier,sea_freight,CARRIER
+River Waves Connect Shipping LLC,Mumbai,India,sales@rwcshippingllc.com,Irshad,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Seabridge Marine Agencies Pvt. Ltd.,Vadodara,India,dhaval.p@sbmapl.com,Dhaval Pandya,,sea freight carrier,sea_freight,CARRIER
+"Shanghai League Shipping Co., Ltd.",Shanghai,China,julie_wang@leagueshipping.com,汪子妍,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+MSC Agency (India) Private Limited,Chennai,India,in363-csuchennai@msc.com,Customer Service - MSC Chennai,,sea freight carrier,sea_freight,CARRIER
+"Ningbo Seamarco International Logistics Co., Ltd.",Ningbo,China,cathywang@seamarco.com.cn,Cathy Wang,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+"UNION EXPRESS GROUP CO., LTD",Shenzhen,China,ossales27@uexpress.com.cn,易俊杰(Mike),,sea freight carrier,sea_freight,CARRIER
+MSC AGENCY (INDIA) PRIVATE LIMITED,Mumbai,India,shraddha.kerkar@msc.com,Shraddha Kerkar,,sea freight carrier,sea_freight,CARRIER
+Consolidated Shipping Services L.L.C.,Abudhabi,United Arab Emirates,aleesha@cssabudhabi.com,Aleesha Nazar,,sea freight carrier,sea_freight,CARRIER
+Mediterranean Shipping Company,Geneva,Switzerland,in363-salesgdm@msc.com,,,sea freight carrier,sea_freight,CARRIER
+Ocean Network Express,Singapore,Singapore,in.blr.sales@one-line.com,,,sea freight carrier,sea_freight,CARRIER
+COSCO Shipping Lines,Beijing,China,prateek.mehrotra@coscon.com,,,sea freight carrier,sea_freight,CARRIER
+CMA CGM,Marseille,France,ssc.exchrate@cma-cgm.com,,,sea freight carrier,sea_freight,CARRIER
+FBL India,Mumbai,India,salessupport2@fblindia.in,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+CSS Kingston,Kingston,Jamaica,pricingrak@csskingston.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Team Global,Mumbai,India,export.del@teamglobal.in,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Orient Overseas Container Line,Hong Kong,China,freightsmart@oocl.com,,,sea freight carrier,sea_freight,CARRIER
+Emu Lines,Mumbai,India,pricing@emulines.biz,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Navio Shipping,Dubai,UAE,sales.amd@navio-shipping.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Globelink West Star,Singapore,Singapore,pricing2@globelinkww.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Hemisphere Freight,London,UK,airsales@hemisphere-freight.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Air 7 Seas,Los Angeles,USA,fclrates@air7seas.us,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Abraogroup,São Paulo,Brazil,benoy_varghese@abraogroup.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Emu Lines,Mumbai,India,exportsales.tut@emulines.in,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Allcargo Logistics,Mumbai,India,vishwajit.kshirsagar@allcargologistics.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Maurice Ward,Dublin,Ireland,sales.spain@mauriceward.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Speed Freight,Port Louis,Mauritius,seaops@speedfreight.mu,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+ZIM Integrated Shipping Services,Haifa,Israel,nayyar.prateek@zim.com,,,sea freight carrier,sea_freight,CARRIER
+ATC Logistics,Bangalore,India,gmsales@atc.co.in,,,sea freight carrier,sea_freight,CARRIER
+A.P. Moller - Maersk,Copenhagen,Denmark,specialcargorates@maersk.com,,,sea freight carrier,sea_freight,CARRIER
+TS Lines India,Mumbai,India,salesgdm@tslineindia.com,,,sea freight carrier,sea_freight,CARRIER
+Avantgarde Logistics,Dubai,UAE,pricing@avantgardelogistics.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Unifeeder,Aarhus,Denmark,sandeep.chavan@unifeeder.com,,,sea freight carrier,sea_freight,CARRIER
+CSS Abu Dhabi,Abu Dhabi,UAE,pricing1@cssabudhabi.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Radiant Logistics,New Delhi,India,saleschn@radiant-india.net,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Seatrade Shipping,Dubai,UAE,expsalesrclindia@seatradeshipping.com,,,sea freight carrier,sea_freight,CARRIER
+ATC Air,Bangalore,India,pricing@atcair.co.in,,,sea freight carrier,sea_freight,CARRIER
+CSS Dubai,Dubai,UAE,overseaspayable@cssdubai.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+DP World,Dubai,UAE,pinank.brahmania@dpworld.com,,,sea freight carrier,sea_freight,CARRIER
+Win Win Maritime,Mumbai,India,salesmumbai2@winwinmaritime.com,,,sea freight carrier,sea_freight,CARRIER
+Evergreen Shipping,New Delhi,India,nitasadhu@evergreen-shipping.co.in,,,sea freight carrier,sea_freight,CARRIER
+GRT Ship,Mumbai,India,sales3@grtship.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Lancer Line,Mumbai,India,salessupport2@lancerline.com,,,sea freight carrier,sea_freight,CARRIER
+Super Cargo Service,Dubai,UAE,pricing.han@supercargoservice.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Samsara Shipping,Mumbai,India,jalandhar@samsarashipping.com,,,sea freight carrier,sea_freight,CARRIER
+Intertrans,Ho Chi Minh City,Vietnam,sales10@intertrans.com.vn,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Yning Logistics,Ningbo,China,miya@yning-log.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Aiyer Shipping,Mumbai,India,sales.mum@aiyershipping.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Emulines,Calcutta,India,exportsales1.calcutta@emulines.co,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Deccan Transport,Hyderabad,India,pranitha@deccantrans.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+ZIM Integrated Shipping Services,Haifa,Israel,dammschneider.peter@zim-log.com,,,sea freight carrier,sea_freight,CARRIER
+Barsan Global Logistics,Istanbul,Turkey,oceanpricingbnl@barsan.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+FLG Shipping,Singapore,Singapore,asishck@flgshipping.net,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Emulines,Calcutta,India,mohan.sharma@emulines.net,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+JCtrans,Shanghai,China,gaojie@jctrans.net,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+RCL Group,Bangkok,Thailand,mumbai.expsales@rclgroup.com,,,sea freight carrier,sea_freight,CARRIER
+Panda Logistics,Hong Kong,Hong Kong,manalik@pandahk.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Total Group,Mumbai,India,krina.maru@totalgroup.in,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Freightwalla,Mumbai,India,shankarrao@freightwalla.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Contech Logistics,Mumbai,India,export@contechlogistics.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Glauber Logistics,New York,USA,ajay.tp@glaubelogistics.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Worldwide Logistics,city,China,tsn.obd9@worldwide-logistics.cn,,,sea freight carrier,sea_freight,CARRIER
+KSJ Ship,city,UAE,pooja.sharma@ksjship.ae,,,sea freight carrier,sea_freight,CARRIER
+Transco Cargo,city,Sri Lanka,subash@transcocargo.lk,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Seahorse Group,city,India,amits@seahorsegroup.co.in,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+SM Global,Hanoi,Vietnam,overseas1@smglobal.vn,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+ASB Logistics,Colombo,Sri Lanka,sales@asblogisticslk.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+WCA World,London,United Kingdom,csharma@wcaworld.com,,,sea freight carrier,sea_freight,CARRIER
+Seashell Shipping,Dubai,UAE,pricing@seashellshipping.ae,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Alliance ACL,Singapore,Singapore,william.li@alliance-acl.com,,,sea freight carrier,sea_freight,CARRIER
+TGLS India,Mumbai,India,sanket@tglsindia.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+AIWPL,Mumbai,India,govind@aiwpl.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Cordelia Line,Mumbai,India,yogesh.nirmal@cordelialine.com,,,sea freight carrier,sea_freight,CARRIER
+Inmum Pilship,Mumbai,India,export.doc@inmum.pilship.com,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Phoenix Logistics,Bangalore,India,pricing@phoenixlogistics.in,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
+Cargonector,Manila,Philippines,sales02@cargonector.ph,,,international freight forwarding,"sea_freight,air_freight,road",FREIGHT_FORWARDER
