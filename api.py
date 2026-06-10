@@ -49,11 +49,12 @@ class AppException(Exception):
 
 def _warmup():
     try:
-        from email_classifier import _get_svm
-        _get_svm()
-        logger.info("SVM warmed up on startup")
+        from email_classifier import _get_qwen, _get_mlp
+        _get_qwen()  # load the heavy Qwen model once at startup, not on first email
+        _get_mlp()
+        logger.info("Qwen+MLP warmed up on startup")
     except Exception as e:
-        logger.warning("SVM warmup failed: %s", e)
+        logger.warning("Qwen+MLP warmup failed: %s", e)
 
 def _run_scan_job():
     try:
@@ -790,11 +791,12 @@ def classifier_status():
         "tiers_active": {
             "tier1_rules": True,
             "tier2_fine_tuned": bool(fine_tuned),
-            "tier3_knn": training_examples >= 10,
+            "tier3_qwen_mlp": training_examples >= 10,
             "tier4_few_shot_fallback": True,
         },
         "fine_tuned_model": fine_tuned or None,
-        "knn_training_examples": training_examples,
+        "embedding_model": os.environ.get("QWEN_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B"),
+        "mlp_training_examples": training_examples,
         "feedback_corrections": feedback_count,
     }
 
