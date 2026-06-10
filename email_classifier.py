@@ -1,7 +1,7 @@
 """
 email_classifier.py
 -------------------
-Hybrid email classifier: Rule-based → Fine-tuned GPT-4o-mini → KNN fallback.
+Hybrid email classifier: Rule-based → Fine-tuned GPT-4o-mini → Qwen+MLP fallback.
 
 Labels:
   - customer_requirement : Customer asking for a shipment / freight quote
@@ -45,7 +45,7 @@ FINE_TUNED_MODEL = os.environ.get("CLASSIFIER_MODEL_ID", "")
 class ClassificationResult:
     label: str                    # customer_requirement | quotation_rate_card | general
     confidence: float             # 0.0 - 1.0
-    method: str                   # rule | fine_tuned | knn | few_shot
+    method: str                   # rule | fine_tuned | mlp | few_shot
     details: str = ""             # human-readable explanation
 
 
@@ -90,7 +90,7 @@ ASKING_FOR_RATES = re.compile(
 def _classify_by_rules(subject: str, body: str, sender: str) -> Optional[ClassificationResult]:
     _body = body
     """Tier 1: Hard rules only — high-certainty structural signals, no keyword counting.
-    Anything not caught here goes to fine-tuned model → SVM → GPT.
+    Anything not caught here goes to fine-tuned model → Qwen+MLP → GPT.
     """
     sender_lower = sender.strip().lower()
     email_match = re.search(r"<([^>]+)>", sender_lower)
@@ -144,7 +144,7 @@ def _classify_by_rules(subject: str, body: str, sender: str) -> Optional[Classif
             details="Internal job reference (EN0XXXXX) in subject — operational thread",
         )
 
-    return None  # Pass to SVM → GPT
+    return None  # Pass to Qwen+MLP → GPT
 
 
 # ---------------------------------------------------------------------------
@@ -201,83 +201,214 @@ def _classify_by_fine_tuned(subject: str, body: str, sender: str) -> Optional[Cl
 
 
 # ---------------------------------------------------------------------------
-# TIER 3: SVM RBF classifier (replaces KNN)
-# Trains in-memory at first use from Supabase vectors.
-# Benchmarked at 98.2% LOOCV accuracy vs KNN 69.6% on same data.
+# TIER 3: Qwen3-Embedding-0.6B (instruction-aware) → sklearn MLP classifier
+# Trains in-memory at first use from Supabase Qwen vectors (embedding_qwen col).
+# Query side embeds with an instruction prefix encoding our empirical basis;
+# training/document vectors are embedded plain (Qwen asymmetric convention).
 # ---------------------------------------------------------------------------
 
 # HyDE: only expand messages shorter than this (WhatsApp / terse emails)
 HYDE_LENGTH_THRESHOLD = 200
 
-# Confidence gate: SVM probability below this → skip to GPT
-SVM_MIN_CONFIDENCE = 0.70
+# Confidence gate: MLP probability below this → skip to GPT
+MLP_MIN_CONFIDENCE = 0.70
+
+# Qwen model + the column holding its 1024-dim vectors
+QWEN_MODEL_NAME = os.environ.get("QWEN_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
+QWEN_EMBED_COLUMN = "embedding_qwen"
+# Apple MPS mis-sizes buffers for this model (attempts ~29GB alloc) → default CPU.
+# Override with QWEN_DEVICE=mps|cuda once your hardware handles it.
+QWEN_DEVICE = os.environ.get("QWEN_DEVICE", "cpu")
+QWEN_BATCH_SIZE = int(os.environ.get("QWEN_BATCH_SIZE", "16"))
+# fp16 halves memory + ~2x throughput on CUDA. CPU has no fp16 kernels (slower/unsupported),
+# so default on only for cuda. Force with QWEN_FP16=1/0. Vectors stay comparable across
+# devices/dtypes (tiny rounding only), so CPU-stored and GPU-stored embeddings interoperate.
+_fp16_env = os.environ.get("QWEN_FP16")
+QWEN_FP16 = (_fp16_env == "1") if _fp16_env is not None else (QWEN_DEVICE == "cuda")
+
+# Instruction query — our empirical basis for classification. Prepended to the
+# QUERY text only (Qwen "Instruct: {task}\nQuery: {text}" convention).
+EMPIRICAL_BASIS = (
+    "Classify a freight-forwarding email into one of three categories based on who is "
+    "asking and who is pricing. "
+    "customer_requirement: the sender is REQUESTING a freight quote, rate, or booking from us. "
+    "They describe a shipment (origin/POL, destination/POD, cargo, weight, container type, "
+    "incoterm, ready date) and want US to provide rates. An email with cargo specs but NO prices "
+    "is customer_requirement. Signals: 'kindly share your best rate', 'request for quotation', "
+    "'please quote', 'we require', filled POL/POD/cargo fields with empty price fields. "
+    "quotation_rate_card: the sender is an agent or carrier PROVIDING rates/prices TO us, usually "
+    "replying to our RFQ. They state the numbers. Signals: 'please find our rates', "
+    "'USD X per container', 'all-in', transit time and validity filled in, RFQ reference in subject. "
+    "general: everything else operational or non-deal — newsletters, spam, tracking updates, "
+    "invoices, internal memos, existing-job threads. "
+    "Decisive rule: ASKING for a price = customer_requirement; PROVIDING a price = quotation_rate_card."
+)
 
 import json as _json
 import threading as _threading
 import numpy as _np
-from sklearn.svm import SVC as _SVC
+from sklearn.neural_network import MLPClassifier as _MLPClassifier
 from sklearn.preprocessing import LabelEncoder as _LabelEncoder
 
-# Module-level model cache — trained once, reused for every email
-_svm_model: Optional[_SVC] = None
-_svm_encoder: Optional[_LabelEncoder] = None
-_svm_training_count: int = 0
-_svm_lock = _threading.Lock()  # prevent concurrent retraining from parallel classifier threads
+# Module-level caches — loaded/trained once, reused for every email
+_qwen_encoder = None  # SentenceTransformer, lazily loaded (heavy)
+_qwen_lock = _threading.Lock()       # guards one-time model load
+_qwen_infer_lock = _threading.Lock()  # serializes encode() — torch model not thread-safe
+_mlp_model: Optional[_MLPClassifier] = None
+_mlp_label_encoder: Optional[_LabelEncoder] = None
+_mlp_training_count: int = 0
+_mlp_lock = _threading.Lock()  # prevent concurrent retraining from parallel classifier threads
 
 
-def _get_embedding(text: str) -> list[float]:
-    """Generate an embedding using text-embedding-3-small."""
-    response = client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text[:8000],
-    )
-    return response.data[0].embedding
+def _get_qwen():
+    """Lazily load the Qwen3 SentenceTransformer once. Heavy (~1.2GB), so cached."""
+    global _qwen_encoder
+    if _qwen_encoder is not None:
+        return _qwen_encoder
+    with _qwen_lock:
+        if _qwen_encoder is not None:
+            return _qwen_encoder
+        from sentence_transformers import SentenceTransformer
+        model_kwargs = {"torch_dtype": "float16"} if QWEN_FP16 else {}
+        logger.info(
+            "Loading Qwen embedding model: %s (device=%s, fp16=%s) ...",
+            QWEN_MODEL_NAME, QWEN_DEVICE, QWEN_FP16,
+        )
+        _qwen_encoder = SentenceTransformer(
+            QWEN_MODEL_NAME, device=QWEN_DEVICE, model_kwargs=model_kwargs,
+        )
+        logger.info("Qwen model loaded.")
+    return _qwen_encoder
 
 
-def _load_svm() -> tuple[Optional[_SVC], Optional[_LabelEncoder], int]:
-    """Fetch training vectors from Supabase and train SVM RBF. Returns (model, encoder, count)."""
+def _is_oom_error(exc: Exception) -> bool:
+    """True for CUDA/MPS out-of-memory errors (across torch versions)."""
+    msg = str(exc).lower()
+    return "out of memory" in msg or "cuda oom" in msg or exc.__class__.__name__ == "OutOfMemoryError"
+
+
+def _encode(texts: list[str], prompt: Optional[str] = None) -> "_np.ndarray":
+    """Run model.encode with an auto-OOM fallback: on a CUDA/MPS OOM, free the
+    cache, halve the batch size, and retry — down to batch=1 — before giving up.
+    Lets large GPUs run big batches while small GPUs degrade gracefully."""
+    model = _get_qwen()
+    kwargs = {"normalize_embeddings": True, "convert_to_numpy": True}
+    if prompt is not None:
+        kwargs["prompt"] = prompt
+
+    with _qwen_infer_lock:  # torch model not thread-safe under the batch ThreadPool
+        batch = QWEN_BATCH_SIZE
+        while True:
+            try:
+                return model.encode(texts, batch_size=batch, **kwargs)
+            except Exception as e:
+                if not _is_oom_error(e) or batch <= 1:
+                    raise
+                _free_accelerator_cache()
+                new_batch = max(1, batch // 2)
+                logger.warning("Qwen encode OOM at batch=%d → retrying at batch=%d", batch, new_batch)
+                batch = new_batch
+
+
+def _free_accelerator_cache() -> None:
+    """Release cached GPU memory so the smaller-batch retry has room."""
     try:
-        rows = supabase.table("email_training_data").select("label, embedding").execute().data
-        rows = [r for r in rows if r.get("embedding")]
+        import torch
+        if QWEN_DEVICE == "cuda" and torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        elif QWEN_DEVICE == "mps" and torch.backends.mps.is_available():
+            torch.mps.empty_cache()
+    except Exception:
+        pass
+
+
+def _embed_documents(texts: list[str]) -> "_np.ndarray":
+    """Embed training/document texts WITHOUT instruction (Qwen asymmetric convention).
+    Returns an L2-normalized (n, 1024) array."""
+    return _encode([t[:8000] for t in texts])
+
+
+def _embed_queries(texts: list[str]) -> "_np.ndarray":
+    """Batch QUERY embedding with the empirical-basis instruction prefix.
+    Use for storage/training so vectors match the runtime query path.
+    Returns an L2-normalized (n, 1024) array."""
+    return _encode([t[:8000] for t in texts], prompt=f"Instruct: {EMPIRICAL_BASIS}\nQuery: ")
+
+
+def _embed_query(text: str) -> "_np.ndarray":
+    """Embed a single QUERY text with the empirical-basis instruction prefix.
+    Returns an L2-normalized (1, 1024) array."""
+    return _embed_queries([text])
+
+
+def _get_embedding(text: str, is_query: bool = True) -> list[float]:
+    """Public embedding helper used by feedback/training writers.
+    is_query=True (default) → QUERY embedding with the instruction prefix.
+    The classifier head requires train/inference consistency: runtime embeds
+    incoming emails as queries, so stored training vectors must match."""
+    if is_query:
+        return _embed_query(text)[0].tolist()
+    return _embed_documents([text])[0].tolist()
+
+
+def _load_mlp() -> tuple[Optional[_MLPClassifier], Optional[_LabelEncoder], int]:
+    """Fetch Qwen training vectors from Supabase and train an MLP. Returns (model, encoder, count)."""
+    try:
+        rows = supabase.table("email_training_data").select(f"label, {QWEN_EMBED_COLUMN}").execute().data
+        rows = [r for r in rows if r.get(QWEN_EMBED_COLUMN)]
         if len(rows) < 10:
+            logger.warning("Only %d rows with %s — need >=10 to train MLP.", len(rows), QWEN_EMBED_COLUMN)
             return None, None, 0
 
         X = _np.array([
-            _json.loads(r["embedding"]) if isinstance(r["embedding"], str) else r["embedding"]
+            _json.loads(r[QWEN_EMBED_COLUMN]) if isinstance(r[QWEN_EMBED_COLUMN], str) else r[QWEN_EMBED_COLUMN]
             for r in rows
         ])
         le = _LabelEncoder()
         y = le.fit_transform([r["label"] for r in rows])
 
-        model = _SVC(kernel="rbf", C=10.0, gamma="scale", probability=True)
+        model = _build_mlp()
         model.fit(X, y)
-        logger.info("SVM trained on %d examples, classes: %s", len(rows), list(le.classes_))
+        logger.info("MLP trained on %d examples, classes: %s", len(rows), list(le.classes_))
         return model, le, len(rows)
     except Exception as e:
-        logger.warning("SVM training failed: %s", e)
+        logger.warning("MLP training failed: %s", e)
         return None, None, 0
 
 
-def _get_svm() -> tuple[Optional[_SVC], Optional[_LabelEncoder]]:
-    """Return cached SVM. Lock ensures only one thread trains at a time."""
-    global _svm_model, _svm_encoder, _svm_training_count
+def _build_mlp() -> _MLPClassifier:
+    """MLP head over 1024-dim Qwen vectors. Shared by runtime + eval script."""
+    return _MLPClassifier(
+        hidden_layer_sizes=(256, 64),
+        activation="relu",
+        alpha=1e-4,
+        max_iter=500,
+        early_stopping=True,
+        n_iter_no_change=15,
+        random_state=42,
+    )
+
+
+def _get_mlp() -> tuple[Optional[_MLPClassifier], Optional[_LabelEncoder]]:
+    """Return cached MLP. Lock ensures only one thread trains at a time."""
+    global _mlp_model, _mlp_label_encoder, _mlp_training_count
 
     # Fast path: model loaded and likely fresh — skip Supabase count check
-    if _svm_model is not None:
-        return _svm_model, _svm_encoder
+    if _mlp_model is not None:
+        return _mlp_model, _mlp_label_encoder
 
-    with _svm_lock:
+    with _mlp_lock:
         # Re-check inside lock in case another thread just trained it
-        if _svm_model is not None:
-            return _svm_model, _svm_encoder
+        if _mlp_model is not None:
+            return _mlp_model, _mlp_label_encoder
         try:
             current_count = supabase.table("email_training_data").select("id", count="exact").limit(1).execute().count or 0
         except Exception:
-            current_count = _svm_training_count
-        if _svm_model is None or current_count != _svm_training_count:
-            _svm_model, _svm_encoder, _svm_training_count = _load_svm()
+            current_count = _mlp_training_count
+        if _mlp_model is None or current_count != _mlp_training_count:
+            _mlp_model, _mlp_label_encoder, _mlp_training_count = _load_mlp()
 
-    return _svm_model, _svm_encoder
+    return _mlp_model, _mlp_label_encoder
 
 
 def _hyde_expand(subject: str, body: str) -> str:
@@ -386,11 +517,11 @@ def classify_email(
     no_gpt_fallback: bool = False,
 ) -> ClassificationResult:
     """Classify an email using the hybrid approach:
-    Tier 1: Rules → Tier 2: Fine-tuned model → Tier 3: SVM → Tier 4: Few-shot
+    Tier 1: Rules → Tier 2: Fine-tuned model → Tier 3: Qwen+MLP → Tier 4: Few-shot
 
     rules_only=True  : only hard rules, instant, zero network calls.
-    no_gpt_fallback=True : rules + SVM embedding only; skips HyDE + few-shot GPT.
-                           Low-confidence SVM defaults to 'general'. Use for inbox display.
+    no_gpt_fallback=True : rules + Qwen+MLP embedding only; skips HyDE + few-shot GPT.
+                           Low-confidence MLP defaults to 'general'. Use for inbox display.
     """
     # Tier 1: Rules (instant, free, no network)
     result = _classify_by_rules(subject, body, sender)
@@ -412,41 +543,41 @@ def classify_email(
         logger.info("Classified by fine-tuned model: %s (%.0f%%)", result.label, result.confidence * 100)
         return result
 
-    # Tier 3: SVM (embedding API call, ~50ms; skips HyDE when no_gpt_fallback)
+    # Tier 3: Qwen embedding + MLP (local inference; skips HyDE when no_gpt_fallback)
     raw_text = f"Subject: {subject}\n\n{body[:2000]}"
     hyde_used = not no_gpt_fallback and len(raw_text.strip()) < HYDE_LENGTH_THRESHOLD
     embed_text = _hyde_expand(subject, body) if hyde_used else raw_text
 
-    model, encoder = _get_svm()
+    model, encoder = _get_mlp()
     if model is not None:
         try:
-            vec = _np.array([_get_embedding(embed_text)])
+            vec = _embed_query(embed_text)
             proba = model.predict_proba(vec)[0]
             best_idx = int(_np.argmax(proba))
             confidence = float(proba[best_idx])
             label = encoder.classes_[best_idx]
 
-            if confidence >= SVM_MIN_CONFIDENCE:
+            if confidence >= MLP_MIN_CONFIDENCE:
                 proba_str = ", ".join(f"{encoder.classes_[i]}={proba[i]:.2f}" for i in range(len(proba)))
-                svm_result = ClassificationResult(
+                mlp_result = ClassificationResult(
                     label=label,
                     confidence=confidence,
-                    method="svm+hyde" if hyde_used else "svm",
-                    details=f"SVM RBF probabilities: [{proba_str}], hyde={hyde_used}",
+                    method="mlp+hyde" if hyde_used else "mlp",
+                    details=f"Qwen+MLP probabilities: [{proba_str}], hyde={hyde_used}",
                 )
-                logger.info("Classified by SVM: %s (%.0f%%)", svm_result.label, svm_result.confidence * 100)
-                return svm_result
+                logger.info("Classified by MLP: %s (%.0f%%)", mlp_result.label, mlp_result.confidence * 100)
+                return mlp_result
             else:
-                logger.info("SVM gated out: confidence %.2f < %.2f for label '%s'", confidence, SVM_MIN_CONFIDENCE, label)
+                logger.info("MLP gated out: confidence %.2f < %.2f for label '%s'", confidence, MLP_MIN_CONFIDENCE, label)
         except Exception as e:
-            logger.warning("SVM classification failed: %s", e)
+            logger.warning("MLP classification failed: %s", e)
 
     if no_gpt_fallback:
         return ClassificationResult(
             label="general",
             confidence=0.45,
-            method="svm",
-            details="SVM inconclusive; no_gpt_fallback=True so defaulting to general",
+            method="mlp",
+            details="MLP inconclusive; no_gpt_fallback=True so defaulting to general",
         )
 
     # Tier 4: Few-shot fallback (always works, uses GPT)
@@ -483,17 +614,17 @@ def submit_feedback(
         logger.error("Failed to store feedback: %s", e)
         return {"status": "error", "detail": str(e)}
 
-    # 2. Generate embedding and add to training data
+    # 2. Generate Qwen document embedding and add to training data
     try:
         email_text = f"Subject: {email_subject}\n\n{email_body[:2000]}"
-        embedding = _get_embedding(email_text)
+        embedding = _get_embedding(email_text)  # plain document embedding (no instruction)
 
         supabase.table("email_training_data").insert({
             "content": email_text,
             "subject": email_subject,
             "sender": email_sender,
             "label": corrected_label,
-            "embedding": embedding,
+            QWEN_EMBED_COLUMN: embedding,
         }).execute()
     except Exception as e:
         logger.error("Failed to add corrected email to training data: %s", e)

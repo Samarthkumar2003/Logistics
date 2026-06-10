@@ -634,11 +634,9 @@ TRAINING_EXAMPLES: list[dict] = [
 # ──────────────────────────────────────────────────────────────────────────────
 
 def embed(text: str) -> list[float]:
-    response = openai_client.embeddings.create(
-        model="text-embedding-3-small",
-        input=text[:8000],
-    )
-    return response.data[0].embedding
+    # Qwen document embedding (no instruction) — matches email_training_data.embedding_qwen
+    from email_classifier import _get_embedding
+    return _get_embedding(text)
 
 
 def content_hash(text: str) -> str:
@@ -695,7 +693,7 @@ def ingest(examples: list[dict]) -> None:
                 "sender": ex.get("sender", ""),
                 "label": label,
                 "source": source,
-                "embedding": vec,
+                "embedding_qwen": vec,
             }).execute()
             existing_hashes.add(chash)   # prevent re-insert within same run
             counts[label] = counts.get(label, 0) + 1

@@ -1,116 +1,93 @@
 """
 reembed_training_qwen.py
 ------------------------
-Re-embed all email_training_data rows using a local Qwen embedding model
-(Alibaba-NLP/gte-Qwen2-1.5B-instruct) running on GPU.
+Backfills the `embedding_qwen` column on email_training_data using the local
+Qwen3-Embedding-0.6B model in QUERY mode (instruction prefix), so stored
+training vectors match the runtime query path the MLP classifier consumes.
 
-Writes embeddings back to Supabase into the `embedding_qwen` column.
-Run once; subsequent classifier runs can use these instead of OpenAI embeddings.
+The legacy OpenAI `embedding` column (1536-dim) is left untouched so the old
+SVM path stays rollback-able. Qwen vectors are 1024-dim.
+
+Schema prerequisite (run once in Supabase SQL editor):
+    ALTER TABLE email_training_data ADD COLUMN IF NOT EXISTS embedding_qwen vector(1024);
 
 Usage:
-    $env:CUDA_VISIBLE_DEVICES = "1"
-    $env:QWEN_DEVICE = "cuda"
-    $env:QWEN_BATCH_SIZE = "64"
-    python reembed_training_qwen.py
+    python reembed_training_qwen.py            # only rows missing embedding_qwen
+    python reembed_training_qwen.py --all      # re-embed every row (overwrite)
+    python reembed_training_qwen.py --batch 32 # encode batch size
 """
 
-import json
-import os
-import time
+import argparse
 import logging
+import os
 
-import numpy as np
-import torch
 from dotenv import load_dotenv
-from supabase import create_client
-from transformers import AutoTokenizer, AutoModel
+from supabase import create_client, Client
+
+from email_classifier import _embed_queries, QWEN_EMBED_COLUMN
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+log = logging.getLogger(__name__)
 
-MODEL_NAME = os.getenv("QWEN_MODEL", "Alibaba-NLP/gte-Qwen2-1.5B-instruct")
-DEVICE = os.getenv("QWEN_DEVICE", "cuda" if torch.cuda.is_available() else "cpu")
-BATCH_SIZE = int(os.getenv("QWEN_BATCH_SIZE", "32"))
-MAX_LENGTH = 512
-
-supabase = create_client(
-    os.environ["SUPABASE_URL"],
-    os.environ["SUPABASE_KEY"],
-)
+supabase: Client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 
-def mean_pool(token_embeddings: torch.Tensor, attention_mask: torch.Tensor) -> torch.Tensor:
-    mask = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-    return torch.sum(token_embeddings * mask, dim=1) / torch.clamp(mask.sum(dim=1), min=1e-9)
-
-
-def embed_batch(texts: list[str], tokenizer, model) -> np.ndarray:
-    encoded = tokenizer(
-        texts,
-        padding=True,
-        truncation=True,
-        max_length=MAX_LENGTH,
-        return_tensors="pt",
-    ).to(DEVICE)
-    with torch.no_grad():
-        out = model(**encoded)
-    vecs = mean_pool(out.last_hidden_state, encoded["attention_mask"])
-    vecs = torch.nn.functional.normalize(vecs, p=2, dim=1)
-    return vecs.cpu().float().numpy()
+def fetch_rows(only_missing: bool) -> list[dict]:
+    """Fetch ALL training rows needing a Qwen embedding, paginating past
+    Supabase's 1000-row default cap."""
+    all_rows: list[dict] = []
+    page = 0
+    page_size = 1000
+    while True:
+        query = supabase.table("email_training_data").select("id, content")
+        if only_missing:
+            query = query.is_(QWEN_EMBED_COLUMN, "null")
+        chunk = query.range(page * page_size, page * page_size + page_size - 1).execute().data or []
+        all_rows.extend(chunk)
+        if len(chunk) < page_size:
+            break
+        page += 1
+    return [r for r in all_rows if r.get("content")]
 
 
 def main() -> None:
-    logger.info("Device: %s | Model: %s | Batch: %d", DEVICE, MODEL_NAME, BATCH_SIZE)
+    parser = argparse.ArgumentParser(description="Backfill Qwen embeddings for email_training_data")
+    parser.add_argument("--all", action="store_true", help="Re-embed every row (overwrite existing)")
+    parser.add_argument("--batch", type=int, default=32, help="Encode batch size")
+    args = parser.parse_args()
 
-    logger.info("Loading tokenizer and model…")
-    tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME, trust_remote_code=True)
-    model = AutoModel.from_pretrained(MODEL_NAME, trust_remote_code=True).to(DEVICE)
-    model.eval()
-    logger.info("Model loaded.")
+    rows = fetch_rows(only_missing=not args.all)
+    if not rows:
+        log.info("No rows to embed. Nothing to do.")
+        return
 
-    logger.info("Fetching training rows from Supabase…")
-    rows = supabase.table("email_training_data").select("id, content, subject, label").execute().data
-    logger.info("Fetched %d rows.", len(rows))
+    log.info("Embedding %d rows with Qwen (batch=%d)...", len(rows), args.batch)
 
-    texts = [
-        f"Subject: {r.get('subject', '')}\n\n{(r.get('content') or '')[:1000]}"
-        for r in rows
-    ]
-
-    all_vecs: list[np.ndarray] = []
-    t0 = time.time()
-    for i in range(0, len(texts), BATCH_SIZE):
-        batch = texts[i : i + BATCH_SIZE]
-        vecs = embed_batch(batch, tokenizer, model)
-        all_vecs.append(vecs)
-        done = min(i + BATCH_SIZE, len(texts))
-        elapsed = time.time() - t0
-        rate = done / elapsed
-        logger.info("  %d/%d embedded (%.1f rows/s)", done, len(texts), rate)
-
-    embeddings = np.vstack(all_vecs)
-    logger.info("All embeddings shape: %s", embeddings.shape)
-
-    logger.info("Writing embeddings back to Supabase…")
-    errors = 0
-    for row, vec in zip(rows, embeddings):
+    updated = 0
+    failed = 0
+    for start in range(0, len(rows), args.batch):
+        chunk = rows[start:start + args.batch]
         try:
-            supabase.table("email_training_data").update(
-                {"embedding_qwen": vec.tolist()}
-            ).eq("id", row["id"]).execute()
+            vectors = _embed_queries([r["content"] for r in chunk])
         except Exception as e:
-            logger.error("Failed to update row %s: %s", row["id"], e)
-            errors += 1
+            log.error("  Batch embed failed at offset %d: %s", start, e)
+            failed += len(chunk)
+            continue
 
-    total_time = time.time() - t0
-    logger.info(
-        "Done. %d rows embedded in %.1fs. %d errors.",
-        len(rows), total_time, errors,
-    )
-    logger.info(
-        "Next: set QWEN_EMBEDDINGS=1 in .env and restart api.py to use these embeddings."
-    )
+        for row, vec in zip(chunk, vectors):
+            try:
+                supabase.table("email_training_data").update(
+                    {QWEN_EMBED_COLUMN: vec.tolist()}
+                ).eq("id", row["id"]).execute()
+                updated += 1
+            except Exception as e:
+                log.error("  Update failed id=%s: %s", row["id"], e)
+                failed += 1
+
+        log.info("  Progress: %d/%d", min(start + args.batch, len(rows)), len(rows))
+
+    log.info("Done. Updated=%d, Failed=%d", updated, failed)
 
 
 if __name__ == "__main__":

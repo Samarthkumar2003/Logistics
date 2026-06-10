@@ -174,8 +174,9 @@ def _label_block(block: dict) -> LabeledBlock:
 
 
 def _embed(text: str) -> list[float]:
-    resp = openai_client.embeddings.create(model="text-embedding-3-small", input=text[:8000])
-    return resp.data[0].embedding
+    # Qwen document embedding (no instruction) — matches email_training_data.embedding_qwen
+    from email_classifier import _get_embedding
+    return _get_embedding(text)
 
 
 def _content_hash(text: str) -> str:
@@ -198,7 +199,7 @@ def _ingest_block(block: dict, label: str, existing_hashes: set[str]) -> str:
         subject = f"[WhatsApp] {block['chat_file']} — {block['text'][:50].replace(chr(10), ' ')}"
         supabase.table("email_training_data").insert({
             "content": content, "subject": subject, "sender": block["sender"],
-            "label": label, "source": "whatsapp", "embedding": vec,
+            "label": label, "source": "whatsapp", "embedding_qwen": vec,
         }).execute()
         existing_hashes.add(chash)
         return "inserted"

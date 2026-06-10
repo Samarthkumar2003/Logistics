@@ -1,19 +1,17 @@
 """
 eval_classifier.py
 ------------------
-Evaluate the SVM classifier on the Supabase training data using
-stratified 5-fold cross-validation.
+Evaluates the Qwen+MLP email classifier head with an 85/15 stratified
+train/test split. Reports full metrics: accuracy, per-class precision/recall/F1,
+macro & weighted averages, confusion matrix, and gated accuracy at the runtime
+confidence threshold.
 
-Reports:
-  - Per-class precision, recall, F1
-  - Overall accuracy
-  - Confusion matrix
-  - Which folds used OpenAI embeddings vs Qwen embeddings
+Reads pre-computed Qwen vectors from email_training_data.embedding_qwen, so run
+reembed_training_qwen.py first.
 
 Usage:
     python eval_classifier.py
-    python eval_classifier.py --qwen          # use embedding_qwen column
-    python eval_classifier.py --folds 10      # change fold count
+    python eval_classifier.py --test-size 0.15 --seed 42
 """
 
 import argparse
@@ -28,111 +26,139 @@ from sklearn.metrics import (
     classification_report,
     confusion_matrix,
 )
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import train_test_split
 from sklearn.preprocessing import LabelEncoder
-from sklearn.svm import SVC
-from supabase import create_client
+from supabase import create_client, Client
+
+from email_classifier import _build_mlp, MLP_MIN_CONFIDENCE, QWEN_EMBED_COLUMN
 
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-logger = logging.getLogger(__name__)
+logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+log = logging.getLogger(__name__)
 
-LABEL_ORDER = ["customer_requirement", "quotation_rate_card", "general"]
+supabase: Client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
 
 
-def fetch_data(use_qwen: bool) -> tuple[np.ndarray, list[str]]:
-    supabase = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_KEY"])
-    col = "embedding_qwen" if use_qwen else "embedding"
-    logger.info("Fetching training data (embedding column: %s)…", col)
-    rows = supabase.table("email_training_data").select(f"label, {col}").execute().data
-    rows = [r for r in rows if r.get(col)]
-    logger.info("Loaded %d rows with embeddings.", len(rows))
+VALID_LABELS = {"customer_requirement", "quotation_rate_card", "general"}
 
+
+def load_data(embed_live: bool) -> tuple[np.ndarray, list[str]]:
+    """Load labels + vectors. Reads embedding_qwen from Supabase, or embeds
+    `content` in-memory with Qwen when embed_live=True (no DB column needed)."""
+    if embed_live:
+        from email_classifier import _embed_queries
+        rows = supabase.table("email_training_data").select("label, content").execute().data
+        rows = [r for r in rows if r.get("content") and r.get("label") in VALID_LABELS]
+        if len(rows) < 10:
+            raise SystemExit(f"Only {len(rows)} usable rows. Need >=10.")
+        log.info("Embedding %d rows live with Qwen (QUERY mode)...", len(rows))
+        # Query mode (instruction prefix) — matches runtime + stored training vectors.
+        # Chunk so progress is visible and memory stays bounded.
+        texts = [r["content"] for r in rows]
+        chunks = []
+        step = 64
+        for start in range(0, len(texts), step):
+            chunks.append(_embed_queries(texts[start:start + step]))
+            log.info("  embedded %d/%d", min(start + step, len(texts)), len(texts))
+        X = np.vstack(chunks)
+        y = [r["label"] for r in rows]
+        return X, y
+
+    rows = supabase.table("email_training_data").select(
+        f"label, {QWEN_EMBED_COLUMN}"
+    ).execute().data
+    rows = [r for r in rows if r.get(QWEN_EMBED_COLUMN) and r.get("label") in VALID_LABELS]
+    if len(rows) < 10:
+        raise SystemExit(
+            f"Only {len(rows)} rows have {QWEN_EMBED_COLUMN}. "
+            "Run reembed_training_qwen.py first, or pass --embed-live."
+        )
     X = np.array([
-        json.loads(r[col]) if isinstance(r[col], str) else r[col]
+        json.loads(r[QWEN_EMBED_COLUMN]) if isinstance(r[QWEN_EMBED_COLUMN], str)
+        else r[QWEN_EMBED_COLUMN]
         for r in rows
     ])
     y = [r["label"] for r in rows]
     return X, y
 
 
-def run_eval(X: np.ndarray, y: list[str], n_folds: int) -> None:
-    le = LabelEncoder()
-    y_enc = le.fit_transform(y)
-    classes = le.classes_
-
-    skf = StratifiedKFold(n_splits=n_folds, shuffle=True, random_state=42)
-    y_true_all: list[int] = []
-    y_pred_all: list[int] = []
-
-    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y_enc), 1):
-        X_train, X_val = X[train_idx], X[val_idx]
-        y_train, y_val = y_enc[train_idx], y_enc[val_idx]
-
-        model = SVC(kernel="rbf", C=10.0, gamma="scale", probability=True)
-        model.fit(X_train, y_train)
-        preds = model.predict(X_val)
-
-        fold_acc = accuracy_score(y_val, preds)
-        logger.info("Fold %d/%d — accuracy: %.1f%%", fold, n_folds, fold_acc * 100)
-
-        y_true_all.extend(y_val.tolist())
-        y_pred_all.extend(preds.tolist())
-
-    print("\n" + "=" * 60)
-    print(f"CROSS-VALIDATION RESULTS  ({n_folds}-fold stratified)")
-    print("=" * 60)
-    print(f"\nOverall accuracy: {accuracy_score(y_true_all, y_pred_all) * 100:.2f}%")
-    print(f"Total samples:    {len(y_true_all)}")
-
-    print("\nPer-class report:")
-    print(classification_report(
-        y_true_all, y_pred_all,
-        labels=list(range(len(classes))),
-        target_names=classes,
-        digits=3,
-    ))
-
-    cm = confusion_matrix(y_true_all, y_pred_all)
-    print("Confusion matrix (rows=actual, cols=predicted):")
-    header = "".join(f"{c[:8]:>10}" for c in classes)
-    print(f"{'':>24}{header}")
-    for i, row in enumerate(cm):
-        row_str = "".join(f"{v:>10}" for v in row)
-        print(f"{classes[i]:>24}{row_str}")
-
-    print("\nLabel distribution in training set:")
-    for label in LABEL_ORDER:
-        count = y.count(label)
-        pct = count / len(y) * 100
-        print(f"  {label:<30} {count:>4}  ({pct:.1f}%)")
-
-    print("\nMisclassification breakdown:")
-    y_true_arr = np.array(y_true_all)
-    y_pred_arr = np.array(y_pred_all)
-    for i, true_label in enumerate(classes):
-        mask = y_true_arr == i
-        wrong = (y_pred_arr[mask] != i).sum()
-        if wrong:
-            print(f"  {true_label}: {wrong} misclassified out of {mask.sum()}")
-            for j, pred_label in enumerate(classes):
-                if j != i:
-                    n = ((y_true_arr == i) & (y_pred_arr == j)).sum()
-                    if n:
-                        print(f"      → predicted as {pred_label}: {n}")
+def print_confusion(cm: np.ndarray, classes: list[str]) -> None:
+    width = max(len(c) for c in classes) + 2
+    header = " " * width + "".join(f"{c[:10]:>12}" for c in classes)
+    print("\nConfusion matrix (rows=true, cols=pred):")
+    print(header)
+    for i, c in enumerate(classes):
+        row = f"{c:>{width}}" + "".join(f"{cm[i, j]:>12}" for j in range(len(classes)))
+        print(row)
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--qwen", action="store_true", help="Use Qwen embeddings (embedding_qwen column)")
-    parser.add_argument("--folds", type=int, default=5, help="Number of CV folds (default 5)")
+    parser = argparse.ArgumentParser(description="Evaluate Qwen+MLP classifier (85/15 split)")
+    parser.add_argument("--test-size", type=float, default=0.15, help="Test fraction (default 0.15)")
+    parser.add_argument("--seed", type=int, default=42, help="Random seed")
+    parser.add_argument("--embed-live", action="store_true",
+                        help="Embed content in-memory with Qwen (no embedding_qwen column needed)")
     args = parser.parse_args()
 
-    embedding_type = "Qwen (local GPU)" if args.qwen else "OpenAI text-embedding-3-small"
-    logger.info("Embedding type: %s | Folds: %d", embedding_type, args.folds)
+    X, y_labels = load_data(embed_live=args.embed_live)
+    le = LabelEncoder()
+    y = le.fit_transform(y_labels)
+    classes = list(le.classes_)
 
-    X, y = fetch_data(use_qwen=args.qwen)
-    run_eval(X, y, n_folds=args.folds)
+    log.info("Loaded %d examples across %d classes: %s", len(y), len(classes), classes)
+    for c in classes:
+        log.info("  %-22s %d", c, y_labels.count(c))
+
+    # Stratified 85/15 split keeps class balance in both sides
+    X_train, X_test, y_train, y_test = train_test_split(
+        X, y, test_size=args.test_size, random_state=args.seed, stratify=y,
+    )
+    log.info("Split: %d train / %d test", len(y_train), len(y_test))
+
+    model = _build_mlp()
+    model.fit(X_train, y_train)
+
+    # --- Predictions + probabilities ---
+    proba = model.predict_proba(X_test)
+    y_pred = proba.argmax(axis=1)
+    confidences = proba.max(axis=1)
+
+    # --- Headline metrics ---
+    acc = accuracy_score(y_test, y_pred)
+    print("\n" + "=" * 60)
+    print(f"OVERALL ACCURACY (test): {acc:.4f}  ({int(acc * len(y_test))}/{len(y_test)})")
+    print("=" * 60)
+
+    # --- Per-class precision / recall / F1, macro + weighted ---
+    print("\nClassification report:")
+    print(classification_report(
+        y_test, y_pred, labels=range(len(classes)),
+        target_names=classes, digits=4, zero_division=0,
+    ))
+
+    # --- Confusion matrix ---
+    cm = confusion_matrix(y_test, y_pred, labels=range(len(classes)))
+    print_confusion(cm, classes)
+
+    # --- Confidence-gated accuracy (mirrors runtime MLP_MIN_CONFIDENCE) ---
+    gated_mask = confidences >= MLP_MIN_CONFIDENCE
+    n_gated = int(gated_mask.sum())
+    print(f"\nConfidence gate ({MLP_MIN_CONFIDENCE:.2f}):")
+    if n_gated:
+        gated_acc = accuracy_score(y_test[gated_mask], y_pred[gated_mask])
+        print(f"  Coverage: {n_gated}/{len(y_test)} ({n_gated / len(y_test):.1%}) pass the gate")
+        print(f"  Accuracy on gated: {gated_acc:.4f}")
+        print(f"  {len(y_test) - n_gated} test emails fall through to GPT few-shot")
+    else:
+        print("  No test predictions cleared the gate.")
+
+    # --- Mean confidence by correctness ---
+    correct = y_pred == y_test
+    if correct.any():
+        print(f"\nMean confidence — correct: {confidences[correct].mean():.4f}", end="")
+    if (~correct).any():
+        print(f" | wrong: {confidences[~correct].mean():.4f}", end="")
+    print()
 
 
 if __name__ == "__main__":

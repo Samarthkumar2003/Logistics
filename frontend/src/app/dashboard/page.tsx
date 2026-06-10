@@ -695,9 +695,9 @@ export default function Dashboard() {
                       <span className="pill pill-gray">📋 General</span>
                     </div>
                   </div>
-                  {inboxLoading
+                  {inboxLoading && emails.length === 0
                     ? <div className="empty-state">⏳ Loading emails from inbox…</div>
-                    : inboxError
+                    : inboxError && emails.length === 0
                       ? <div className="empty-state" style={{color:'#f87171'}}>⚠️ {inboxError}</div>
                       : <div className="email-list">{renderEmails(emails, 'No emails in inbox.', true)}</div>
                   }

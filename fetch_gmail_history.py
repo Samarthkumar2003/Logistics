@@ -193,8 +193,9 @@ def _fetch_existing_hashes() -> set[str]:
 
 
 def _embed(text: str) -> list[float]:
-    resp = openai_client.embeddings.create(model="text-embedding-3-small", input=text[:8000])
-    return resp.data[0].embedding
+    # Qwen document embedding (no instruction) — matches email_training_data.embedding_qwen
+    from email_classifier import _get_embedding
+    return _get_embedding(text)
 
 
 def _ingest_email(email: dict, label: str, existing_hashes: set[str]) -> str:
@@ -210,7 +211,7 @@ def _ingest_email(email: dict, label: str, existing_hashes: set[str]) -> str:
             "sender": email["from"],
             "label": label,
             "source": "gmail_history",
-            "embedding": vec,
+            "embedding_qwen": vec,
         }).execute()
         existing_hashes.add(chash)
         return "inserted"
