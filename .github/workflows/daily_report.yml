@@ -39,4 +39,4 @@ jobs:
           EMAIL_PROVIDER: gmail_workspace
           GMAIL_MAILBOX: ${{ secrets.GMAIL_MAILBOX }}
           REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
-        run: python daily_report.py
+        run: python -m backend.app.daily_report

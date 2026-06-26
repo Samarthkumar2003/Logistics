@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import './dashboard.css';
 
@@ -476,6 +476,10 @@ export default function Dashboard() {
   const [emails, setEmails] = useState<Email[]>([]);
   const [emailTotal, setEmailTotal] = useState(0);
   const [emailOffset, setEmailOffset] = useState(0);
+  // Stale-closure-free mirror of how deep the inbox is scrolled. fetchData has
+  // empty deps (stable across the 60s poll) so it can't read live emailOffset;
+  // the ref gives it the current depth without re-creating the interval.
+  const emailOffsetRef = useRef(0);
   const [loadingMore, setLoadingMore] = useState(false);
   const [jobs, setJobs] = useState<RFQJob[]>([]);
   const [loading, setLoading] = useState(true);
@@ -528,16 +532,19 @@ export default function Dashboard() {
       setRefreshing(false);
     }
 
-    // Inbox fetches in background
+    // Inbox fetches in background. Re-fetch at the CURRENT scrolled depth (not
+    // page 1) so the 60s auto-poll doesn't collapse a "Load more"-expanded list.
     setInboxLoading(true);
     setInboxError('');
     try {
-      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=0`);
+      const depth = Math.max(emailOffsetRef.current, PAGE);
+      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${depth}&offset=0`);
       if (ir.ok) {
         const d = await ir.json();
         setEmails(d.emails ?? []);
         setEmailTotal(d.total ?? 0);
-        setEmailOffset(PAGE);
+        setEmailOffset(depth);
+        emailOffsetRef.current = depth;
       } else {
         const d = await ir.json().catch(() => ({}));
         setInboxError(d.detail ?? 'Failed to load inbox');
@@ -556,7 +563,7 @@ export default function Dashboard() {
       if (ir.ok) {
         const d = await ir.json();
         setEmails(prev => [...prev, ...(d.emails ?? [])]);
-        setEmailOffset(prev => prev + PAGE);
+        setEmailOffset(prev => { const next = prev + PAGE; emailOffsetRef.current = next; return next; });
       }
     } finally {
       setLoadingMore(false);

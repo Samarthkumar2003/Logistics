@@ -33,7 +33,7 @@ interface AutomationLastRun {
   run_at: string; emails_scanned: number; new_emails: number;
   customer_requirements: number; quotation_rate_cards: number;
   general: number; errors: number; duration_seconds: number;
-  customer_emails: { id: string; subject: string; sender: string; confidence: number; method: string }[];
+  customer_emails?: { id: string; subject: string; sender: string; confidence: number; method: string }[];
 }
 interface AutomationStatus {
   enabled: boolean; schedule: string; next_run: string | null;
@@ -330,10 +330,27 @@ export default function Office() {
   const [automationRunning, setAutomationRunning] = useState(false);
 
   const PAGE_SIZE = 20;
+  // Persists how deep the inbox was scrolled so a browser refresh restores the
+  // same emails (offset would otherwise reset to 0 and drop loaded pages).
+  const INBOX_DEPTH_KEY = 'inboxLoadedCount';
+  const INBOX_SEARCH_KEY = 'inboxSearch';
+
+  // Mirror of inbox for stale-closure-free reads inside async loadInbox appends
+  const inboxRef = useRef<InboxEmail[]>([]);
+  useEffect(() => { inboxRef.current = inbox; }, [inbox]);
 
   // Auto-fetch inbox + automation status on load
   useEffect(() => {
-    loadInbox();
+    let savedCount = 0;
+    let savedSearch = '';
+    try {
+      savedCount = parseInt(sessionStorage.getItem(INBOX_DEPTH_KEY) || '0', 10) || 0;
+      savedSearch = sessionStorage.getItem(INBOX_SEARCH_KEY) || '';
+    } catch { /* sessionStorage unavailable — fall back to first page */ }
+    console.debug('[inbox] mount restore — savedCount', savedCount, 'savedSearch', JSON.stringify(savedSearch), '→ restore?', savedCount > PAGE_SIZE);
+    if (savedSearch) setSearchQuery(savedSearch);
+    // Restore previous depth in one request; otherwise load the first page.
+    loadInbox(true, savedSearch || undefined, savedCount > PAGE_SIZE ? savedCount : undefined);
     fetchAutomationStatus();
   }, []);
 
@@ -350,7 +367,7 @@ export default function Office() {
       const res = await fetch(`${API_BASE}/automation/run-now`, { method: 'POST' });
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       await fetchAutomationStatus();
-      loadInbox(true);
+      loadInbox(true, undefined, undefined, true);  // preserve scrolled depth
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Automation run failed');
     } finally {
@@ -369,28 +386,47 @@ export default function Office() {
     } catch { /* non-critical */ }
   }
 
-  async function loadInbox(reset = true, overrideSearch?: string) {
-    if (reset) {
+  async function loadInbox(reset = true, overrideSearch?: string, restoreCount?: number, preserveDepth = false) {
+    // preserveDepth: a refresh/poll that should re-fetch the SAME depth the user
+    // already scrolled to, not snap back to page 1. We derive the depth from the
+    // current list and skip the empty-list wipe so the view doesn't flash.
+    const effectiveRestore =
+      preserveDepth && inboxRef.current.length > PAGE_SIZE
+        ? inboxRef.current.length
+        : restoreCount;
+    if (reset && !preserveDepth) {
       setStatus('fetching');
       setErrorMsg('');
       setInbox([]);
     }
     try {
+      // On a reset we either restore the previous scroll depth (one big request)
+      // or load a single page. On "load more" we page from the current length.
+      const limit = reset ? (effectiveRestore && effectiveRestore > PAGE_SIZE ? effectiveRestore : PAGE_SIZE) : PAGE_SIZE;
       const offset = reset ? 0 : inbox.length;
       const search = overrideSearch !== undefined ? overrideSearch : searchQuery;
       const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
-      const res = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE_SIZE}&offset=${offset}${searchParam}`);
+      const res = await fetch(`${API_BASE}/fetch-inbox?limit=${limit}&offset=${offset}${searchParam}`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data = await res.json();
       const newEmails: InboxEmail[] = data.emails || [];
-      if (reset) {
-        setInbox(newEmails);
-      } else {
-        setInbox(prev => [...prev, ...newEmails]);
-      }
+      // Dedup by Message-ID across pages: each backend fetch dedups itself, but
+      // IMAP ordering can shift between offset calls so the same id may appear
+      // on two pages. Map keeps first occurrence, drops repeats.
+      // Use the freshest list (inboxRef) to avoid a stale-closure race on append.
+      const combined = reset ? newEmails : [...inboxRef.current, ...newEmails];
+      const merged = Array.from(new Map(combined.map(e => [e.id, e])).values());
+      setInbox(merged);
       setTotalEmails(data.total || 0);
       setHasMore(data.has_more || false);
       setStatus('inbox');
+      // Persist depth + search OUTSIDE the state updater (updaters must be pure;
+      // Strict Mode double-invokes them). This is the saved scroll depth.
+      try {
+        sessionStorage.setItem(INBOX_DEPTH_KEY, String(merged.length));
+        sessionStorage.setItem(INBOX_SEARCH_KEY, search || '');
+        console.debug('[inbox] saved depth', merged.length, 'search', JSON.stringify(search || ''));
+      } catch { /* sessionStorage unavailable — refresh will reset to page 1 */ }
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to fetch inbox');
       setStatus('error');
@@ -638,16 +674,16 @@ export default function Office() {
                 <span style={{ color: '#4ade80' }}>💰 {automationStatus.last_run.quotation_rate_cards}</span>
                 <span style={{ color: '#94a3b8' }}>✉ {automationStatus.last_run.new_emails} new</span>
               </div>
-              {automationStatus.last_run.customer_emails.length > 0 && (
+              {(automationStatus.last_run.customer_emails?.length ?? 0) > 0 && (
                 <div style={{ marginTop: 6 }}>
                   <div style={{ color: '#93c5fd', fontSize: 10, marginBottom: 3 }}>Detected customer emails:</div>
-                  {automationStatus.last_run.customer_emails.slice(0, 3).map((e, i) => (
+                  {automationStatus.last_run.customer_emails!.slice(0, 3).map((e, i) => (
                     <div key={i} style={{ color: '#475569', fontSize: 10, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       · {e.subject || e.sender}
                     </div>
                   ))}
-                  {automationStatus.last_run.customer_emails.length > 3 && (
-                    <div style={{ color: '#475569', fontSize: 10 }}>+{automationStatus.last_run.customer_emails.length - 3} more</div>
+                  {automationStatus.last_run.customer_emails!.length > 3 && (
+                    <div style={{ color: '#475569', fontSize: 10 }}>+{automationStatus.last_run.customer_emails!.length - 3} more</div>
                   )}
                 </div>
               )}
@@ -663,7 +699,7 @@ export default function Office() {
         </div>
 
         <div className="sidebar-footer">
-          <button onClick={status === 'inbox' ? () => loadInbox() : handleBackToInbox}>
+          <button onClick={status === 'inbox' ? () => loadInbox(true, undefined, undefined, true) : handleBackToInbox}>
             {status === 'inbox' ? 'Refresh Inbox' : 'Back to Inbox'}
           </button>
           <Link href="/dashboard" style={{
@@ -767,6 +803,7 @@ export default function Office() {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({
+                            email_id: email.id,
                             email_subject: email.subject,
                             email_body: email.body,
                             email_sender: email.sender,
