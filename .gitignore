@@ -22,3 +22,4 @@ whatsapp_exports/
 
 # Claude
 .claude/scheduled_tasks.lock
+PROJECT_GUIDE.md

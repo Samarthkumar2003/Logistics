@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import uuid
 from datetime import datetime
 from typing import List
@@ -24,8 +25,9 @@ from backend.agents.history_agent import find_similar_shipments
 from backend.classifier.email_classifier import classify_email, classify_emails_batch, submit_feedback
 from backend.classifier.classification_cache import classify_with_cache, update_label as cache_update_label
 from backend.automation.automation import run_scan, get_status as automation_get_status, set_enabled as automation_set_enabled
+from backend.core.paths import PROJECT_ROOT
 
-load_dotenv()
+load_dotenv(PROJECT_ROOT / ".env")
 
 # Ensure app INFO logs reach the console under uvicorn (root defaults to WARNING).
 logging.basicConfig(
@@ -39,8 +41,27 @@ logger = logging.getLogger("logistics_copilot")
 # Supabase client
 # ---------------------------------------------------------------------------
 
-SUPABASE_URL = os.environ.get("SUPABASE_URL")
-SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+SUPABASE_URL = (os.environ.get("SUPABASE_URL") or "").strip()
+SUPABASE_KEY = (os.environ.get("SUPABASE_KEY") or "").strip()
+
+
+def _validate_supabase_config() -> None:
+    if not SUPABASE_URL or not SUPABASE_KEY:
+        logger.error("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+        return
+    host = SUPABASE_URL.replace("https://", "").replace("http://", "").split("/")[0]
+    try:
+        socket.getaddrinfo(host, 443)
+    except socket.gaierror:
+        logger.error(
+            "Supabase host %r does not resolve (DNS NXDOMAIN). "
+            "Project may be deleted or SUPABASE_URL is wrong — copy Project URL + "
+            "service_role key from Supabase Dashboard → Settings → API.",
+            host,
+        )
+
+
+_validate_supabase_config()
 supabase = create_client(SUPABASE_URL, SUPABASE_KEY)
 
 

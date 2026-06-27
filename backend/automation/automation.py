@@ -307,12 +307,12 @@ def run_scan(supabase) -> ScanStats:
     stats = ScanStats(run_at=datetime.now(timezone.utc).isoformat())
     start = time.time()
     logger.info("Starting inbox scan...")
+    processed_set = set(state.processed_ids)
 
     try:
         result = fetch_latest_emails(limit=SCAN_BATCH, offset=0)
         emails = result.get("emails", [])
         stats.emails_scanned = len(emails)
-        processed_set = set(state.processed_ids)
 
         # Filter to only new emails
         new_emails = [e for e in emails if e.get("id") not in processed_set]
