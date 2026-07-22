@@ -1,7 +1,6 @@
 import csv
-import os
 import logging
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Optional
 from dotenv import load_dotenv
 from backend.agents.history_agent import find_similar_shipments

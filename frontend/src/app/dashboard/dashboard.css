@@ -2,18 +2,168 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {
-  --bg:      #0a0f1e;
-  --surface: #111827;
-  --border:  rgba(255,255,255,0.08);
-  --text:    #e2e8f0;
-  --muted:   #64748b;
-  --dim:     #374151;
-  --blue:    #3b82f6;
-  --green:   #22c55e;
-  --yellow:  #f59e0b;
-  --purple:  #a78bfa;
-  --red:     #f87171;
+/* ── Theme tokens ────────────────────────────────────────────────
+   Dark is the default (no data-theme attribute needed). The toggle in
+   the sidebar sets data-theme="light" on <html> and persists it; an
+   inline script in dashboard/layout.tsx re-applies it before paint.
+
+   Scoped to the dashboard subtree rather than :root because globals.css
+   also defines --border/--blue/--green on :root for the office view. This
+   stylesheet stays loaded after a client-side nav away from /dashboard, so
+   :root-level tokens here would repaint that page's borders and accents. */
+body:has(.dash-app) {
+  color-scheme: dark;
+
+  /* Surfaces */
+  --bg:             #0a0f1e;
+  --surface:        #111827;
+  --surface-2:      #0d1424;
+  --surface-hover:  #151f2e;
+  --surface-active: #111d30;
+  --sunken:         rgba(0,0,0,0.25);
+  --sunken-soft:    rgba(0,0,0,0.18);
+
+  /* Lines & fills */
+  --border:         rgba(255,255,255,0.08);
+  --border-strong:  rgba(255,255,255,0.16);
+  --overlay-1:      rgba(255,255,255,0.04);
+  --overlay-2:      rgba(255,255,255,0.06);
+  --overlay-3:      rgba(255,255,255,0.10);
+  --shadow:         rgba(0,0,0,0.30);
+
+  /* Text */
+  --text:           #e2e8f0;
+  --text-soft:      #cbd5e1;
+  --muted:          #64748b;
+  --muted-soft:     #94a3b8;
+  --dim:            #374151;
+  --faint:          #475569;
+  --on-accent:      #fff;
+
+  /* Accents */
+  --blue:           #3b82f6;
+  --blue-soft:      #60a5fa;
+  --blue-text:      #93c5fd;
+  --green:          #22c55e;
+  --green-soft:     #34d399;
+  --green-text:     #86efac;
+  --green-solid:    #059669;
+  --yellow:         #f59e0b;
+  --amber:          #fbbf24;
+  --amber-text:     #fcd34d;
+  --purple:         #a78bfa;
+  --indigo:         #818cf8;
+  --indigo-text:    #a5b4fc;
+  --red:            #f87171;
+
+  /* Accent tints */
+  --blue-tint:      rgba(59,130,246,0.12);
+  --blue-tint-2:    rgba(59,130,246,0.22);
+  --blue-fill:      rgba(59,130,246,0.30);
+  --blue-line:      rgba(59,130,246,0.25);
+  --green-tint:     rgba(34,197,94,0.12);
+  --green-tint-soft:rgba(34,197,94,0.05);
+  --green-line:     rgba(34,197,94,0.20);
+  --green-line-2:   rgba(34,197,94,0.30);
+  --amber-tint:     rgba(251,191,36,0.14);
+  --amber-line:     rgba(251,191,36,0.28);
+  --red-tint:       rgba(248,113,113,0.12);
+  --red-line:       rgba(248,113,113,0.25);
+  --purple-tint:    rgba(167,139,250,0.10);
+  --purple-line:    rgba(167,139,250,0.20);
+  --indigo-tint:    rgba(99,102,241,0.10);
+  --indigo-tint-2:  rgba(99,102,241,0.20);
+
+  /* Status card backgrounds (shipment pills) */
+  --status-blue-bg:    #1e3a5f22;
+  --status-amber-bg:   #78350f22;
+  --status-green-bg:   #065f4622;
+  --status-purple-bg:  #4c1d9522;
+  --status-neutral-bg: #1e293b;
+
+  /* Form controls */
+  --input-bg:       #1e293b;
+  --input-border:   #334155;
+
+  /* Nav badge text when the badge sits on its solid accent colour */
+  --nav-badge-text: #93c5fd;
+}
+
+:root[data-theme="light"] body:has(.dash-app) {
+  color-scheme: light;
+
+  /* Surfaces */
+  --bg:             #f1f5f9;
+  --surface:        #ffffff;
+  --surface-2:      #f8fafc;
+  --surface-hover:  #f1f5f9;
+  --surface-active: #eff6ff;
+  --sunken:         rgba(15,23,42,0.05);
+  --sunken-soft:    rgba(15,23,42,0.035);
+
+  /* Lines & fills */
+  --border:         rgba(15,23,42,0.10);
+  --border-strong:  rgba(15,23,42,0.22);
+  --overlay-1:      rgba(15,23,42,0.03);
+  --overlay-2:      rgba(15,23,42,0.05);
+  --overlay-3:      rgba(15,23,42,0.09);
+  --shadow:         rgba(15,23,42,0.12);
+
+  /* Text */
+  --text:           #0f172a;
+  --text-soft:      #1e293b;
+  --muted:          #64748b;
+  --muted-soft:     #475569;
+  --dim:            #94a3b8;
+  --faint:          #94a3b8;
+  --on-accent:      #fff;
+
+  /* Accents — darkened so they stay legible on white */
+  --blue:           #2563eb;
+  --blue-soft:      #2563eb;
+  --blue-text:      #1d4ed8;
+  --green:          #16a34a;
+  --green-soft:     #15803d;
+  --green-text:     #15803d;
+  --green-solid:    #047857;
+  --yellow:         #d97706;
+  --amber:          #b45309;
+  --amber-text:     #b45309;
+  --purple:         #7c3aed;
+  --indigo:         #4f46e5;
+  --indigo-text:    #4338ca;
+  --red:            #dc2626;
+
+  /* Accent tints */
+  --blue-tint:      rgba(37,99,235,0.08);
+  --blue-tint-2:    rgba(37,99,235,0.16);
+  --blue-fill:      rgba(37,99,235,0.18);
+  --blue-line:      rgba(37,99,235,0.28);
+  --green-tint:     rgba(22,163,74,0.10);
+  --green-tint-soft:rgba(22,163,74,0.06);
+  --green-line:     rgba(22,163,74,0.25);
+  --green-line-2:   rgba(22,163,74,0.35);
+  --amber-tint:     rgba(217,119,6,0.12);
+  --amber-line:     rgba(217,119,6,0.32);
+  --red-tint:       rgba(220,38,38,0.09);
+  --red-line:       rgba(220,38,38,0.28);
+  --purple-tint:    rgba(124,58,237,0.09);
+  --purple-line:    rgba(124,58,237,0.24);
+  --indigo-tint:    rgba(79,70,229,0.08);
+  --indigo-tint-2:  rgba(79,70,229,0.14);
+
+  /* Status card backgrounds */
+  --status-blue-bg:    rgba(37,99,235,0.10);
+  --status-amber-bg:   rgba(217,119,6,0.12);
+  --status-green-bg:   rgba(5,150,105,0.12);
+  --status-purple-bg:  rgba(124,58,237,0.10);
+  --status-neutral-bg: rgba(15,23,42,0.06);
+
+  /* Form controls */
+  --input-bg:       #ffffff;
+  --input-border:   #cbd5e1;
+
+  --nav-badge-text: #0f172a;
 }
 
 /* ── Reset globals.css body constraints for dashboard ── */
@@ -42,7 +192,7 @@ body:has(.dash-app) {
 .sidebar {
   width: 240px;
   flex-shrink: 0;
-  background: #0d1424;
+  background: var(--surface-2);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -85,12 +235,12 @@ body:has(.dash-app) {
   text-align: left;
   transition: all 0.15s;
 }
-.nav-item:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+.nav-item:hover { background: var(--overlay-2); color: var(--text); }
 
 .nav-active {
-  background: rgba(59,130,246,0.12) !important;
+  background: var(--blue-tint) !important;
   color: var(--text) !important;
-  border: 1px solid rgba(59,130,246,0.2);
+  border: 1px solid var(--blue-line);
 }
 
 .nav-icon  { font-size: 1.1rem; flex-shrink: 0; }
@@ -100,14 +250,14 @@ body:has(.dash-app) {
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 20px;
-  background: rgba(255,255,255,0.07);
+  background: var(--overlay-2);
   color: var(--muted);
   min-width: 24px;
   text-align: center;
 }
 .nav-active .nav-badge {
-  background: rgba(59,130,246,0.3);
-  color: #93c5fd;
+  background: var(--blue-fill);
+  color: var(--nav-badge-text);
 }
 
 .sidebar-footer {
@@ -120,19 +270,30 @@ body:has(.dash-app) {
 .refresh-time { font-size: 0.7rem; color: var(--muted); text-align: center; }
 .btn-refresh {
   padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
-  background: rgba(255,255,255,0.06); color: var(--text);
+  background: var(--overlay-2); color: var(--text);
   border: 1px solid var(--border); cursor: pointer; transition: all 0.15s;
   font-family: 'Inter', sans-serif;
 }
-.btn-refresh:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+.btn-refresh:hover:not(:disabled) { background: var(--overlay-3); }
 .btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-office {
   padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
-  background: rgba(59,130,246,0.12); color: #93c5fd;
-  border: 1px solid rgba(59,130,246,0.25); text-decoration: none;
+  background: var(--blue-tint); color: var(--blue-text);
+  border: 1px solid var(--blue-line); text-decoration: none;
   transition: all 0.15s; text-align: center; display: block;
 }
-.btn-office:hover { background: rgba(59,130,246,0.22); }
+.btn-office:hover { background: var(--blue-tint-2); }
+
+/* ── Theme toggle ───────────────────────────────────── */
+.btn-theme {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
+  background: var(--overlay-1); color: var(--muted);
+  border: 1px solid var(--border); cursor: pointer; transition: all 0.15s;
+  font-family: 'Inter', sans-serif;
+}
+.btn-theme:hover { background: var(--overlay-3); color: var(--text); }
+.btn-theme .theme-icon { font-size: 0.95rem; line-height: 1; }
 
 /* ── Main Area ──────────────────────────────────────── */
 .main-area {
@@ -149,7 +310,7 @@ body:has(.dash-app) {
 }
 .big-spinner {
   width: 48px; height: 48px;
-  border: 3px solid rgba(59,130,246,0.2); border-top-color: var(--blue);
+  border: 3px solid var(--blue-tint-2); border-top-color: var(--blue);
   border-radius: 50%; animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -200,8 +361,8 @@ body:has(.dash-app) {
 
 /* ── Error Banner ───────────────────────────────────── */
 .err-banner {
-  background: rgba(248,113,113,0.12); color: var(--red);
-  border: 1px solid rgba(248,113,113,0.25);
+  background: var(--red-tint); color: var(--red);
+  border: 1px solid var(--red-line);
   padding: 5px 10px; border-radius: 8px; font-size: 0.75rem;
   text-align: center;
 }
@@ -212,9 +373,10 @@ body:has(.dash-app) {
   padding: 3px 10px; border-radius: 20px;
   font-size: 0.72rem; font-weight: 600; white-space: nowrap;
 }
-.pill-blue   { background: rgba(59,130,246,0.14);  color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); }
-.pill-green  { background: rgba(34,197,94,0.12);   color: #86efac; border: 1px solid rgba(34,197,94,0.2); }
-.pill-gray   { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid var(--border); }
+.pill-blue   { background: var(--blue-tint);   color: var(--blue-text);  border: 1px solid var(--blue-line); }
+.pill-green  { background: var(--green-tint);  color: var(--green-text); border: 1px solid var(--green-line); }
+.pill-gray   { background: var(--overlay-2);   color: var(--muted);      border: 1px solid var(--border); }
+.pill-amber  { background: var(--amber-tint);  color: var(--amber-text); border: 1px solid var(--amber-line); }
 
 /* ── Email List ─────────────────────────────────────── */
 .email-list { display: flex; flex-direction: column; gap: 10px; }
@@ -227,15 +389,15 @@ body:has(.dash-app) {
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
-.ecard:hover { border-color: rgba(255,255,255,0.16); background: #151f2e; }
-.ecard-open  { border-color: rgba(59,130,246,0.3); background: #111d30; }
+.ecard:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.ecard-open  { border-color: var(--blue-line); background: var(--surface-active); }
 
 .ecard-top {
   display: flex; align-items: center; gap: 12px; margin-bottom: 10px;
 }
 .ecard-avatar {
   width: 40px; height: 40px; border-radius: 50%;
-  background: rgba(99,102,241,0.2); color: #a5b4fc;
+  background: var(--indigo-tint-2); color: var(--indigo-text);
   font-size: 1rem; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
@@ -246,16 +408,16 @@ body:has(.dash-app) {
 .ecard-right  { flex-shrink: 0; }
 
 .ecard-subject {
-  font-size: 0.9rem; font-weight: 500; color: #cbd5e1;
+  font-size: 0.9rem; font-weight: 500; color: var(--text-soft);
   padding-left: 52px;
 }
 
 .ecard-body { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .ecard-pre {
   font-family: 'Inter', sans-serif;
-  font-size: 0.82rem; color: #94a3b8;
+  font-size: 0.82rem; color: var(--muted-soft);
   white-space: pre-wrap; line-height: 1.65;
-  background: rgba(0,0,0,0.25); border-radius: 10px;
+  background: var(--sunken); border-radius: 10px;
   padding: 14px 16px;
 }
 
@@ -275,14 +437,14 @@ body:has(.dash-app) {
   display: flex; flex-direction: column; gap: 10px;
   transition: box-shadow 0.15s;
 }
-.scard:hover { box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
+.scard:hover { box-shadow: 0 4px 24px var(--shadow); }
 
 .scard-hdr {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
 }
 .scard-ref {
   font-size: 0.72rem; font-family: monospace;
-  color: #818cf8; background: rgba(99,102,241,0.1);
+  color: var(--indigo); background: var(--indigo-tint);
   padding: 2px 8px; border-radius: 6px;
 }
 .scard-status-pill {
@@ -300,7 +462,7 @@ body:has(.dash-app) {
 .scard-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {
   font-size: 0.73rem; padding: 4px 10px; border-radius: 8px;
-  background: rgba(255,255,255,0.06); color: #94a3b8;
+  background: var(--overlay-2); color: var(--muted-soft);
   border: 1px solid var(--border);
 }
 
@@ -314,8 +476,8 @@ body:has(.dash-app) {
 .scard-agents { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .agent-pill {
   font-size: 0.72rem; padding: 3px 10px; border-radius: 20px;
-  background: rgba(167,139,250,0.1); color: var(--purple);
-  border: 1px solid rgba(167,139,250,0.2);
+  background: var(--purple-tint); color: var(--purple);
+  border: 1px solid var(--purple-line);
 }
 
 .scard-status-desc { font-size: 0.77rem; color: var(--dim); }
@@ -325,25 +487,25 @@ body:has(.dash-app) {
   margin-top: 4px;
   width: 100%; padding: 9px;
   border-radius: 10px; border: 1px solid var(--border);
-  background: rgba(255,255,255,0.04); color: #64748b;
+  background: var(--overlay-1); color: var(--muted);
   font-size: 0.8rem; font-weight: 600; cursor: pointer;
   font-family: 'Inter', sans-serif;
   transition: all 0.15s;
 }
-.scard-quotes-btn:hover { background: rgba(59,130,246,0.1); color: #93c5fd; border-color: rgba(59,130,246,0.25); }
+.scard-quotes-btn:hover { background: var(--blue-tint); color: var(--blue-text); border-color: var(--blue-line); }
 
 /* ── Quotes panel ───────────────────────────────────── */
 .scard-quotes { margin-top: 4px; }
 .q-loading { font-size: 0.8rem; color: var(--muted); padding: 12px; text-align: center; }
-.q-empty   { font-size: 0.8rem; color: var(--dim); padding: 16px; text-align: center; font-style: italic; background: rgba(0,0,0,0.15); border-radius: 10px; }
+.q-empty   { font-size: 0.8rem; color: var(--dim); padding: 16px; text-align: center; font-style: italic; background: var(--sunken-soft); border-radius: 10px; }
 .q-list { display: flex; flex-direction: column; gap: 8px; }
 
 .q-card {
-  background: rgba(0,0,0,0.2);
+  background: var(--sunken-soft);
   border: 1px solid var(--border);
   border-radius: 12px; padding: 14px 16px;
 }
-.q-selected { border-color: rgba(34,197,94,0.3); background: rgba(34,197,94,0.05); }
+.q-selected { border-color: var(--green-line-2); background: var(--green-tint-soft); }
 
 .q-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .q-agent  { font-size: 0.85rem; font-weight: 700; }
@@ -355,7 +517,7 @@ body:has(.dash-app) {
 }
 .q-label-tag {
   font-size: 0.68rem; font-weight: 600; padding: 2px 8px; border-radius: 6px;
-  background: rgba(255,255,255,0.08); color: var(--muted);
+  background: var(--overlay-2); color: var(--muted);
 }
 
 .q-meta {
@@ -386,4 +548,5 @@ body:has(.dash-app) {
   .nav-badge { display: none; }
   .sum-val { font-size: 1.4rem; }
   .sum-item { padding: 10px 14px; }
+  .btn-theme .theme-label { display: none; }
 }

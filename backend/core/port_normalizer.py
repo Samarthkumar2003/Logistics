@@ -651,7 +651,8 @@ _ALIASES: dict[str, str] = {
     "abv": "Abuja, Nigeria",
     "accra": "Accra, Ghana",
     "acc": "Accra, Ghana",
-    "tema": "Accra, Ghana",
+    # Tema is Ghana's main seaport — a distinct city, NOT Accra
+    "tema": "Tema, Ghana",
     "abidjan": "Abidjan, Ivory Coast",
     "abj": "Abidjan, Ivory Coast",
     "dakar": "Dakar, Senegal",

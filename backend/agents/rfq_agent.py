@@ -1,10 +1,19 @@
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from typing import List
+from typing import List, Optional
 
 load_dotenv()
-client = OpenAI()
+
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    """Lazy singleton — credential failures surface per-request, not at import."""
+    global _client
+    if _client is None:
+        _client = OpenAI()
+    return _client
 
 
 class DraftEmail(BaseModel):
@@ -25,9 +34,10 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
 
     agents_str = ", ".join(agent_names)
 
-    origin = shipment_data.get("origin", "Unknown")
-    destination = shipment_data.get("destination", "Unknown")
-    mode = shipment_data.get("mode", "Unknown")
+    # .get(key, default) still returns None when the key holds None — use `or`
+    origin = shipment_data.get("origin") or "Unknown"
+    destination = shipment_data.get("destination") or "Unknown"
+    mode = shipment_data.get("mode") or "sea_freight"
 
     system_prompt = (
         "You are the RFQ (Request for Quotation) Agent for a logistics company. "
@@ -47,19 +57,24 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
             entry += f" [historical transit: {a['historical_transit_days']} days]"
         agents_context.append(entry)
 
+    weight = shipment_data.get("weight_kg")
+    size = shipment_data.get("size", "")
+    commodity = shipment_data.get("commodity") or ""
     user_prompt = (
         f"SHIPMENT DETAILS:\n"
         f"Reference: {reference}\n"
         f"Origin: {origin}\n"
         f"Destination: {destination}\n"
         f"Mode: {mode}\n"
-        f"Weight: {shipment_data.get('weight_kg', 'Unknown')} kg\n"
-        f"Commodity: {shipment_data.get('commodity', 'Unknown')}\n\n"
+        + (f"Container/Size: {size}\n" if size else "")
+        + (f"Weight: {weight} kg\n" if weight is not None else "")
+        + (f"Commodity: {commodity}\n" if commodity else "")
+        + "\n"
         f"VENDORS TO DRAFT FOR (context only, do NOT reveal historical rates):\n"
         + "\n".join(agents_context)
     )
 
-    completion = client.beta.chat.completions.parse(
+    completion = _get_client().beta.chat.completions.parse(
         model="gpt-4o",
         messages=[
             {"role": "system", "content": system_prompt},

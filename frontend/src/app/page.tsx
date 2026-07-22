@@ -20,7 +20,14 @@ const COLORS: Record<string, { hair: string; shirt: string; pants: string; skin:
 };
 
 
-interface InboxEmail { id: string; sender: string; subject: string; body: string; label?: string; label_confidence?: number; label_method?: string; }
+interface InboxEmail { id: string; sender: string; subject: string; body: string; label?: string; label_confidence?: number; label_method?: string; received_at?: string; }
+
+function formatReceived(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
 interface ShipmentDetails { origin: string; destination: string; weight_kg: number; commodity: string; mode: string; }
 interface HistoryMatch { commodity: string; agent_used: string; rate_paid: number; transit_time_days: number; similarity: number; }
 interface DraftEmail { vendor_name: string; subject: string; body: string; vendor_email?: string; }
@@ -445,6 +452,23 @@ export default function Office() {
     loadInbox(true);
   }
 
+  async function openSendRequest(email: InboxEmail) {
+    // Load full body on demand (inbox list ships body: '')
+    let body = email.body;
+    if (!body) {
+      try {
+        const res = await fetch(`${API_BASE}/email-body/${email.id}`);
+        if (res.ok) body = (await res.json()).body || '';
+      } catch { /* proceed with empty body — form stays blank */ }
+    }
+    try {
+      sessionStorage.setItem('sendRequestEmail', JSON.stringify({
+        id: email.id, sender: email.sender, subject: email.subject, body,
+      }));
+    } catch { /* sessionStorage unavailable — form opens blank */ }
+    window.location.assign('/send-request');
+  }
+
   async function handleSelectEmail(email: InboxEmail) {
     setSelectedEmail(email);
     setStatus('processing');
@@ -822,14 +846,34 @@ export default function Office() {
                       <option value="general">General</option>
                     </select>
                   </div>
-                  <div style={{ cursor: 'pointer' }} onClick={() => handleSelectEmail(email)}>
-                    <div className="detail-label" style={{ fontSize: 11 }}>{email.sender}</div>
+                  <div style={{ cursor: 'pointer' }} onClick={() => email.label === 'customer_requirement' ? openSendRequest(email) : handleSelectEmail(email)}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                      <div className="detail-label" style={{ fontSize: 11, flex: 1, minWidth: 0 }}>{email.sender}</div>
+                      {email.received_at && (
+                        <span style={{ fontSize: 10, color: '#475569', whiteSpace: 'nowrap' }}>
+                          🕐 {formatReceived(email.received_at)}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ color: '#e2e8f0', fontSize: 13, margin: '4px 0' }}>{email.subject}</div>
                     <div style={{ color: '#64748b', fontSize: 11 }}>{email.body.substring(0, 80)}...</div>
-                    <div style={{ marginTop: 8 }}>
-                      <button className="approve-btn" style={{ fontSize: 11, padding: '4px 10px', marginTop: 0 }}>
-                        Process this email
-                      </button>
+                    <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+                      {email.label === 'customer_requirement' ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); openSendRequest(email); }}
+                          style={{
+                            fontSize: 11, padding: '4px 10px', fontWeight: 600,
+                            background: '#3b82f6', color: 'white', border: '1px solid #3b82f6',
+                            borderRadius: 5, cursor: 'pointer', marginTop: 0,
+                          }}
+                        >
+                          ✉️ Send RFQs
+                        </button>
+                      ) : (
+                        <button className="approve-btn" style={{ fontSize: 11, padding: '4px 10px', marginTop: 0 }}>
+                          Process this email
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>

@@ -2,8 +2,9 @@ import logging
 import os
 import socket
 import uuid
+from contextlib import asynccontextmanager
 from datetime import datetime
-from typing import List
+from typing import List, Optional
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from dotenv import load_dotenv
@@ -22,7 +23,7 @@ from backend.connectors.email_sender import send_rfq_email, send_rfq_emails_batc
 from backend.agents.quotation_agent import parse_quotation_email
 from backend.classifier.price_predictor import predict_price, assess_quotation, PricePrediction
 from backend.agents.history_agent import find_similar_shipments
-from backend.classifier.email_classifier import classify_email, classify_emails_batch, submit_feedback
+from backend.classifier.email_classifier import classify_email, submit_feedback
 from backend.classifier.classification_cache import classify_with_cache, update_label as cache_update_label
 from backend.automation.automation import run_scan, get_status as automation_get_status, set_enabled as automation_set_enabled
 from backend.core.paths import PROJECT_ROOT
@@ -89,15 +90,75 @@ def _run_scan_job():
     except Exception as e:
         logger.error("Scheduled scan error: %s", e)
 
-import threading as _t
-_t.Thread(target=_warmup, daemon=True).start()
 
-_scheduler = BackgroundScheduler(timezone="UTC")
-_scheduler.add_job(_run_scan_job, "interval", minutes=5, id="inbox_scan", replace_existing=True)
-_scheduler.start()
-logger.info("Automation scheduler started — scanning every 5 minutes")
+def _run_ingest_job():
+    try:
+        from backend.connectors.email_store import ingest_new_emails
+        stats = ingest_new_emails()
+        logger.info("Scheduled ingest done: %s", stats)
+    except Exception as e:
+        logger.error("Scheduled ingest error: %s", e)
 
-app = FastAPI(title="Logistics Copilot API")
+
+def _run_backfill():
+    try:
+        from backend.connectors.email_store import backfill_classifications
+        stats = backfill_classifications()
+        logger.info("Backfill done: %s", stats)
+    except Exception as e:
+        logger.error("Backfill error: %s", e)
+
+
+def _run_retry_pending():
+    try:
+        from backend.connectors.email_store import retry_pending_classifications
+        stats = retry_pending_classifications()
+        if stats.get("classified"):
+            logger.info("Retry queue: reclassified %d pending email(s)", stats["classified"])
+    except Exception as e:
+        logger.error("Retry queue error: %s", e)
+
+
+def _run_gap_audit():
+    try:
+        from backend.connectors.email_store import audit_sync_gaps
+        audit_sync_gaps(days=14)  # logs a WARNING listing any days Gmail has but we don't
+    except Exception as e:
+        logger.error("Sync-gap audit error: %s", e)
+
+
+# Scheduler ownership: started in the lifespan handler (NOT at import) so
+# --reload and multi-worker deployments don't each spawn one. When scaling
+# out, set RUN_SCHEDULER=0 on all but one instance.
+RUN_SCHEDULER = os.environ.get("RUN_SCHEDULER", "1").strip() == "1"
+
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    import threading as _t
+    scheduler = None
+    if RUN_SCHEDULER:
+        _t.Thread(target=_warmup, daemon=True).start()
+        _t.Thread(target=_run_ingest_job, daemon=True).start()  # ingest on startup
+        _t.Thread(target=_run_backfill, daemon=True).start()    # classify existing unclassified emails
+        scheduler = BackgroundScheduler(timezone="UTC")
+        scheduler.add_job(_run_scan_job, "interval", minutes=5, id="inbox_scan", replace_existing=True)
+        scheduler.add_job(_run_ingest_job, "interval", minutes=5, id="email_ingest", replace_existing=True)
+        scheduler.add_job(_run_gap_audit, "interval", hours=24, id="sync_gap_audit", replace_existing=True)
+        # Retry queue for failed classifications — self-heals once the LLM
+        # provider recovers (quota restored / outage over).
+        scheduler.add_job(_run_retry_pending, "interval", minutes=15,
+                          id="retry_pending_classifications", replace_existing=True)
+        scheduler.start()
+        logger.info("Automation scheduler started — scanning every 5 minutes")
+    else:
+        logger.info("RUN_SCHEDULER=0 — scheduler not started in this process")
+    yield
+    if scheduler is not None:
+        scheduler.shutdown(wait=False)
+
+
+app = FastAPI(title="Logistics Copilot API", lifespan=_lifespan)
 
 
 @app.exception_handler(AppException)
@@ -139,21 +200,10 @@ class EmailInput(BaseModel):
     body: str
 
 
-class InboxEmail(BaseModel):
-    id: str
-    sender: str
-    subject: str
-    body: str
-
 
 class ApproveRequest(BaseModel):
     selected_agent: str
 
-
-class ClassifyRequest(BaseModel):
-    subject: str = ""
-    body: str
-    sender: str = ""
 
 
 class FeedbackRequest(BaseModel):
@@ -172,42 +222,62 @@ class FeedbackRequest(BaseModel):
 
 @app.get("/fetch-inbox")
 def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
+    """Read emails from the Supabase `emails` table (populated by the ingest job).
+    Labels come from `email_classifications` (feedback overrides have priority)
+    with fallback to the `classification` column written at ingest time.
+    No Gmail API call is made here — ordering and pagination are stable."""
     try:
-        if search:
-            from backend.connectors.email_connector import fetch_emails_by_subject
-            raw_emails = fetch_emails_by_subject(search, limit=limit)
-            # fetch_emails_by_subject returns a plain list
-            emails_list = raw_emails if isinstance(raw_emails, list) else raw_emails
-            return {
-                "emails": [
-                    {"id": e["id"], "sender": e["from"], "subject": e["subject"], "body": e["body"]}
-                    for e in emails_list
-                ],
-                "total": len(emails_list),
-                "has_more": False,
-            }
-        result = fetch_latest_emails(limit=limit, offset=offset)
-        emails_list = result["emails"]
-        total = result["total"]
-        # Cache-aware classification — LLM is called only for emails not yet
-        # classified; refreshes read labels from Supabase. Snippet is the body
-        # proxy here (metadata-only fetch).
-        label_map = classify_with_cache(
-            [{"id": e["id"], "subject": e["subject"],
-              "body": e.get("snippet", "") or e.get("body", ""),
-              "sender": e["from"]}
-             for e in emails_list],
+        query = (
+            supabase.table("emails")
+            .select(
+                "provider_msg_id, sender, subject, received_at, classification, classification_status",
+                count="exact",
+            )
+            .order("received_at", desc=True)
         )
+        if search:
+            query = query.ilike("subject", f"%{search}%")
+        query = query.range(offset, offset + limit - 1)
+        result = query.execute()
+        emails_list = result.data or []
+        total = result.count or 0
+
+        # Pull any human-corrected labels from the classification cache.
+        provider_ids = [e["provider_msg_id"] for e in emails_list if e.get("provider_msg_id")]
+        label_map: dict[str, dict] = {}
+        if provider_ids:
+            cache_rows = (
+                supabase.table("email_classifications")
+                .select("email_id, label, confidence, method")
+                .in_("email_id", provider_ids)
+                .execute()
+                .data or []
+            )
+            label_map = {r["email_id"]: r for r in cache_rows}
+
+        def _label(e: dict) -> str:
+            """Cached label wins. Otherwise, if classification never succeeded
+            (quota/API failure) report 'pending' rather than the 'general'
+            fallback — an unclassified RFQ must not look like a real verdict."""
+            cached = label_map.get(e["provider_msg_id"], {}).get("label")
+            if cached:
+                return cached
+            if e.get("classification_status") == "pending":
+                return "pending"
+            return e.get("classification") or "general"
+
         return {
             "emails": [
                 {
-                    "id": e["id"],
-                    "sender": e["from"],
+                    "id": e["provider_msg_id"],
+                    "sender": e["sender"],
                     "subject": e["subject"],
-                    "body": e.get("snippet", ""),
-                    "label": label_map.get(e["id"], {}).get("label", "general"),
-                    "label_confidence": label_map.get(e["id"], {}).get("confidence", 0.0),
-                    "label_method": label_map.get(e["id"], {}).get("method", ""),
+                    "body": "",  # loaded on-demand via GET /email-body/<id>
+                    "label": _label(e),
+                    "label_pending": _label(e) == "pending",
+                    "label_confidence": label_map.get(e["provider_msg_id"], {}).get("confidence", 0.0),
+                    "label_method": label_map.get(e["provider_msg_id"], {}).get("method", ""),
+                    "received_at": e.get("received_at"),
                 }
                 for e in emails_list
             ],
@@ -220,13 +290,67 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
 
 @app.get("/email-body/{message_id}")
 def get_email_body(message_id: str):
-    """Fetch full body of a single email on-demand (when user expands the email card)."""
+    """Return full body from Supabase (stored at ingest). Falls back to Gmail API if not found."""
     try:
+        rows = (
+            supabase.table("emails")
+            .select("body")
+            .eq("provider_msg_id", message_id)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        if rows and rows[0].get("body"):
+            return {"body": rows[0]["body"]}
         from backend.connectors.gmail_connector import fetch_full_message
         msg = fetch_full_message(message_id)
         return {"body": msg["body"]}
     except Exception as e:
         raise AppException(status_code=500, detail=f"Failed to fetch email body: {e}")
+
+
+@app.get("/email-attachments/{message_id}")
+def get_email_attachments(message_id: str):
+    """Return attachment metadata + signed download URLs for one email."""
+    try:
+        email_rows = (
+            supabase.table("emails")
+            .select("id")
+            .eq("provider_msg_id", message_id)
+            .limit(1)
+            .execute()
+            .data or []
+        )
+        if not email_rows:
+            return {"attachments": []}
+
+        att_rows = (
+            supabase.table("attachments")
+            .select("id, file_name, mime_type, size_bytes, storage_path")
+            .eq("email_id", email_rows[0]["id"])
+            .execute()
+            .data or []
+        )
+
+        result = []
+        for att in att_rows:
+            try:
+                signed = supabase.storage.from_(
+                    os.environ.get("ATTACHMENT_BUCKET", "rate-card-attachments")
+                ).create_signed_url(att["storage_path"], 300)  # 5-min expiry
+                url = signed.get("signedURL") or signed.get("signedUrl") or ""
+            except Exception:
+                url = ""
+            result.append({
+                "id": att["id"],
+                "file_name": att["file_name"],
+                "mime_type": att["mime_type"],
+                "size_bytes": att["size_bytes"],
+                "url": url,
+            })
+        return {"attachments": result}
+    except Exception as e:
+        raise AppException(status_code=500, detail=f"Failed to fetch attachments: {e}")
 
 
 @app.post("/process-email")
@@ -241,6 +365,14 @@ def process_email(payload: EmailInput):
         shipment: ShipmentDetails = run_intake_agent(full_content)
     except Exception as e:
         raise AppException(status_code=422, detail=f"Intake agent failed: {e}")
+
+    # All extraction fields are optional, but this endpoint auto-sends RFQs —
+    # a route is the minimum needed to draft one.
+    if not shipment.origin or not shipment.destination:
+        raise AppException(
+            status_code=422,
+            detail="Email does not state both origin and destination — use the Send Request dashboard to fill them in manually",
+        )
 
     # 2. Look up forwarding agents
     try:
@@ -315,7 +447,7 @@ def process_email(payload: EmailInput):
         "shipment_origin": shipment.origin,
         "shipment_destination": shipment.destination,
         "shipment_mode": shipment.mode,
-        "shipment_weight_kg": float(shipment.weight_kg),
+        "shipment_weight_kg": float(shipment.weight_kg) if shipment.weight_kg is not None else None,
         "shipment_commodity": shipment.commodity,
         "status": "rfqs_sent",
         "agents_contacted": agents_contacted_names,
@@ -583,57 +715,6 @@ def list_quotations(reference: str):
         raise AppException(status_code=500, detail=f"Failed to list quotations: {e}")
 
 
-@app.get("/jobs/{reference}/prediction")
-def get_prediction(reference: str):
-    """Get an AI price prediction for this job based on historical shipments."""
-
-    # Load the job to get shipment details
-    try:
-        job_result = (
-            supabase.table("rfq_jobs")
-            .select("*")
-            .eq("reference", reference)
-            .execute()
-        )
-    except Exception as e:
-        raise AppException(status_code=500, detail=f"Failed to fetch job: {e}")
-
-    if not job_result.data:
-        raise AppException(status_code=404, detail=f"Job {reference} not found")
-
-    job = job_result.data[0]
-    shipment = {
-        "origin": job.get("shipment_origin", ""),
-        "destination": job.get("shipment_destination", ""),
-        "mode": job.get("shipment_mode", ""),
-        "weight_kg": job.get("shipment_weight_kg", 0),
-        "commodity": job.get("shipment_commodity", ""),
-    }
-
-    # Find similar historical shipments
-    try:
-        history = find_similar_shipments(
-            origin=shipment.get("origin", ""),
-            destination=shipment.get("destination", ""),
-            mode=shipment.get("mode", ""),
-            commodity_desc=shipment.get("commodity", ""),
-        )
-    except Exception as e:
-        logger.warning("History lookup failed: %s", e)
-        history = []
-
-    # Run price prediction
-    try:
-        prediction: PricePrediction = predict_price(shipment, history)
-    except Exception as e:
-        raise AppException(status_code=500, detail=f"Price prediction failed: {e}")
-
-    return {
-        "reference": reference,
-        "prediction": prediction.model_dump() if hasattr(prediction, "model_dump") else prediction,
-        "history_matches_used": len(history),
-    }
-
 
 @app.post("/jobs/{reference}/approve")
 def approve_quotation(reference: str, payload: ApproveRequest):
@@ -737,52 +818,6 @@ def approve_quotation(reference: str, payload: ApproveRequest):
     }
 
 
-@app.post("/classify-email")
-def classify_email_endpoint(payload: ClassifyRequest):
-    """Classify a single email with one LLM call through the active provider (LLM_PROVIDER)."""
-    try:
-        result = classify_email(
-            subject=payload.subject,
-            body=payload.body,
-            sender=payload.sender,
-        )
-        return {
-            "label": result.label,
-            "confidence": result.confidence,
-            "method": result.method,
-            "details": result.details,
-        }
-    except Exception as e:
-        raise AppException(status_code=500, detail=f"Classification failed: {e}")
-
-
-@app.post("/classify-inbox")
-def classify_inbox_endpoint(limit: int = 20, offset: int = 0):
-    """Fetch inbox emails and classify each one. Returns emails with labels."""
-    try:
-        result = fetch_latest_emails(limit=limit, offset=offset)
-        emails = result.get("emails", [])
-        total = result.get("total", 0)
-    except Exception as e:
-        raise AppException(status_code=500, detail=f"Failed to fetch inbox: {e}")
-
-    label_map = classify_with_cache([
-        {"id": e["id"], "subject": e["subject"], "body": e["body"], "sender": e["from"]}
-        for e in emails
-    ])
-    classified = [
-        {"id": e["id"], "subject": e["subject"],
-         "label": label_map.get(e["id"], {}).get("label", "general"),
-         "confidence": label_map.get(e["id"], {}).get("confidence", 0.0),
-         "method": label_map.get(e["id"], {}).get("method", "")}
-        for e in emails
-    ]
-    return {
-        "emails": classified,
-        "total": total,
-        "has_more": (offset + limit) < total,
-    }
-
 
 @app.post("/feedback")
 def feedback_endpoint(payload: FeedbackRequest):
@@ -810,36 +845,6 @@ def feedback_endpoint(payload: FeedbackRequest):
         raise AppException(status_code=500, detail=f"Failed to submit feedback: {e}")
 
 
-@app.get("/classifier-status")
-def classifier_status():
-    """Return current classifier configuration — active LLM provider + model."""
-    from backend.classifier.llm_provider import available_providers
-
-    active = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
-    model_by_provider = {
-        "openai": os.environ.get("OPENAI_MODEL", "gpt-4o-mini"),
-        "gemini": os.environ.get("GEMINI_MODEL", "gemini-2.5-flash-lite"),
-    }
-
-    try:
-        feedback_result = supabase.table("classification_feedback").select("id", count="exact").limit(1).execute()
-        feedback_count = feedback_result.count or 0
-    except Exception:
-        feedback_count = 0
-
-    return {
-        "classifier": "llm",
-        "active_provider": active,
-        "active_model": model_by_provider.get(active),
-        "available_providers": available_providers(),
-        "feedback_corrections": feedback_count,
-    }
-
-
-@app.get("/health")
-def health():
-    return {"status": "ok"}
-
 
 # ---------------------------------------------------------------------------
 # Automation endpoints
@@ -852,7 +857,7 @@ class AutomationToggle(BaseModel):
 @app.get("/automation/status")
 def automation_status():
     try:
-        return automation_get_status()
+        return automation_get_status(supabase)
     except Exception as e:
         raise AppException(status_code=500, detail=str(e))
 
@@ -869,7 +874,217 @@ def automation_run_now():
 @app.post("/automation/toggle")
 def automation_toggle(payload: AutomationToggle):
     try:
-        automation_set_enabled(payload.enabled)
+        automation_set_enabled(supabase, payload.enabled)
         return {"enabled": payload.enabled}
     except Exception as e:
         raise AppException(status_code=500, detail=str(e))
+
+
+# ---------------------------------------------------------------------------
+# Send Request dashboard endpoints
+# ---------------------------------------------------------------------------
+
+class SelectedAgent(BaseModel):
+    agent_name: str
+    email: str
+
+
+class SendRFQRequest(BaseModel):
+    origin_port: str
+    destination_port: str
+    size: str = ""
+    commodity: str = ""
+    mode: str = "sea_freight"
+    weight_kg: Optional[float] = None
+    agents: List[SelectedAgent]
+    # Original customer email, stored on the job for traceability
+    customer_sender: str = ""
+    customer_subject: str = ""
+    customer_body: str = ""
+
+
+@app.get("/agents")
+def list_agents():
+    """List all agents from the Supabase `agents` table, grouped by category.
+    Feeds the three multi-select dropdowns on the Send Request dashboard."""
+    try:
+        result = supabase.table("agents").select("*").order("agent_name").execute()
+        agents = result.data or []
+    except Exception as e:
+        raise AppException(status_code=500, detail=f"Failed to fetch agents: {e}")
+
+    grouped: dict[str, list] = {}
+    for a in agents:
+        grouped.setdefault(a.get("category", "OTHER"), []).append(a)
+
+    return {"agents": agents, "by_category": grouped, "total": len(agents)}
+
+
+@app.post("/extract-details")
+def extract_details(payload: EmailInput):
+    """Run the intake agent on a customer email and return the extracted
+    shipment fields WITHOUT sending anything. Used to prefill the Send
+    Request dashboard form."""
+    full_content = f"Subject: {payload.subject}\n\nBody:\n{payload.body}"
+    try:
+        shipment: ShipmentDetails = run_intake_agent(full_content)
+    except Exception as e:
+        raise AppException(status_code=422, detail=f"Extraction failed: {e}")
+    return {"shipment": shipment.model_dump()}
+
+
+class PreviewRFQRequest(BaseModel):
+    origin_port: str
+    destination_port: str
+    size: str = ""
+    commodity: str = ""
+    mode: str = "sea_freight"
+    weight_kg: Optional[float] = None
+    agent: Optional[SelectedAgent] = None
+
+
+@app.post("/preview-rfq")
+def preview_rfq(payload: PreviewRFQRequest):
+    """Generate ONE sample RFQ draft without sending anything. Lets the user
+    see the email an agent would receive before committing to Send."""
+    if not payload.origin_port.strip() or not payload.destination_port.strip():
+        raise AppException(status_code=422, detail="Origin and destination ports are required")
+
+    agent = payload.agent or SelectedAgent(agent_name="Sample Agent", email="agent@example.com")
+    # Real-format reference so the preview matches what actually goes out.
+    reference = f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:4]}"
+
+    shipment_data = {
+        "origin": payload.origin_port.strip(),
+        "destination": payload.destination_port.strip(),
+        "mode": payload.mode,
+        "weight_kg": payload.weight_kg,
+        "commodity": payload.commodity.strip(),
+        "size": payload.size.strip(),
+    }
+
+    try:
+        result = generate_rfq_drafts(
+            shipment_data=shipment_data,
+            agents=[{"agent_name": agent.agent_name, "email": agent.email}],
+            reference=reference,
+        )
+        drafts = result.drafts if hasattr(result, "drafts") else result
+        if not drafts:
+            raise AppException(status_code=500, detail="LLM returned no draft")
+        draft = drafts[0]
+    except AppException:
+        raise
+    except Exception as e:
+        raise AppException(status_code=500, detail=f"Draft generation failed: {e}")
+
+    return {
+        "reference": reference,
+        "vendor_name": draft.vendor_name,
+        "subject": draft.subject,
+        "body": draft.body,
+        "note": "Sample only — each agent gets its own unique reference at send time.",
+    }
+
+
+@app.post("/send-rfq")
+def send_rfq(payload: SendRFQRequest):
+    """Manual RFQ send from the dashboard. Each selected agent gets its OWN
+    unique RFQ reference: one LLM draft, one email, and one rfq_jobs row per
+    agent. Replies can then be matched to a specific agent via the reference
+    in the subject line."""
+    if not payload.agents:
+        raise AppException(status_code=422, detail="Select at least one agent")
+    if not payload.origin_port.strip() or not payload.destination_port.strip():
+        raise AppException(status_code=422, detail="Origin and destination ports are required")
+
+    shipment_data = {
+        "origin": payload.origin_port.strip(),
+        "destination": payload.destination_port.strip(),
+        "mode": payload.mode,
+        "weight_kg": payload.weight_kg,
+        "commodity": payload.commodity.strip(),
+        "size": payload.size.strip(),
+    }
+
+    # 1. Draft one email per agent, each with its own unique reference.
+    #    Drafts run in parallel so latency ≈ one LLM call.
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _draft_for_agent(agent: SelectedAgent) -> dict:
+        reference = f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:4]}"
+        entry = {
+            "reference": reference,
+            "agent_name": agent.agent_name,
+            "email": agent.email,
+            "draft": None,
+            "error": "",
+        }
+        try:
+            result = generate_rfq_drafts(
+                shipment_data=shipment_data,
+                agents=[{"agent_name": agent.agent_name, "email": agent.email}],
+                reference=reference,
+            )
+            drafts = result.drafts if hasattr(result, "drafts") else result
+            if drafts:
+                entry["draft"] = drafts[0]
+            else:
+                entry["error"] = "LLM returned no draft"
+        except Exception as e:
+            entry["error"] = f"draft failed: {e}"
+        return entry
+
+    with ThreadPoolExecutor(max_workers=min(len(payload.agents), 10)) as pool:
+        entries = list(pool.map(_draft_for_agent, payload.agents))
+
+    # 2. Send the successful drafts as a batch
+    drafts_as_dicts = [
+        {
+            "vendor_name": e["draft"].vendor_name,
+            "vendor_email": e["draft"].vendor_email or e["email"],
+            "subject": e["draft"].subject,
+            "body": e["draft"].body,
+        }
+        for e in entries if e["draft"] is not None
+    ]
+    try:
+        send_results = send_rfq_emails_batch(drafts_as_dicts)
+    except Exception as e:
+        logger.error("Batch send failed: %s", e)
+        send_results = [{"vendor_name": d["vendor_name"], "status": f"batch_error: {e}"} for d in drafts_as_dicts]
+
+    send_status = {r.get("vendor_name", ""): r.get("status", "") for r in send_results}
+
+    # 3. Persist one job row per agent (RFQ_ID lives in rfq_jobs.reference)
+    jobs = []
+    for e in entries:
+        status = e["error"] or send_status.get(e["agent_name"], "unknown")
+        if e["draft"] is not None and not e["error"]:
+            job_record = {
+                "reference": e["reference"],
+                "customer_email_sender": payload.customer_sender,
+                "customer_email_subject": payload.customer_subject,
+                "customer_email_body": payload.customer_body,
+                "shipment_origin": shipment_data["origin"],
+                "shipment_destination": shipment_data["destination"],
+                "shipment_mode": payload.mode,
+                "shipment_weight_kg": float(payload.weight_kg) if payload.weight_kg is not None else None,
+                "shipment_commodity": payload.commodity,
+                "shipment_size": payload.size,
+                "status": "rfqs_sent",
+                "agents_contacted": [e["agent_name"]],
+            }
+            try:
+                supabase.table("rfq_jobs").insert(job_record).execute()
+            except Exception as exc:
+                logger.error("Failed to store job %s: %s", e["reference"], exc)
+                status = f"sent but job persist failed: {exc}"
+        jobs.append({
+            "reference": e["reference"],
+            "agent_name": e["agent_name"],
+            "email": e["email"],
+            "status": status,
+        })
+
+    return {"jobs": jobs, "shipment": shipment_data, "total_sent": len(drafts_as_dicts)}

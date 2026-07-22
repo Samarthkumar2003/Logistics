@@ -39,6 +39,7 @@ def get_cached(email_ids: list[str]) -> dict[str, dict]:
             supabase.table(_TABLE)
             .select("email_id, label, confidence, method")
             .in_("email_id", email_ids)
+            .neq("method", "error")
             .execute()
             .data
             or []
@@ -119,6 +120,8 @@ def classify_with_cache(emails: list[dict]) -> dict[str, dict]:
         for c in fresh:
             eid = c["id"]
             cached[eid] = {"label": c["label"], "confidence": c["confidence"], "method": c["method"]}
+            if c["method"] == "error":
+                continue
             src = miss_by_id.get(eid, {})
             store(eid, src.get("subject", ""), src.get("sender", src.get("from", "")),
                   c["label"], c["confidence"], c["method"])

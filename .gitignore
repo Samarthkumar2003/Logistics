@@ -20,6 +20,20 @@ automation_state.json
 reports/
 whatsapp_exports/
 
+# Email dumps and label sets — contain real customer/vendor addresses and
+# message bodies. Never commit: git history is effectively permanent.
+emails_dump.json
+emails_3months.json
+val_set.json
+my_labels.json
+clean_labels.json
+llm_results.json
+gpt4o_eval.json
+perfect_prompt.txt
+
+# Personal documents
+Samarth_Resume.pdf
+
 # Claude
 .claude/scheduled_tasks.lock
 PROJECT_GUIDE.md

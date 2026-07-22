@@ -21,14 +21,28 @@ from backend.core.retry_utils import with_retry
 load_dotenv()
 log = logging.getLogger(__name__)
 
-url = os.environ.get("SUPABASE_URL")
-key = os.environ.get("SUPABASE_KEY")
+# Lazy singletons — credential failures surface per-request, not at import
+# (an import-time raise here would take down the whole API).
+_supabase: Client | None = None
+_openai: OpenAI | None = None
 
-if not url or not key:
-    raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
 
-supabase: Client = create_client(url, key)
-openai_client = OpenAI()
+def _get_supabase() -> Client:
+    global _supabase
+    if _supabase is None:
+        url = os.environ.get("SUPABASE_URL")
+        key = os.environ.get("SUPABASE_KEY")
+        if not url or not key:
+            raise RuntimeError("SUPABASE_URL and SUPABASE_KEY must be set in .env")
+        _supabase = create_client(url, key)
+    return _supabase
+
+
+def _get_openai() -> OpenAI:
+    global _openai
+    if _openai is None:
+        _openai = OpenAI()
+    return _openai
 
 # Weight applied to each search strategy when merging results
 COMMODITY_WEIGHT = 0.4
@@ -37,7 +51,7 @@ FULL_WEIGHT = 0.6
 
 @with_retry(max_attempts=3, base_delay=1.0)
 def _get_embedding(text: str) -> list[float]:
-    response = openai_client.embeddings.create(
+    response = _get_openai().embeddings.create(
         input=text,
         model="text-embedding-3-small",
     )
@@ -118,9 +132,13 @@ def find_similar_shipments(
     Returns:
         List of shipment dicts with a `similarity` field (merged weighted score).
     """
-    # ── Normalize port names before querying ──
-    origin = normalize_port(origin)
-    destination = normalize_port(destination)
+    # ── Normalize inputs before querying ──
+    # All intake fields are optional; substitute neutral stand-ins so the
+    # search still runs. Empty commodity would crash the embedding call.
+    commodity_desc = (commodity_desc or "").strip() or "general cargo"
+    mode = (mode or "").strip() or "sea_freight"
+    origin = normalize_port(origin or "")
+    destination = normalize_port(destination or "")
     log.debug("Normalized: %s → %s", origin, destination)
 
     # ── Generate both query embeddings ──
@@ -134,7 +152,7 @@ def find_similar_shipments(
     # ── Search 1: commodity embedding (with structured filters) ──
     commodity_rows: list[dict] = []
     try:
-        result = supabase.rpc("match_shipments", {
+        result = _get_supabase().rpc("match_shipments", {
             "p_origin": origin,
             "p_destination": destination,
             "p_mode": mode,
@@ -148,7 +166,7 @@ def find_similar_shipments(
     # ── Search 2: full embedding (no structured filters — embedding encodes route) ──
     full_rows: list[dict] = []
     try:
-        result = supabase.rpc("match_shipments_full", {
+        result = _get_supabase().rpc("match_shipments_full", {
             "p_embedding": full_vec,
             "match_count": limit * 2,
         }).execute()

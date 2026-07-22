@@ -15,7 +15,6 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
 
-import requests as _requests
 from dotenv import load_dotenv
 from google.oauth2 import service_account
 from google.auth.transport.requests import AuthorizedSession
@@ -237,30 +236,91 @@ def _map_full_record(msg: dict) -> dict:
     }
 
 
-def fetch_messages_since(after_epoch_s: int | None = None, max_results: int = 500) -> list[dict]:
-    """Incremental fetch: full records for INBOX messages newer than after_epoch_s
-    (Gmail `after:` query, seconds). after_epoch_s=None → most recent `max_results`.
-    Paginates via pageToken. Returns _map_full_record dicts (with attachment metadata)."""
-    params = {"labelIds": "INBOX", "maxResults": min(max_results, 500), "fields": "messages/id,nextPageToken"}
-    if after_epoch_s:
-        params["q"] = f"after:{after_epoch_s}"
+MAX_INCREMENTAL_FETCH = 5000  # safety ceiling for a very stale watermark
 
-    ids: list[str] = []
+
+def iter_message_id_pages(after_epoch_s: int | None = None, page_size: int = 500,
+                          query: str | None = None):
+    """Yield successive pages (lists) of INBOX message ids, newest-first.
+    Pages through everything — the caller decides when to stop (e.g. once a page
+    is entirely already-ingested). `after_epoch_s` sets a lower-bound floor;
+    `query` overrides it with a raw Gmail search string (e.g. an after/before window)."""
+    q = query if query is not None else (f"after:{after_epoch_s}" if after_epoch_s is not None else None)
+    params = {"labelIds": "INBOX", "maxResults": min(page_size, 500),
+              "fields": "messages/id,nextPageToken"}
+    if q:
+        params["q"] = q
     page_token = None
-    while len(ids) < max_results:
+    while True:
         if page_token:
             params["pageToken"] = page_token
+        else:
+            params.pop("pageToken", None)
         result = _gmail_get("messages", params=params)
-        ids.extend(ref["id"] for ref in result.get("messages", []))
+        yield [ref["id"] for ref in result.get("messages", [])]
         page_token = result.get("nextPageToken")
         if not page_token:
             break
 
-    records: list[dict] = []
-    for msg_id in ids[:max_results]:
+
+def count_inbox_messages(after_epoch_s: int | None = None,
+                         before_epoch_s: int | None = None) -> int:
+    """Count INBOX messages in a time window (ids only, full pagination).
+    Used by the sync-gap audit to compare Gmail's truth against the DB."""
+    parts = []
+    if after_epoch_s is not None:
+        parts.append(f"after:{after_epoch_s}")
+    if before_epoch_s is not None:
+        parts.append(f"before:{before_epoch_s}")
+    query = " ".join(parts) or None
+    return sum(len(page) for page in iter_message_id_pages(query=query))
+
+
+def fetch_full_records(ids: list[str]) -> list[dict]:
+    """Fetch full (format=full) records for the given message ids, in parallel.
+    Returns _map_full_record dicts (with attachment metadata); skips ids that error."""
+    def _fetch_one(msg_id: str) -> dict | None:
         try:
             msg = _gmail_get(f"messages/{msg_id}", params={"format": "full"})
-            records.append(_map_full_record(msg))
+            return _map_full_record(msg)
         except Exception as e:
-            logger.warning("Skipping message %s during incremental fetch: %s", msg_id, e)
+            logger.warning("Skipping message %s during fetch: %s", msg_id, e)
+            return None
+
+    records: list[dict] = []
+    with ThreadPoolExecutor(max_workers=20) as pool:
+        futures = {pool.submit(_fetch_one, mid): mid for mid in ids}
+        done = 0
+        for future in as_completed(futures):
+            done += 1
+            result = future.result()
+            if result:
+                records.append(result)
+            if done % 50 == 0:
+                logger.info("Fetched %d/%d full messages", done, len(ids))
     return records
+
+
+def fetch_messages_since(after_epoch_s: int | None = None, max_results: int = 500) -> list[dict]:
+    """Fetch full records for INBOX messages newer than after_epoch_s
+    (Gmail `after:` query, seconds).
+
+    Incremental mode (after_epoch_s set): pages through ALL matching messages.
+    Gmail returns ids newest-first, so keeping only the newest `max_results`
+    silently drops older mail — that is exactly how the Jul 10-19 gap happened.
+    A safety ceiling guards against a runaway backlog from a very stale watermark.
+
+    Initial mode (after_epoch_s=None): returns the most recent `max_results`."""
+    incremental = after_epoch_s is not None
+    soft_cap = MAX_INCREMENTAL_FETCH if incremental else max_results
+    ids: list[str] = []
+    for page in iter_message_id_pages(after_epoch_s):
+        ids.extend(page)
+        if len(ids) >= soft_cap:
+            break
+    if incremental and len(ids) >= MAX_INCREMENTAL_FETCH:
+        logger.warning("Incremental fetch hit safety ceiling %d — watermark may be too "
+                       "old; some older mail could still be beyond this window", MAX_INCREMENTAL_FETCH)
+
+    target = ids if incremental else ids[:max_results]
+    return fetch_full_records(target)

@@ -14,7 +14,16 @@ from typing import Optional
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-client = OpenAI()
+
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    """Lazy singleton — credential failures surface per-request, not at import."""
+    global _client
+    if _client is None:
+        _client = OpenAI()
+    return _client
 
 RFQ_PATTERN = re.compile(r"RFQ-(\d{8}-[a-f0-9]{4})")
 
@@ -60,7 +69,7 @@ def parse_quotation_email(email_body: str, email_subject: str = "") -> list[Quot
     """
     full_content = f"Subject: {email_subject}\n\nBody:\n{email_body}"
 
-    completion = client.beta.chat.completions.parse(
+    completion = _get_client().beta.chat.completions.parse(
         model="gpt-4o-mini",
         messages=[
             {

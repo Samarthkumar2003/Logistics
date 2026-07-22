@@ -4,22 +4,22 @@ email_classifier.py
 Email classifier: a single LLM call through a swappable provider (see
 ``llm_provider.py``). The model is chosen at runtime via the ``LLM_PROVIDER``
 env var — swapping OpenAI for Gemini (or any future provider) needs no code
-change here (Open/Closed Principle).
+change here.
 
 Labels:
   - customer_requirement : Customer asking for a shipment / freight quote
   - quotation_rate_card  : Agent replying with rates / pricing
   - general              : Everything else (newsletters, spam, internal, etc.)
-
-The Qwen embedding + SVM helpers below are retained as tooling — eval and
-ingest scripts import them — but are no longer part of the classification flow.
 """
 
-import os
 import json
 import logging
+import os
+import random
+import re
+import time
 from dataclasses import dataclass
-from typing import Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from dotenv import load_dotenv
 from supabase import create_client
@@ -29,293 +29,103 @@ from backend.classifier.llm_provider import get_provider
 load_dotenv()
 logger = logging.getLogger(__name__)
 
-# ---------------------------------------------------------------------------
-# Clients
-# ---------------------------------------------------------------------------
 supabase = create_client(
     os.environ.get("SUPABASE_URL", ""),
     os.environ.get("SUPABASE_KEY", ""),
 )
 
 
-# ---------------------------------------------------------------------------
-# Result dataclass
-# ---------------------------------------------------------------------------
 @dataclass
 class ClassificationResult:
-    label: str                    # customer_requirement | quotation_rate_card | general
-    confidence: float             # 0.0 - 1.0
-    method: str                   # rule | fine_tuned | mlp | few_shot
-    details: str = ""             # human-readable explanation
+    label: str        # customer_requirement | quotation_rate_card | general
+    confidence: float
+    method: str
+    details: str = ""
 
 
-# ---------------------------------------------------------------------------
-# LLM classification prompt — the asking-vs-providing empirical basis
-# ---------------------------------------------------------------------------
+CLASSIFY_SYSTEM_PROMPT = """\
+You are an email classifier for Bhatia Shipping, a Mumbai-based international freight forwarder.
 
-CLASSIFY_SYSTEM_PROMPT = (
-    "You are an email classifier for a freight-forwarding company. Classify each "
-    "email into exactly one of three labels based on who is asking and who is pricing:\n\n"
-    "- customer_requirement: the sender is REQUESTING a freight quote, rate, or booking. "
-    "They describe a shipment (origin/POL, destination/POD, cargo, weight, container type, "
-    "incoterm, ready date) and want US to provide rates. An email with cargo specs but NO "
-    "prices is customer_requirement. Signals: 'kindly share your best rate', 'request for "
-    "quotation', 'please quote', 'we require', filled POL/POD/cargo fields with empty prices.\n"
-    "- quotation_rate_card: the sender is an agent or carrier PROVIDING rates/prices TO us, "
-    "usually replying to our RFQ. They state the numbers. Signals: 'please find our rates', "
-    "'USD X per container', 'all-in', transit time and validity filled in, RFQ reference in subject.\n"
-    "- general: everything else operational or non-deal — newsletters, spam, tracking updates, "
-    "invoices, internal memos, existing-job threads.\n\n"
-    "Decisive rule: ASKING for a price = customer_requirement; PROVIDING a price = quotation_rate_card.\n\n"
-    'Respond ONLY with JSON: {"label": "<one of the three labels>", "confidence": <0.0-1.0>}'
-)
+CRITICAL RULE: Classify based on the LATEST message ONLY. Ignore everything below "From:", "-----Original Message-----", "> ", or "On [date] wrote:" — that is quoted history. A thread subject may say "Quote Request" but if the latest reply is asking for shipment status, it is general.
 
+════════════════════════════════════════════════════════════
+LABEL: customer_requirement
+════════════════════════════════════════════════════════════
+The sender is asking Bhatia Shipping to provide a freight rate, cost estimate, or quotation for a specific shipment. The sender wants pricing FROM us.
 
-# ---------------------------------------------------------------------------
-# Qwen3-Embedding-0.6B (instruction-aware) → sklearn SVM (RBF) classifier
-# Retained as tooling for eval/ingest scripts — NOT used by classify_email.
-# Trains in-memory at first use from Supabase Qwen vectors (embedding_qwen col).
-# Query side embeds with an instruction prefix encoding our empirical basis;
-# training/document vectors are embedded plain (Qwen asymmetric convention).
-# SVM RBF beat MLP on the full 1112-row set: 0.796 vs 0.761 overall, 0.918 vs
-# 0.853 gated, and rate-card recall 0.69 vs 0.48 (the costliest error class).
-# ---------------------------------------------------------------------------
+✓ INCLUDE when the latest message body contains ANY of:
+  • "Kindly provide / share / quote your best rate / quotation / freight"
+  • "Please quote", "Kindly quote", "awaiting rates", "awaiting quotation"
+  • "Request for quotation / quote / freight / costing / budgetary quote"
+  • "Looking for freight / rates", "need a rate", "require freight"
+  • "Send us below rate" + port pair + cargo details
+  • "Kindly advise [DO / delivery / port / destination] charges" when the primary question is about cost
+  • A cargo description (weight/CBM/container type/commodity) + route (POL/POD) + a cost question
+  • Any language in any language asking for freight pricing (e.g. Chinese 询价 = rate inquiry)
 
-# Confidence gate retained for eval scripts that import it.
-CLF_MIN_CONFIDENCE = 0.70
-MLP_MIN_CONFIDENCE = CLF_MIN_CONFIDENCE  # back-compat alias for eval scripts
+✓ Sender can be a direct shipper OR an intermediary agent / NVOCC forwarding the enquiry to us (e.g. CSS Group, ALS Line, Intertrans, RWC Shipping, Shepherd Shipping, Kryfs, Hemisphere Freight, Paragon Dubai, CMG, Best Co Logistics). Agent-as-customer is still customer_requirement.
 
-# Qwen model + the column holding its 1024-dim vectors
-QWEN_MODEL_NAME = os.environ.get("QWEN_EMBED_MODEL", "Qwen/Qwen3-Embedding-0.6B")
-QWEN_EMBED_COLUMN = "embedding_qwen"
-# Apple MPS mis-sizes buffers for this model (attempts ~29GB alloc) → default CPU.
-# Override with QWEN_DEVICE=mps|cuda once your hardware handles it.
-QWEN_DEVICE = os.environ.get("QWEN_DEVICE", "cpu")
-QWEN_BATCH_SIZE = int(os.environ.get("QWEN_BATCH_SIZE", "16"))
-# fp16 halves memory + ~2x throughput on CUDA. CPU has no fp16 kernels (slower/unsupported),
-# so default on only for cuda. Force with QWEN_FP16=1/0. Vectors stay comparable across
-# devices/dtypes (tiny rounding only), so CPU-stored and GPU-stored embeddings interoperate.
-_fp16_env = os.environ.get("QWEN_FP16")
-QWEN_FP16 = (_fp16_env == "1") if _fp16_env is not None else (QWEN_DEVICE == "cuda")
+✓ Applies to NEW threads AND continuations of ongoing quote negotiations where the customer is still pushing on price, revising cargo details, or requesting a revised rate.
 
-# Instruction query — our empirical basis for classification. Prepended to the
-# QUERY text only (Qwen "Instruct: {task}\nQuery: {text}" convention).
-EMPIRICAL_BASIS = (
-    "Classify a freight-forwarding email into one of three categories based on who is "
-    "asking and who is pricing. "
-    "customer_requirement: the sender is REQUESTING a freight quote, rate, or booking from us. "
-    "They describe a shipment (origin/POL, destination/POD, cargo, weight, container type, "
-    "incoterm, ready date) and want US to provide rates. An email with cargo specs but NO prices "
-    "is customer_requirement. Signals: 'kindly share your best rate', 'request for quotation', "
-    "'please quote', 'we require', filled POL/POD/cargo fields with empty price fields. "
-    "quotation_rate_card: the sender is an agent or carrier PROVIDING rates/prices TO us, usually "
-    "replying to our RFQ. They state the numbers. Signals: 'please find our rates', "
-    "'USD X per container', 'all-in', transit time and validity filled in, RFQ reference in subject. "
-    "general: everything else operational or non-deal — newsletters, spam, tracking updates, "
-    "invoices, internal memos, existing-job threads. "
-    "Decisive rule: ASKING for a price = customer_requirement; PROVIDING a price = quotation_rate_card."
-)
+✗ DO NOT label customer_requirement when the latest message is:
+  • Sharing / attaching documents (BL draft, invoice, packing list, certificates, MM copy, P INV)
+  • Asking for shipment status, vessel ETA/ETD, SOB update, or cargo departure confirmation
+  • Confirming receipt ("well received", "noted", "many thanks", "keep us posted")
+  • Asking "check and revert", sharing booking confirmation, or reporting a problem on an active shipment
+  • Asking for cost of stuffing / container clearance for an EXISTING booking (booking number present → general)
+  • Rate comparison within an existing dispute or unhappy shipper thread
+  • Asking for feedback on rates already provided (not a new rate request)
 
-import json as _json
-import threading as _threading
-import numpy as _np
-from sklearn.svm import SVC as _SVC
-from sklearn.preprocessing import LabelEncoder as _LabelEncoder
+════════════════════════════════════════════════════════════
+LABEL: quotation_rate_card
+════════════════════════════════════════════════════════════
+A shipping line, carrier, or freight agent is PROACTIVELY pushing supply-side pricing to us — rates we can use when quoting our customers.
 
-# Module-level caches — loaded/trained once, reused for every email
-_qwen_encoder = None  # SentenceTransformer, lazily loaded (heavy)
-_qwen_lock = _threading.Lock()       # guards one-time model load
-_qwen_infer_lock = _threading.Lock()  # serializes encode() — torch model not thread-safe
-_clf_model: Optional[_SVC] = None
-_clf_label_encoder: Optional[_LabelEncoder] = None
-_clf_training_count: int = 0
-_clf_lock = _threading.Lock()  # prevent concurrent retraining from parallel classifier threads
+✓ INCLUDE when:
+  • Subject contains: "Rate Sheet [Month Year]", "Special Rates Ex [port]", "Tariff Revision", "Local Charges Effective / Revision", "General Rate Increase", "GRI", "Rate Card", "Rate Update", "Rate Circular", "Peak Season Surcharge", "PSS Announcement", "Revised Freight Rates Effective"
+  • Body contains a rate table (port pairs + USD amounts per 20'/40'/TEU/FEU) with validity dates or "effective from [date]"
+  • Carrier is announcing tariff changes or new surcharges (GRI, PSS, war risk, bunker surcharge revision)
+  • Carrier replies to Bhatia's booking/rate request with confirmed ocean freight rates in the body (e.g. MSC replying "RE: REQUEST FOR BOOKING // RATE" with USD rate table or confirmed freight)
+  • Container leasing or used-container sale offers with pricing (e.g. "Sale Price: USD 1750/40'HC valid till [date]")
+  • Cover-note emails where subject contains "Rate Sheet", "GRI", "PSS", "Special Rates", "Tariff Revision" etc. and body says "please find attached" — rates are in the attachment, not the plain-text body; still quotation_rate_card
 
+✗ DO NOT label quotation_rate_card when:
+  • Carrier confirms a booking WITHOUT providing rates (vessel/slot confirmation, booking copy)
+  • Carrier sends vessel schedule, booking status report, routing guide, or planning confirmation WITHOUT rate data
+  • Bunker surcharge is mentioned only incidentally within a booking confirmation (the primary purpose is operational)
 
-def _get_qwen():
-    """Lazily load the Qwen3 SentenceTransformer once. Heavy (~1.2GB), so cached."""
-    global _qwen_encoder
-    if _qwen_encoder is not None:
-        return _qwen_encoder
-    with _qwen_lock:
-        if _qwen_encoder is not None:
-            return _qwen_encoder
-        from sentence_transformers import SentenceTransformer
-        model_kwargs = {"torch_dtype": "float16"} if QWEN_FP16 else {}
-        logger.info(
-            "Loading Qwen embedding model: %s (device=%s, fp16=%s) ...",
-            QWEN_MODEL_NAME, QWEN_DEVICE, QWEN_FP16,
-        )
-        _qwen_encoder = SentenceTransformer(
-            QWEN_MODEL_NAME, device=QWEN_DEVICE, model_kwargs=model_kwargs,
-        )
-        logger.info("Qwen model loaded.")
-    return _qwen_encoder
+════════════════════════════════════════════════════════════
+LABEL: general
+════════════════════════════════════════════════════════════
+Everything else. DEFAULT label when neither above applies.
 
+Includes:
+  • Operational: BL drafts, SOB notices, pre-alerts, arrival notices, delivery orders, booking confirmations, container load plans, Form 13, customs clearance, vessel schedules
+  • Financial: invoices, debit notes, SOA, payment confirmations, stuffing costs for existing bookings
+  • Documents: scan copies, packing lists, certificates, export declarations, MM copies
+  • Status requests / acknowledgements: "please update status", "keep us posted", "noted / well received", "check and revert"
+  • All senders from @bhatiashipping.com or @bhatiashippinggroup.com (always general)
+  • Company introduction / profile / marketing emails offering logistics services TO us
+  • Thread replies that have pivoted to document exchange or status follow-up, even if the original subject was a quote request
 
-def _is_oom_error(exc: Exception) -> bool:
-    """True for CUDA/MPS out-of-memory errors (across torch versions)."""
-    msg = str(exc).lower()
-    return "out of memory" in msg or "cuda oom" in msg or exc.__class__.__name__ == "OutOfMemoryError"
+════════════════════════════════════════════════════════════
+DECISION ORDER (stop at first match)
+════════════════════════════════════════════════════════════
+1. Sender is @bhatiashipping.com / @bhatiashippinggroup.com → general
+2. Latest body explicitly asks us for freight rates / costs / quotation → customer_requirement
+3. Sender is proactively pushing supply-side pricing or tariff announcement → quotation_rate_card
+4. Otherwise → general
 
-
-def _encode(texts: list[str], prompt: Optional[str] = None) -> "_np.ndarray":
-    """Run model.encode with an auto-OOM fallback: on a CUDA/MPS OOM, free the
-    cache, halve the batch size, and retry — down to batch=1 — before giving up.
-    Lets large GPUs run big batches while small GPUs degrade gracefully."""
-    model = _get_qwen()
-    kwargs = {"normalize_embeddings": True, "convert_to_numpy": True}
-    if prompt is not None:
-        kwargs["prompt"] = prompt
-
-    with _qwen_infer_lock:  # torch model not thread-safe under the batch ThreadPool
-        batch = QWEN_BATCH_SIZE
-        while True:
-            try:
-                return model.encode(texts, batch_size=batch, **kwargs)
-            except Exception as e:
-                if not _is_oom_error(e) or batch <= 1:
-                    raise
-                _free_accelerator_cache()
-                new_batch = max(1, batch // 2)
-                logger.warning("Qwen encode OOM at batch=%d → retrying at batch=%d", batch, new_batch)
-                batch = new_batch
-
-
-def _free_accelerator_cache() -> None:
-    """Release cached GPU memory so the smaller-batch retry has room."""
-    try:
-        import torch
-        if QWEN_DEVICE == "cuda" and torch.cuda.is_available():
-            torch.cuda.empty_cache()
-        elif QWEN_DEVICE == "mps" and torch.backends.mps.is_available():
-            torch.mps.empty_cache()
-    except Exception:
-        pass
-
-
-def _embed_documents(texts: list[str]) -> "_np.ndarray":
-    """Embed training/document texts WITHOUT instruction (Qwen asymmetric convention).
-    Returns an L2-normalized (n, 1024) array."""
-    return _encode([t[:8000] for t in texts])
-
-
-def _embed_queries(texts: list[str]) -> "_np.ndarray":
-    """Batch QUERY embedding with the empirical-basis instruction prefix.
-    Use for storage/training so vectors match the runtime query path.
-    Returns an L2-normalized (n, 1024) array."""
-    return _encode([t[:8000] for t in texts], prompt=f"Instruct: {EMPIRICAL_BASIS}\nQuery: ")
-
-
-def _embed_query(text: str) -> "_np.ndarray":
-    """Embed a single QUERY text with the empirical-basis instruction prefix.
-    Returns an L2-normalized (1, 1024) array."""
-    return _embed_queries([text])
-
-
-def _get_embedding(text: str, is_query: bool = True) -> list[float]:
-    """Public embedding helper used by feedback/training writers.
-    is_query=True (default) → QUERY embedding with the instruction prefix.
-    The classifier head requires train/inference consistency: runtime embeds
-    incoming emails as queries, so stored training vectors must match."""
-    if is_query:
-        return _embed_query(text)[0].tolist()
-    return _embed_documents([text])[0].tolist()
-
-
-def _fetch_all_training_rows() -> list[dict]:
-    """Page past Supabase's 1000-row cap so the head trains on the FULL table.
-    A single .execute() silently truncates at 1000; this loops until a short page."""
-    rows: list[dict] = []
-    page, size = 0, 1000
-    while True:
-        chunk = (
-            supabase.table("email_training_data")
-            .select(f"label, {QWEN_EMBED_COLUMN}")
-            .range(page * size, page * size + size - 1)
-            .execute()
-            .data
-            or []
-        )
-        rows.extend(chunk)
-        if len(chunk) < size:
-            return rows
-        page += 1
-
-
-def _load_classifier() -> tuple[Optional[_SVC], Optional[_LabelEncoder], int]:
-    """Fetch Qwen training vectors from Supabase and train the SVM. Returns (model, encoder, count)."""
-    try:
-        rows = _fetch_all_training_rows()
-        rows = [r for r in rows if r.get(QWEN_EMBED_COLUMN)]
-        if len(rows) < 10:
-            logger.warning("Only %d rows with %s — need >=10 to train SVM.", len(rows), QWEN_EMBED_COLUMN)
-            return None, None, 0
-
-        X = _np.array([
-            _json.loads(r[QWEN_EMBED_COLUMN]) if isinstance(r[QWEN_EMBED_COLUMN], str) else r[QWEN_EMBED_COLUMN]
-            for r in rows
-        ])
-        le = _LabelEncoder()
-        y = le.fit_transform([r["label"] for r in rows])
-
-        model = _build_classifier()
-        model.fit(X, y)
-        logger.info("SVM trained on %d examples, classes: %s", len(rows), list(le.classes_))
-        return model, le, len(rows)
-    except Exception as e:
-        logger.warning("SVM training failed: %s", e)
-        return None, None, 0
-
-
-def _build_classifier() -> _SVC:
-    """SVM RBF head over 1024-dim Qwen vectors. Shared by runtime + eval scripts.
-    probability=True is required: Tier 3's confidence gate needs predict_proba."""
-    return _SVC(kernel="rbf", C=10.0, gamma="scale", probability=True, random_state=42)
-
-
-def _get_classifier() -> tuple[Optional[_SVC], Optional[_LabelEncoder]]:
-    """Return cached SVM. Lock ensures only one thread trains at a time."""
-    global _clf_model, _clf_label_encoder, _clf_training_count
-
-    # Fast path: model loaded and likely fresh — skip Supabase count check
-    if _clf_model is not None:
-        return _clf_model, _clf_label_encoder
-
-    with _clf_lock:
-        # Re-check inside lock in case another thread just trained it
-        if _clf_model is not None:
-            return _clf_model, _clf_label_encoder
-        try:
-            current_count = supabase.table("email_training_data").select("id", count="exact").limit(1).execute().count or 0
-        except Exception:
-            current_count = _clf_training_count
-        if _clf_model is None or current_count != _clf_training_count:
-            _clf_model, _clf_label_encoder, _clf_training_count = _load_classifier()
-
-    return _clf_model, _clf_label_encoder
-
-
-# Back-compat aliases for eval scripts that import the old names
-_build_mlp = _build_classifier
-_get_mlp = _get_classifier
-
-
-# ---------------------------------------------------------------------------
-# MAIN ENTRY POINT: single LLM call through the swappable provider
-# ---------------------------------------------------------------------------
+Respond ONLY with valid JSON, no markdown:
+{"label": "customer_requirement" | "quotation_rate_card" | "general", "confidence": <0.0-1.0>}
+"""
 
 _VALID_LABELS = {"customer_requirement", "quotation_rate_card", "general"}
-
-# Max chars of body sent to the LLM. ~2K tokens — trivial for gpt-4o-mini (128K)
-# and Gemini flash-lite (1M). Bigger window so the rate-request signal isn't cut
-# off when long flattened-HTML-table threads push it down.
 MAX_BODY_CHARS = 8000
 
 
 def _parse_llm_label(raw: str) -> tuple[str, float]:
-    """Parse the provider reply into (label, confidence). Tolerates JSON wrapped
-    in code fences or surrounding prose; falls back to keyword matching."""
+    """Parse provider reply into (label, confidence). Tolerates JSON in code fences."""
     text = raw.strip()
     start, end = text.find("{"), text.rfind("}")
     if start != -1 and end > start:
@@ -323,8 +133,7 @@ def _parse_llm_label(raw: str) -> tuple[str, float]:
             data = json.loads(text[start : end + 1])
             label = str(data.get("label", "")).strip().lower()
             if label in _VALID_LABELS:
-                conf = float(data.get("confidence", 0.8))
-                return label, max(0.0, min(1.0, conf))
+                return label, max(0.0, min(1.0, float(data.get("confidence", 0.8))))
         except (json.JSONDecodeError, ValueError, TypeError):
             pass
 
@@ -336,114 +145,128 @@ def _parse_llm_label(raw: str) -> tuple[str, float]:
     return "general", 0.5
 
 
-def classify_email(
-    subject: str,
-    body: str,
-    sender: str = "",
-    rules_only: bool = False,
-    no_gpt_fallback: bool = False,
-) -> ClassificationResult:
-    """Classify an email with a single LLM call through the active provider
-    (``LLM_PROVIDER`` env: openai | gemini | ...).
+_INTERNAL_DOMAINS = {"bhatiashipping.com"}
 
-    rules_only / no_gpt_fallback are retained for call-site compatibility but
-    no longer change behavior — classification is one provider call.
-    """
-    truncated_body = body[:MAX_BODY_CHARS]
-    user_prompt = f"From: {sender}\nSubject: {subject}\n\n{truncated_body}"
+# Matches job/reference numbers common in freight forwarding subject lines
+_JOB_REF_RE = re.compile(r"\b[A-Z]{2,6}\d{5,}\b")
 
-    try:
-        provider = get_provider()
-        raw = provider.complete(CLASSIFY_SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=60)
-        label, confidence = _parse_llm_label(raw)
-        result = ClassificationResult(
-            label=label,
-            confidence=confidence,
-            method=f"llm:{provider.name}",
-            details=f"{provider.name} output: {raw[:200]}",
-        )
-        logger.info("Classified by %s: %s (%.0f%%)", provider.name, result.label, result.confidence * 100)
-        return result
-    except Exception as e:
-        logger.error("LLM classification failed: %s", e)
+# Rate-card subject signals — strong enough to bypass LLM when body is a cover note
+_RC_SUBJ_RE = re.compile(
+    r"\b(rate\s*sheet|special\s*rates?\s*(ex|from)|tariff\s*(revision|update|circular|notice|change)|"
+    r"local\s*charges?\s*(revision|update|effective|change)|rate\s*card|buy\s*rates?|"
+    r"rate\s*update|rate\s*circular|new\s*rates?\s*(for|eff)|rates?\s*effective|"
+    r"rate\s*announcement|general\s*rate\s*increase|gri\b|peak\s*season\s*surcharge|"
+    r"pss\s*(announcement|notice)|revised\s*freight\s*rates?\s*(effective|from))\b",
+    re.I,
+)
+
+# Cover-note body: sender says "find attached" with no rate data in plain text
+_COVER_NOTE_RE = re.compile(
+    r"\b(kindly\s+find\s+attach|please\s+find\s+attach|find\s+attach|pfa\b|"
+    r"attached\s+herewith|herewith\s+(?:pl\s+)?find|as\s+attached|"
+    r"kindly\s+find\s+the\s+(?:revised\s+)?rate|please\s+find\s+the\s+(?:revised\s+)?rate)\b",
+    re.I,
+)
+
+def _strip_quoted(body: str) -> str:
+    """Return only the latest message — strip quoted reply history."""
+    # Split on common reply delimiters and take everything before the first one
+    for delimiter in ("-----Original Message-----", "________________________________",
+                      "\nFrom:", "\n> ", "\nOn "):
+        idx = body.find(delimiter)
+        if idx > 100:  # ignore if delimiter is right at the top (no new content above it)
+            body = body[:idx]
+    return body.strip()
+
+
+def _extract_email_domain(sender: str) -> str:
+    """Extract domain from 'Name <addr@domain.com>' or 'addr@domain.com'."""
+    m = re.search(r"<([^>]+)>", sender)
+    addr = m.group(1) if m else sender
+    return addr.split("@")[-1].strip().lower() if "@" in addr else ""
+
+
+def classify_email(subject: str, body: str, sender: str = "") -> ClassificationResult:
+    """Classify one email. Internal-domain senders are marked general without an LLM call."""
+    if _extract_email_domain(sender) in _INTERNAL_DOMAINS:
+        logger.info("Rule: internal sender (%s) → general", sender)
         return ClassificationResult(
             label="general",
-            confidence=0.0,
-            method="error",
-            details=f"Classification failed: {e}",
+            confidence=1.0,
+            method="rule:internal_domain",
+            details=f"Sender domain is internal ({sender})",
         )
 
+    subj_lower = subject.lower().strip()
+    # Only skip to general on job-ref subjects that also lack any rate/quote signal.
+    # Re:/Fw: alone is NOT enough — customer enquiries frequently arrive as reply threads.
+    _RATE_SIGNAL_RE = re.compile(
+        r'\b(quote|quotation|rfq|rate|inquiry|enquiry|freight|fcl|lcl|air freight|sea freight)\b', re.I
+    )
+    if _JOB_REF_RE.search(subject) and not _RATE_SIGNAL_RE.search(subject):
+        logger.info("Rule: job-ref subject with no rate signal (%r) → general", subject)
+        return ClassificationResult(
+            label="general",
+            confidence=0.95,
+            method="rule:job_ref_no_rate_signal",
+            details=f"Job reference subject with no quote/rate keyword: {subject}",
+        )
 
-# ---------------------------------------------------------------------------
-# FEEDBACK LOOP: Store corrections and add to training data
-# ---------------------------------------------------------------------------
+    latest = _strip_quoted(body)
 
-def submit_feedback(
-    email_subject: str,
-    email_body: str,
-    email_sender: str,
-    predicted_label: str,
-    corrected_label: str,
-    confidence: float = 0.0,
-) -> dict:
-    """Store a human correction and add the corrected email to training data."""
-    # 1. Store the feedback record
-    try:
-        supabase.table("classification_feedback").insert({
-            "email_subject": email_subject,
-            "email_body": email_body[:5000],
-            "email_sender": email_sender,
-            "predicted_label": predicted_label,
-            "corrected_label": corrected_label,
-            "confidence": confidence,
-            "added_to_training": True,
-        }).execute()
-    except Exception as e:
-        logger.error("Failed to store feedback: %s", e)
-        return {"status": "error", "detail": str(e)}
+    # Rate sheet sent as attachment: subject has RC signal, body is just a cover note.
+    # No rate table in plain text — LLM would call it general. Catch it here.
+    if _RC_SUBJ_RE.search(subject) and _COVER_NOTE_RE.search(latest[:400]):
+        logger.info("Rule: RC subject + cover-note body (%r) → quotation_rate_card", subject)
+        return ClassificationResult(
+            label="quotation_rate_card",
+            confidence=0.93,
+            method="rule:rc_subject_cover_note",
+            details=f"Rate-card subject with attachment cover note: {subject}",
+        )
 
-    # 2. Generate Qwen document embedding and add to training data
-    try:
-        email_text = f"Subject: {email_subject}\n\n{email_body[:2000]}"
-        embedding = _get_embedding(email_text)  # plain document embedding (no instruction)
+    logger.debug("Classify input — subject=%r body_chars=%d stripped_chars=%d",
+                 subject, len(body), len(latest))
+    user_prompt = f"From: {sender}\nSubject: {subject}\n\n{latest[:MAX_BODY_CHARS]}"
+    last_exc: Exception | None = None
+    for attempt in range(3):
+        try:
+            provider = get_provider()
+            raw = provider.complete(CLASSIFY_SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=60)
+            label, confidence = _parse_llm_label(raw)
+            logger.info("Classified by %s: %s (%.0f%%)", provider.name, label, confidence * 100)
+            return ClassificationResult(
+                label=label,
+                confidence=confidence,
+                method=f"llm:{provider.name}",
+                details=f"{provider.name} output: {raw[:200]}",
+            )
+        except Exception as e:
+            last_exc = e
+            err_str = str(e)
+            # insufficient_quota is also a 429, but retrying can never succeed —
+            # the account is out of credit. Fail fast instead of burning ~40s of
+            # backoff per email on a permanently failing call.
+            if "insufficient_quota" in err_str:
+                logger.error("LLM quota exhausted — classification unavailable: %s", e)
+                break
+            if "429" in err_str or "rate_limit" in err_str.lower():
+                wait = 2 ** attempt * 5 + random.uniform(0, 2)  # 5-7s, 10-12s, 20-22s
+                logger.warning("Rate limit on attempt %d, retrying in %ds: %s", attempt + 1, wait, e)
+                time.sleep(wait)
+            else:
+                break  # non-retryable error
+    logger.error("LLM classification failed: %s", last_exc)
+    return ClassificationResult(label="general", confidence=0.0, method="error", details=str(last_exc))
 
-        supabase.table("email_training_data").insert({
-            "content": email_text,
-            "subject": email_subject,
-            "sender": email_sender,
-            "label": corrected_label,
-            QWEN_EMBED_COLUMN: embedding,
-        }).execute()
-    except Exception as e:
-        logger.error("Failed to add corrected email to training data: %s", e)
-        return {"status": "partial", "detail": f"Feedback stored but training data failed: {e}"}
 
-    return {"status": "ok", "detail": f"Feedback stored and added to training as '{corrected_label}'"}
-
-
-# ---------------------------------------------------------------------------
-# BATCH: Classify multiple emails
-# ---------------------------------------------------------------------------
-
-def classify_emails_batch(
-    emails: list[dict],
-    rules_only: bool = False,
-    _no_gpt_fallback: bool = False,
-) -> list[dict]:
-    """Classify a list of emails in parallel. Each dict must have: subject, body, sender.
-
-    rules_only=True   : hard rules only, instant, zero network.
-    _no_gpt_fallback  : deprecated, kept for call-site compatibility — parallel full pipeline used.
-    All API calls (embeddings + GPT few-shot) run concurrently so total time ≈ slowest single email.
-    """
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-
-    def _classify_one(email: dict) -> dict:
+def classify_emails_batch(emails: list[dict]) -> list[dict]:
+    """Classify multiple emails concurrently. Each dict needs: id, subject, body, sender."""
+    def _one(email: dict) -> dict:
         result = classify_email(
             subject=email.get("subject", ""),
             body=email.get("body", ""),
             sender=email.get("sender", email.get("from", "")),
-            rules_only=rules_only,
         )
         return {
             "id": email.get("id", ""),
@@ -455,21 +278,43 @@ def classify_emails_batch(
         }
 
     results: list[dict] = [{}] * len(emails)
-    with ThreadPoolExecutor(max_workers=min(len(emails), 20)) as pool:
-        future_to_idx = {pool.submit(_classify_one, e): i for i, e in enumerate(emails)}
+    with ThreadPoolExecutor(max_workers=min(len(emails), 5)) as pool:
+        future_to_idx = {pool.submit(_one, e): i for i, e in enumerate(emails)}
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
             try:
                 results[idx] = future.result()
             except Exception as exc:
-                email = emails[idx]
-                logger.warning("classify_emails_batch failed for email %s: %s", email.get("id"), exc)
+                e = emails[idx]
+                logger.warning("classify_emails_batch failed for %s: %s", e.get("id"), exc)
                 results[idx] = {
-                    "id": email.get("id", ""),
-                    "subject": email.get("subject", ""),
-                    "label": "general",
-                    "confidence": 0.0,
-                    "method": "error",
-                    "details": str(exc),
+                    "id": e.get("id", ""), "subject": e.get("subject", ""),
+                    "label": "general", "confidence": 0.0, "method": "error", "details": str(exc),
                 }
     return results
+
+
+def submit_feedback(
+    email_subject: str,
+    email_body: str,
+    email_sender: str,
+    predicted_label: str,
+    corrected_label: str,
+    confidence: float = 0.0,
+) -> dict:
+    """Store a human correction in the feedback table."""
+    try:
+        supabase.table("classification_feedback").insert({
+            "email_subject": email_subject,
+            "email_body": email_body[:5000],
+            "email_sender": email_sender,
+            "predicted_label": predicted_label,
+            "corrected_label": corrected_label,
+            "confidence": confidence,
+            "added_to_training": False,
+        }).execute()
+    except Exception as e:
+        logger.error("Failed to store feedback: %s", e)
+        return {"status": "error", "detail": str(e)}
+
+    return {"status": "ok", "detail": f"Feedback stored as '{corrected_label}'"}

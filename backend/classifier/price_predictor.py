@@ -5,13 +5,23 @@ Predicts expected price ranges for shipments using historical data + AI analysis
 """
 import logging
 import math
+from typing import Optional
 from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 
 load_dotenv()
 logger = logging.getLogger(__name__)
-client = OpenAI()
+
+_client: Optional[OpenAI] = None
+
+
+def _get_client() -> OpenAI:
+    """Lazy singleton — credential failures surface per-request, not at import."""
+    global _client
+    if _client is None:
+        _client = OpenAI()
+    return _client
 
 
 class PricePrediction(BaseModel):
@@ -96,7 +106,7 @@ def _ai_estimate(shipment: dict) -> PricePrediction:
         f"Provide a low and high estimate in USD."
     )
 
-    completion = client.beta.chat.completions.parse(
+    completion = _get_client().beta.chat.completions.parse(
         model="gpt-4o-mini",
         messages=[
             {"role": "system", "content": (

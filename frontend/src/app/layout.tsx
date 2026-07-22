@@ -11,7 +11,10 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    // The dashboard's theme script stamps data-theme on <html> before React
+    // hydrates, so this element's attributes legitimately differ from the SSR
+    // output. Suppression applies to this element only, not its subtree.
+    <html lang="en" suppressHydrationWarning>
       <body>
         {children}
       </body>

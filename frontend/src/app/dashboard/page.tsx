@@ -14,6 +14,14 @@ interface Email {
   body: string;
   label?: string;
   label_confidence?: number;
+  received_at?: string;
+}
+
+function formatReceived(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
 interface RFQJob {
@@ -25,7 +33,7 @@ interface RFQJob {
   shipment_origin: string;
   shipment_destination: string;
   shipment_mode: string;
-  shipment_weight_kg: number;
+  shipment_weight_kg: number | null;
   shipment_commodity: string;
   status: string;
   agents_contacted: string[];
@@ -69,9 +77,10 @@ function fmtDate(iso: string): string {
 }
 
 function senderName(raw: string): string {
+  if (!raw) return '?';
   const m = raw.match(/^"?([^"<]+)"?\s*</);
-  if (m) return m[1].trim();
-  return raw.split('@')[0];
+  const name = m ? m[1].trim() : raw.split('@')[0];
+  return name || '?';
 }
 
 function modeLabel(mode: string): string {
@@ -85,26 +94,62 @@ function modeLabel(mode: string): string {
 
 function statusInfo(status: string): { label: string; color: string; bg: string; desc: string } {
   const map: Record<string, { label: string; color: string; bg: string; desc: string }> = {
-    rfqs_sent:       { label: 'RFQs Sent',       color: '#60a5fa', bg: '#1e3a5f22', desc: 'Waiting for agents to reply' },
-    awaiting_quotes: { label: 'Awaiting Quotes',  color: '#fbbf24', bg: '#78350f22', desc: 'Agents notified, quotes pending' },
-    quotes_received: { label: 'Quotes Received',  color: '#34d399', bg: '#065f4622', desc: 'Quotes in — ready to compare' },
-    approved:        { label: 'Approved',          color: '#a78bfa', bg: '#4c1d9522', desc: 'Shipment confirmed' },
+    rfqs_sent:       { label: 'RFQs Sent',       color: 'var(--blue-soft)', bg: 'var(--status-blue-bg)', desc: 'Waiting for agents to reply' },
+    awaiting_quotes: { label: 'Awaiting Quotes',  color: 'var(--amber)', bg: 'var(--status-amber-bg)', desc: 'Agents notified, quotes pending' },
+    quotes_received: { label: 'Quotes Received',  color: 'var(--green-soft)', bg: 'var(--status-green-bg)', desc: 'Quotes in — ready to compare' },
+    approved:        { label: 'Approved',          color: 'var(--purple)', bg: 'var(--status-purple-bg)', desc: 'Shipment confirmed' },
   };
-  return map[status] ?? { label: status, color: '#94a3b8', bg: '#1e293b', desc: '' };
+  return map[status] ?? { label: status, color: 'var(--muted-soft)', bg: 'var(--status-neutral-bg)', desc: '' };
 }
 
 function assessInfo(a: string): { label: string; color: string } {
   const map: Record<string, { label: string; color: string }> = {
-    within_range:   { label: '✅ Fair price',    color: '#34d399' },
-    above_expected: { label: '⚠️ Above average', color: '#fbbf24' },
-    below_expected: { label: '🎉 Below average', color: '#60a5fa' },
+    within_range:   { label: '✅ Fair price',    color: 'var(--green-soft)' },
+    above_expected: { label: '⚠️ Above average', color: 'var(--amber)' },
+    below_expected: { label: '🎉 Below average', color: 'var(--blue-soft)' },
   };
-  return map[a] ?? { label: a || '—', color: '#64748b' };
+  return map[a] ?? { label: a || '—', color: 'var(--muted)' };
+}
+
+function dedupe(emails: Email[]): Email[] {
+  const seen = new Set<string>();
+  return emails.filter(e => seen.has(e.id) ? false : !!seen.add(e.id));
+}
+
+/* ─── Theme ──────────────────────────────────────────────────── */
+type Theme = 'dark' | 'light';
+const THEME_KEY = 'dashboard-theme';
+
+function useTheme(): [Theme, () => void] {
+  // Server render and first client render both assume the default so the
+  // markup matches; the effect then adopts whatever the layout script set.
+  const [theme, setTheme] = useState<Theme>('dark');
+
+  useEffect(() => {
+    if (document.documentElement.dataset.theme === 'light') setTheme('light');
+  }, []);
+
+  // The <html> attribute is the source of truth (the layout script sets it
+  // before paint); state only mirrors it so the button label can re-render.
+  const toggle = useCallback(() => {
+    const next: Theme = document.documentElement.dataset.theme === 'light' ? 'dark' : 'light';
+    document.documentElement.dataset.theme = next;
+    try {
+      localStorage.setItem(THEME_KEY, next);
+    } catch { /* storage blocked — theme reverts on next load */ }
+    setTheme(next);
+  }, []);
+
+  return [theme, toggle];
 }
 
 /* ─── Label Pill ─────────────────────────────────────────────── */
 function LabelPill({ label, confidence }: { label?: string; confidence?: number }) {
   if (!label) return <span className="pill pill-gray">Unclassified</span>;
+  // Classification never succeeded (LLM quota/outage). Show it as pending rather
+  // than letting the 'general' fallback masquerade as a real verdict.
+  if (label === 'pending')
+    return <span className="pill pill-amber">⏳ Pending classification</span>;
   if (label === 'customer_requirement')
     return <span className="pill pill-blue">📦 Customer Request {confidence ? `· ${Math.round(confidence * 100)}%` : ''}</span>;
   if (label === 'quotation_rate_card')
@@ -136,7 +181,8 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
   const [fullBody, setFullBody] = useState<string | null>(null);
   const [loadingBody, setLoadingBody] = useState(false);
   const [processing, setProcessing] = useState(false);
-  const [processResult, setProcessResult] = useState<string | null>(null);
+  const [attachments, setAttachments] = useState<{ id: string; file_name: string; mime_type: string; size_bytes: number | null; url: string }[]>([]);
+  const [loadingAtts, setLoadingAtts] = useState(false);
 
   async function submitCorrection(newLabel: string) {
     setSaving(true);
@@ -150,7 +196,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
           body: email.body,
           sender: email.sender,
           predicted_label: email.label,
-          correct_label: newLabel,
+          corrected_label: newLabel,
         }),
       });
       setCorrectedLabel(newLabel);
@@ -164,42 +210,46 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
     onToggle();
     if (!expanded && fullBody === null) {
       setLoadingBody(true);
+      setLoadingAtts(true);
       try {
-        const r = await fetch(`${API_BASE}/email-body/${email.id}`);
-        if (r.ok) {
-          const d = await r.json();
+        const [bodyRes, attRes] = await Promise.all([
+          fetch(`${API_BASE}/email-body/${email.id}`),
+          fetch(`${API_BASE}/email-attachments/${email.id}`),
+        ]);
+        if (bodyRes.ok) {
+          const d = await bodyRes.json();
           setFullBody(decodeEntities(d.body ?? ''));
+        }
+        if (attRes.ok) {
+          const d = await attRes.json();
+          setAttachments(d.attachments ?? []);
         }
       } catch {
         setFullBody(null);
       } finally {
         setLoadingBody(false);
+        setLoadingAtts(false);
       }
     }
   }
 
-  async function processEmail() {
+  async function openSendRequest() {
+    // Open the Send Request dashboard prefilled with this email.
+    // RFQ generation/sending happens there — one unique RFQ-ID per agent.
     setProcessing(true);
-    setProcessResult(null);
-    try {
-      const body = fullBody ?? email.body;
-      const r = await fetch(`${API_BASE}/process-email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sender: email.sender, subject: email.subject, body }),
-      });
-      const d = await r.json();
-      if (r.ok) {
-        setProcessResult(`✅ RFQ created: ${d.reference}`);
-        onProcessed?.();
-      } else {
-        setProcessResult(`❌ ${d.detail ?? 'Failed'}`);
-      }
-    } catch {
-      setProcessResult('❌ Network error');
-    } finally {
-      setProcessing(false);
+    let body = fullBody ?? email.body ?? '';
+    if (!body) {
+      try {
+        const r = await fetch(`${API_BASE}/email-body/${email.id}`);
+        if (r.ok) body = decodeEntities((await r.json()).body ?? '');
+      } catch { /* proceed with empty body — form stays blank */ }
     }
+    try {
+      sessionStorage.setItem('sendRequestEmail', JSON.stringify({
+        id: email.id, sender: email.sender, subject: email.subject, body,
+      }));
+    } catch { /* sessionStorage unavailable — form opens blank */ }
+    window.location.assign('/send-request');
   }
 
   const displayLabel = correctedLabel ?? email.label;
@@ -211,18 +261,23 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
         <div className="ecard-avatar">{senderName(email.sender)[0].toUpperCase()}</div>
         <div className="ecard-meta">
           <div className="ecard-sender">{senderName(email.sender)}</div>
-          <div className="ecard-addr">{email.sender.match(/<(.+)>/)?.[1] ?? email.sender}</div>
+          <div className="ecard-addr">
+            {email.sender.match(/<(.+)>/)?.[1] ?? email.sender}
+            {email.received_at && (
+              <span style={{ marginLeft: 8, color: 'var(--faint)' }}>🕐 {formatReceived(email.received_at)}</span>
+            )}
+          </div>
         </div>
         <div className="ecard-right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <LabelPill label={displayLabel} confidence={correctedLabel ? undefined : email.label_confidence} />
           {correctedLabel ? (
-            <span style={{ fontSize: 11, color: '#34d399' }}>✓ Corrected</span>
+            <span style={{ fontSize: 11, color: 'var(--green-soft)' }}>✓ Corrected</span>
           ) : correcting ? (
             <select
               autoFocus
               disabled={saving}
               defaultValue=""
-              style={{ fontSize: 12, borderRadius: 6, padding: '3px 6px', background: '#1e293b', color: '#e2e8f0', border: '1px solid #334155', cursor: 'pointer' }}
+              style={{ fontSize: 12, borderRadius: 6, padding: '3px 6px', background: 'var(--input-bg)', color: 'var(--text)', border: '1px solid var(--input-border)', cursor: 'pointer' }}
               onClick={e => e.stopPropagation()}
               onChange={e => { if (e.target.value) submitCorrection(e.target.value); }}
             >
@@ -233,7 +288,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
             </select>
           ) : (
             <button
-              style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid #334155', background: 'transparent', color: '#94a3b8', cursor: 'pointer', whiteSpace: 'nowrap' }}
+              style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'transparent', color: 'var(--muted-soft)', cursor: 'pointer', whiteSpace: 'nowrap' }}
               onClick={e => { e.stopPropagation(); setCorrecting(true); }}
             >
               Correct label
@@ -245,27 +300,54 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
       {expanded && (
         <div className="ecard-body" onClick={e => e.stopPropagation()}>
           {loadingBody
-            ? <div style={{ color: '#64748b', fontSize: 13, padding: '8px 0' }}>Loading full message…</div>
+            ? <div style={{ color: 'var(--muted)', fontSize: 13, padding: '8px 0' }}>Loading full message…</div>
             : <pre className="ecard-pre">{bodyText?.slice(0, 3000)}{bodyText?.length > 3000 ? '\n…' : ''}</pre>
           }
+          {attachments.length > 0 && (
+            <div style={{ marginTop: 12, borderTop: '1px solid var(--border)', paddingTop: 10 }}>
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6, fontWeight: 600, letterSpacing: 1 }}>ATTACHMENTS</div>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6 }}>
+                {attachments.map(att => (
+                  <a
+                    key={att.id}
+                    href={att.url || undefined}
+                    target="_blank"
+                    rel="noreferrer"
+                    style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      padding: '5px 10px', borderRadius: 6,
+                      border: `1px solid ${att.url ? 'var(--input-border)' : 'var(--border)'}`,
+                      background: 'var(--sunken-soft)', color: att.url ? 'var(--muted-soft)' : 'var(--faint)',
+                      fontSize: 12, textDecoration: 'none',
+                      cursor: att.url ? 'pointer' : 'default',
+                      pointerEvents: att.url ? undefined : 'none',
+                    }}
+                    onClick={e => e.stopPropagation()}
+                  >
+                    <span>{att.mime_type.includes('pdf') ? '📄' : att.mime_type.includes('sheet') || att.file_name.endsWith('.xlsx') || att.file_name.endsWith('.xls') ? '📊' : '📎'}</span>
+                    <span>{att.file_name}</span>
+                    {att.size_bytes && <span style={{ color: 'var(--faint)' }}>· {Math.round(att.size_bytes / 1024)}KB</span>}
+                  </a>
+                ))}
+              </div>
+            </div>
+          )}
+          {loadingAtts && attachments.length === 0 && (
+            <div style={{ marginTop: 8, fontSize: 12, color: 'var(--faint)' }}>Loading attachments…</div>
+          )}
           {(displayLabel === 'customer_requirement' || correctedLabel === 'customer_requirement') && (
             <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
               <button
                 disabled={processing || loadingBody}
                 style={{
                   padding: '7px 16px', borderRadius: 8, border: 'none',
-                  background: processing ? '#334155' : '#3b82f6', color: '#fff',
+                  background: processing ? 'var(--input-border)' : 'var(--blue)', color: 'var(--on-accent)',
                   fontSize: 13, fontWeight: 600, cursor: processing ? 'default' : 'pointer',
                 }}
-                onClick={e => { e.stopPropagation(); processEmail(); }}
+                onClick={e => { e.stopPropagation(); openSendRequest(); }}
               >
-                {processing ? '⏳ Processing…' : '🚀 Process this email → Send RFQs'}
+                {processing ? '⏳ Opening…' : '🚀 Process this email → Send RFQs'}
               </button>
-              {processResult && (
-                <span style={{ fontSize: 12, color: processResult.startsWith('✅') ? '#34d399' : '#f87171' }}>
-                  {processResult}
-                </span>
-              )}
             </div>
           )}
         </div>
@@ -344,7 +426,9 @@ function ShipmentCard({ job }: { job: RFQJob }) {
       <div className="scard-chips">
         <span className="chip">{modeLabel(job.shipment_mode)}</span>
         <span className="chip">📦 {job.shipment_commodity}</span>
-        <span className="chip">⚖️ {job.shipment_weight_kg.toLocaleString()} kg</span>
+        {job.shipment_weight_kg != null && (
+          <span className="chip">⚖️ {job.shipment_weight_kg.toLocaleString()} kg</span>
+        )}
       </div>
 
       {/* From */}
@@ -384,7 +468,7 @@ function ShipmentCard({ job }: { job: RFQJob }) {
           {!loadingQ && quotes.length > 0 && (
             <div className="q-list">
               {approveResult && (
-                <div style={{ fontSize: 13, marginBottom: 8, color: approveResult.startsWith('✅') ? '#34d399' : '#f87171' }}>
+                <div style={{ fontSize: 13, marginBottom: 8, color: approveResult.startsWith('✅') ? 'var(--green-soft)' : 'var(--red)' }}>
                   {approveResult}
                 </div>
               )}
@@ -403,8 +487,8 @@ function ShipmentCard({ job }: { job: RFQJob }) {
                             onClick={() => approveQuote(q.agent_name)}
                             style={{
                               fontSize: 11, padding: '3px 10px', borderRadius: 6,
-                              border: 'none', background: isApproving ? '#334155' : '#059669',
-                              color: '#fff', cursor: approving ? 'default' : 'pointer', fontWeight: 600,
+                              border: 'none', background: isApproving ? 'var(--input-border)' : 'var(--green-solid)',
+                              color: 'var(--on-accent)', cursor: approving ? 'default' : 'pointer', fontWeight: 600,
                             }}
                           >
                             {isApproving ? '⏳…' : 'Approve'}
@@ -448,22 +532,22 @@ function SummaryBar({ emails, jobs }: { emails: Email[]; jobs: RFQJob[] }) {
       </div>
       <div className="sum-divider" />
       <div className="sum-item">
-        <div className="sum-val" style={{ color: '#60a5fa' }}>{requests}</div>
+        <div className="sum-val" style={{ color: 'var(--blue-soft)' }}>{requests}</div>
         <div className="sum-lbl">Customer Requests</div>
       </div>
       <div className="sum-divider" />
       <div className="sum-item">
-        <div className="sum-val" style={{ color: '#34d399' }}>{rateCards}</div>
+        <div className="sum-val" style={{ color: 'var(--green-soft)' }}>{rateCards}</div>
         <div className="sum-lbl">Rate Cards</div>
       </div>
       <div className="sum-divider" />
       <div className="sum-item">
-        <div className="sum-val" style={{ color: '#fbbf24' }}>{activeJobs}</div>
+        <div className="sum-val" style={{ color: 'var(--amber)' }}>{activeJobs}</div>
         <div className="sum-lbl">Active Shipments</div>
       </div>
       <div className="sum-divider" />
       <div className="sum-item">
-        <div className="sum-val" style={{ color: '#a78bfa' }}>{quotesIn}</div>
+        <div className="sum-val" style={{ color: 'var(--purple)' }}>{quotesIn}</div>
         <div className="sum-lbl">Ready to Approve</div>
       </div>
     </div>
@@ -472,6 +556,7 @@ function SummaryBar({ emails, jobs }: { emails: Email[]; jobs: RFQJob[] }) {
 
 /* ─── Main Page ───────────────────────────────────────────────── */
 export default function Dashboard() {
+  const [theme, toggleTheme] = useTheme();
   const [tab, setTab] = useState<Tab>('inbox');
   const [emails, setEmails] = useState<Email[]>([]);
   const [emailTotal, setEmailTotal] = useState(0);
@@ -537,14 +622,22 @@ export default function Dashboard() {
     setInboxLoading(true);
     setInboxError('');
     try {
-      const depth = Math.max(emailOffsetRef.current, PAGE);
-      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${depth}&offset=0`);
+      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=0`);
       if (ir.ok) {
         const d = await ir.json();
-        setEmails(d.emails ?? []);
+        setEmails(prev => {
+          const incoming = d.emails ?? [];
+          if (prev.length === 0) return dedupe(incoming);
+          const incomingMap = new Map(incoming.map((e: Email) => [e.id, e]));
+          const existingIds = new Set(prev.map(e => e.id));
+          const updated = prev.map(e => {
+            const fresh = incomingMap.get(e.id);
+            return fresh ? { ...e, ...fresh } : e;
+          });
+          const newOnes = incoming.filter((e: Email) => !existingIds.has(e.id));
+          return dedupe([...newOnes, ...updated]);
+        });
         setEmailTotal(d.total ?? 0);
-        setEmailOffset(depth);
-        emailOffsetRef.current = depth;
       } else {
         const d = await ir.json().catch(() => ({}));
         setInboxError(d.detail ?? 'Failed to load inbox');
@@ -562,7 +655,7 @@ export default function Dashboard() {
       const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=${emailOffset}`);
       if (ir.ok) {
         const d = await ir.json();
-        setEmails(prev => [...prev, ...(d.emails ?? [])]);
+        setEmails(prev => dedupe([...prev, ...(d.emails ?? [])]));
         setEmailOffset(prev => { const next = prev + PAGE; emailOffsetRef.current = next; return next; });
       }
     } finally {
@@ -598,8 +691,8 @@ export default function Dashboard() {
             disabled={loadingMore}
             style={{
               width: '100%', marginTop: 12, padding: '10px 0',
-              background: 'transparent', border: '1px solid #334155',
-              borderRadius: 8, color: '#94a3b8', cursor: 'pointer', fontSize: 13,
+              background: 'transparent', border: '1px solid var(--input-border)',
+              borderRadius: 8, color: 'var(--muted-soft)', cursor: 'pointer', fontSize: 13,
             }}
           >
             {loadingMore ? 'Loading…' : `Load more (${emailTotal - emailOffset} remaining)`}
@@ -610,10 +703,10 @@ export default function Dashboard() {
   }
 
   const NAV = [
-    { key: 'inbox'     as Tab, icon: '📬', label: 'All Emails',         count: emails.length,    color: '#60a5fa' },
-    { key: 'requests'  as Tab, icon: '📦', label: 'Customer Requests',  count: requests.length,  color: '#3b82f6' },
-    { key: 'ratecards' as Tab, icon: '💰', label: 'Rate Cards',         count: rateCards.length, color: '#22c55e' },
-    { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: jobs.length,      color: '#f59e0b' },
+    { key: 'inbox'     as Tab, icon: '📬', label: 'All Emails',         count: emails.length,    color: 'var(--blue-soft)' },
+    { key: 'requests'  as Tab, icon: '📦', label: 'Customer Requests',  count: requests.length,  color: 'var(--blue)' },
+    { key: 'ratecards' as Tab, icon: '💰', label: 'Rate Cards',         count: rateCards.length, color: 'var(--green)' },
+    { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: jobs.length,      color: 'var(--yellow)' },
   ];
 
   return (
@@ -659,14 +752,23 @@ export default function Dashboard() {
             disabled={togglingAutomation || automationEnabled === null}
             style={{
               width: '100%', padding: '9px 0', borderRadius: 8,
-              border: `1px solid ${automationEnabled ? '#059669' : '#334155'}`,
-              background: automationEnabled ? '#065f4644' : '#1e293b',
-              color: automationEnabled ? '#34d399' : '#94a3b8',
+              border: `1px solid ${automationEnabled ? 'var(--green-solid)' : 'var(--input-border)'}`,
+              background: automationEnabled ? 'var(--status-green-bg)' : 'var(--status-neutral-bg)',
+              color: automationEnabled ? 'var(--green-soft)' : 'var(--muted-soft)',
               fontSize: 13, fontWeight: 600, cursor: 'pointer',
               marginTop: 4,
             }}
           >
             {togglingAutomation ? '⏳…' : automationEnabled ? '🤖 Automation ON' : '⏸ Automation OFF'}
+          </button>
+          <button
+            className="btn-theme"
+            onClick={toggleTheme}
+            aria-pressed={theme === 'light'}
+            title={theme === 'dark' ? 'Switch to light mode' : 'Switch to dark mode'}
+          >
+            <span className="theme-icon">{theme === 'dark' ? '☀️' : '🌙'}</span>
+            <span className="theme-label">{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
           </button>
           <Link href="/" className="btn-office">🏢 Office View</Link>
         </div>
@@ -705,7 +807,7 @@ export default function Dashboard() {
                   {inboxLoading && emails.length === 0
                     ? <div className="empty-state">⏳ Loading emails from inbox…</div>
                     : inboxError && emails.length === 0
-                      ? <div className="empty-state" style={{color:'#f87171'}}>⚠️ {inboxError}</div>
+                      ? <div className="empty-state" style={{color:'var(--red)'}}>⚠️ {inboxError}</div>
                       : <div className="email-list">{renderEmails(emails, 'No emails in inbox.', true)}</div>
                   }
                 </div>
