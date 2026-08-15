@@ -1,7 +1,7 @@
 """
 lifespan.py
 -----------
-Background work owned by the API process: three one-shot startup jobs and four
+Background work owned by the API process: four one-shot startup jobs and six
 repeating ones.
 
 The scheduler starts here rather than at import so `--reload` and multi-worker
@@ -16,6 +16,7 @@ lives in-process, a long scan competes with HTTP requests for the interpreter.
 import logging
 import threading
 from contextlib import asynccontextmanager
+from typing import Any, Callable
 
 from apscheduler.schedulers.background import BackgroundScheduler
 from fastapi import FastAPI
@@ -31,81 +32,118 @@ from backend.connectors.email_store import (
 )
 from backend.core.config import settings
 from backend.core.db import check_connectivity, get_db
+from backend.core.logging_context import carry_context, job_context
 from backend.services.metrics_service import snapshot_metrics
 
 logger = logging.getLogger(__name__)
 
 
+def _job(name: str, work: Callable[[], Any]) -> Callable[[], None]:
+    """Wrap a scheduled job: its own correlation id, and failures with a traceback.
+
+    Both were previously per-job and neither was consistent. Only the scan
+    established an id (and only inside `run_scan`, so the handler below it did
+    not get one), which meant ingest's lines, the attachment worker's, and a
+    concurrent scan's all arrived with an empty `ctx` — indistinguishable in a
+    file they share with HTTP traffic. At two- and five-minute cadences that
+    uncorrelated output is the bulk of the log.
+
+    Every handler also logged `str(e)` alone. That is a bare key name for a
+    KeyError and an empty string for a bare RuntimeError, which is not enough to
+    act on a job that failed unattended at 3am.
+
+    Wrapping here means a job added later cannot forget either.
+    """
+    def run() -> None:
+        with job_context(name):
+            try:
+                work()
+            except Exception as e:
+                logger.exception("%s job failed: %s", name, e)
+
+    # Both, not just `__name__`: APScheduler's `get_callable_name` returns
+    # `__qualname__` for a plain function, so setting only `__name__` left every
+    # wrapped job displaying as `_job.<locals>.run`. Its own lines ("Added job
+    # …", "Running job …", "Job … executed successfully") are emitted from the
+    # scheduler thread, outside `job_context`, so they carry no `ctx` — the name
+    # is the only thing on them that identifies the job, and one shared name
+    # makes them useless. Before this wrapper existed the bare functions gave
+    # distinct names for free.
+    run.__name__ = f"{name}_job"
+    run.__qualname__ = f"{name}_job"
+    return run
+
+
 def _warmup() -> None:
-    try:
-        logger.info("LLM provider warmed up: %s", get_provider().name)
-    except Exception as e:
-        logger.warning("LLM provider warmup failed: %s", e)
+    with job_context("warmup"):
+        try:
+            logger.info("LLM provider warmed up: %s", get_provider().name)
+        except Exception as e:
+            # Degraded, not broken: the provider is retried on the first real
+            # call. WARNING per the level contract, and no traceback wanted.
+            logger.warning("LLM provider warmup failed: %s", e)
 
 
-def _scan_job() -> None:
-    try:
-        run_scan(get_db())
-    except Exception as e:
-        logger.error("Scheduled scan error: %s", e)
+def _scan() -> None:
+    run_scan(get_db())
 
 
-def _ingest_job() -> None:
-    try:
-        logger.info("Scheduled ingest done: %s", ingest_new_emails())
-    except Exception as e:
-        logger.error("Scheduled ingest error: %s", e)
+def _ingest() -> None:
+    logger.info("Scheduled ingest done: %s", ingest_new_emails())
 
 
-def _backfill_job() -> None:
-    try:
-        logger.info("Backfill done: %s", backfill_classifications())
-    except Exception as e:
-        logger.error("Backfill error: %s", e)
+def _backfill() -> None:
+    logger.info("Backfill done: %s", backfill_classifications())
 
 
-def _retry_pending_job() -> None:
-    try:
-        stats = retry_pending_classifications()
-        if stats.get("classified"):
-            logger.info("Retry queue: reclassified %d pending email(s)", stats["classified"])
-    except Exception as e:
-        logger.error("Retry queue error: %s", e)
+def _retry_pending() -> None:
+    stats = retry_pending_classifications()
+    if stats.get("classified"):
+        logger.info("Retry queue: reclassified %d pending email(s)", stats["classified"])
 
 
-def _attachment_worker_job() -> None:
-    try:
-        stats = process_pending_attachments()
-        if stats.get("stored") or stats.get("failed"):
-            logger.info("Attachment worker: stored %d, failed %d",
-                        stats.get("stored", 0), stats.get("failed", 0))
-    except Exception as e:
-        logger.error("Attachment worker error: %s", e)
+def _attachment_worker() -> None:
+    stats = process_pending_attachments()
+    if stats.get("stored") or stats.get("failed"):
+        logger.info("Attachment worker: stored %d, failed %d",
+                    stats.get("stored", 0), stats.get("failed", 0))
 
 
-def _metrics_snapshot_job() -> None:
-    try:
-        snapshot_metrics()
-    except Exception as e:
-        logger.error("Metrics snapshot error: %s", e)
+def _metrics_snapshot() -> None:
+    snapshot_metrics()
 
 
-def _gap_audit_job() -> None:
+def _gap_heal() -> None:
     # Self-healing: audit → auto-backfill each gap day within guardrails →
     # re-audit → email an alert for anything still short.
-    try:
-        stats = heal_sync_gaps(days=14)
-        if stats.get("gaps_found"):
-            logger.info("Sync-gap heal: found %d, healed %d, unhealed %d",
-                        stats["gaps_found"], stats["healed"], len(stats["unhealed"]))
-    except Exception as e:
-        logger.error("Sync-gap heal error: %s", e)
+    stats = heal_sync_gaps(days=14)
+    if stats.get("gaps_found"):
+        logger.info("Sync-gap heal: found %d, healed %d, unhealed %d",
+                    stats["gaps_found"], stats["healed"], len(stats["unhealed"]))
+
+
+# The name in each id is what makes a line greppable — `job=ingest:3f9a1c22`
+# answers "which job?" before you have looked anything up.
+_scan_job = _job("scan", _scan)
+_ingest_job = _job("ingest", _ingest)
+_backfill_job = _job("backfill", _backfill)
+_retry_pending_job = _job("retry_pending", _retry_pending)
+_attachment_worker_job = _job("attachment_worker", _attachment_worker)
+_metrics_snapshot_job = _job("metrics_snapshot", _metrics_snapshot)
+_gap_audit_job = _job("gap_heal", _gap_heal)
 
 
 def run_scan_in_background() -> None:
     """Used by POST /automation/run-now, which returns 202 rather than holding a
-    worker for the length of a scan."""
-    threading.Thread(target=_scan_job, daemon=True).start()
+    worker for the length of a scan.
+
+    `carry_context` puts the triggering request's id on every line the scan
+    emits. A new thread starts with an empty context, so without it nothing
+    linked the operator's click to the work it started: the 202 carried an
+    X-Request-ID that appeared in no log line, leaving wall-clock time as the
+    only way to match a complaint to a scan.
+    """
+    threading.Thread(target=carry_context(_scan_job), daemon=True).start()
 
 
 @asynccontextmanager

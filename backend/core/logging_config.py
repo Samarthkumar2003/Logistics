@@ -56,7 +56,7 @@ _NOISY = (
 _CONSOLE_FORMAT = "%(asctime)s %(levelname)-7s [%(name)s]%(ctx)s %(message)s"
 _JSON_FORMAT = (
     "%(asctime)s %(levelname)s %(name)s %(message)s "
-    "%(request_id)s %(scan_id)s %(email_id)s"
+    "%(request_id)s %(scan_id)s %(job_id)s %(email_id)s"
 )
 # Rotation budget. 10 MB × 50 files ≈ 510 MB worst case on disk, which at the
 # current volume (a few MB a day) is roughly a year of history — long enough to
