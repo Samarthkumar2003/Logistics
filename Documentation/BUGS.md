@@ -1,6 +1,6 @@
 # Known bugs
 
-_Last reviewed: 2026-08-10. Scope: full backend + frontend._
+_Last reviewed: 2026-08-16. Scope: full backend + frontend._
 
 Priority is **impact × silence**. A defect that corrupts data without anyone
 noticing outranks one that throws a visible error.
@@ -55,6 +55,29 @@ nothing with `curl`.
 **Fix:** a shared-secret header at minimum, or bind to `127.0.0.1` until there
 is real auth.
 
+### P1-2 · Tracebacks are never redacted
+`SecretRedactingFilter.filter` rewrites `record.getMessage()` and nothing else.
+`exc_text` does not exist yet at filter time — `Formatter.formatException`
+produces it afterwards — so **every `logger.exception` call writes its traceback
+verbatim**, past both the env-name and the shape-based matchers. Anything a frame
+carries goes to disk: a Supabase URL with an embedded key, an SMTP password in a
+`login()` argument, an API key in a provider client's repr. The same hole applies
+to the JSON formatter's `extra` fields, which are also only message-redacted.
+
+Silent by construction: the log looks redacted, because the *messages* are. The
+recent conversion of ~31 handlers from `str(e)` to `logger.exception` was the
+right call for debuggability and multiplied the volume of unredacted traceback
+text by roughly the same factor.
+
+**Consequence today:** `logs/` must be treated as containing secrets. Do not
+attach a log file to a ticket or ship it to an aggregator without reading it.
+
+**Fix:** redact in the `Formatter`, not the `Filter` — override `format()` /
+`formatException()` and run the existing scrubber over the rendered result,
+including `exc_text` and `stack_info`. A filter cannot do this; it runs too early.
+Then extend the same pass over `extra`. Add a test asserting a raised
+`RuntimeError("sk-live-…")` does not appear in the formatted output.
+
 ---
 
 <a id="p2"></a>
@@ -86,17 +109,24 @@ offset to 20. The "N remaining" count is also 20 too high.
 classify; backfill re-scans the newest 500 emails every time. A cold boot on a
 large inbox costs real money.
 
-### P2-4 · No tests — *partly closed 2026-08-12*
-134 unit tests now cover the pure functions: `tests/` run with
-`python -m pytest`, offline, in about a second. Covered:
-`extract_rfq_reference` / `inject_reference` / `subject_token`, the classifier
-rule tiers and `_parse_llm_label`, `retry_utils`, `domain/models` row parsing,
-the correlation-id contexts, secret redaction, `ScanStats` persistence, and
-`_extract_country`.
+### P2-4 · No tests — *partly closed 2026-08-12, further 2026-08-16*
+193 tests, run with `python -m pytest`, offline, in about a second.
 
-Still open: **services against fake repositories, and any HTTP-level test.**
-`reply_service.link_reply` — the function that decides which job a rate card
-attaches to — has no test. Also no CI: nothing runs the suite on push.
+Pure functions (2026-08-12): `extract_rfq_reference` / `inject_reference` /
+`subject_token`, the classifier rule tiers and `_parse_llm_label`, `retry_utils`,
+`domain/models` row parsing, the correlation-id contexts, secret redaction,
+`ScanStats` persistence, and `_extract_country`.
+
+Services against fake repositories, and the first HTTP-level tests (2026-08-16):
+`tests/test_rfq_send.py` (14) covers the draft-send-record path including
+per-agent outcome correlation; `tests/test_rfq_approve.py` (13) covers awarding
+against a failed acceptance; `tests/test_inbox_routes.py` covers the six
+outcomes of a body lookup through the route layer.
+
+Still open: **`reply_service.link_reply` has no test** — the function that
+decides which job a rate card attaches to, and the one place a wrong answer
+silently attributes a vendor's rate to the wrong shipment. Most routes remain
+uncovered. Also still no CI: nothing runs the suite on push.
 
 `_strip_quoted` was deliberately left uncovered. `normalize_port` and
 `_extract_country` were covered, then deleted along with their modules.
@@ -144,6 +174,216 @@ permanent despite matching both keyword lists.
 - **Agent data quality.** "Emu Lines" and "Emulines" are listed as separate
   companies; two DP World rows carry `@unifeeder.com` addresses while Unifeeder
   is also its own entry.
+
+---
+
+## Fixed on 2026-08-16
+
+**An unhandled 500 was the one event that could not be traced.** The catch-all
+`@app.exception_handler(Exception)` in `app/errors.py` logged the traceback, but
+FastAPI registers that handler on Starlette's `ServerErrorMiddleware`, which
+`build_middleware_stack` places **outermost** — outside the `correlate`
+middleware. The exception therefore propagated out of `with request_context(...)`,
+resetting the contextvar, *before* the handler ran. Measured: `ctx=''` on the
+traceback, no access line (it is emitted after `call_next` returns, and it never
+returned), and no `X-Request-ID` on the response. The single line most worth
+correlating was the only line in the system that carried no id — and the runbook's
+"read the id off the response, then grep it" procedure silently did not apply to
+crashes. Now `correlate` catches, logs with the traceback while the id is still in
+scope, and re-raises; the catch-all only builds the response. Deliberately not
+both, or every 500 would write two tracebacks — and tracebacks are unredacted
+(P1-2), so duplicating them doubles the exposure. Residual: the 500 *response*
+still has no `X-Request-ID`, because Starlette builds it past the point the
+middleware can touch it. Match by timestamp and path.
+
+**A deliberate failure returned its reason to the caller and logged nothing.**
+`AppException` — the type every route raises — was turned into JSON without a log
+line, as was `RequestValidationError`. The access line recorded the status, never
+the reason, so a route raising `AppException(502, "postgrest upstream failed")`
+left a `-> 502` in the log with no trace of what failed; the detail reached the
+operator's browser and nowhere else, and a 422 was indistinguishable from a
+request that never arrived. Both now log, split by level per the contract: 5xx at
+ERROR (ours to fix), 4xx at WARNING (the caller's). A routine 404 does not deserve
+ERROR — that level means a human must act.
+
+**An inbound `X-Request-ID` could forge log structure.** It is the only
+correlation id not minted here, and it was rendered verbatim into `ctx` on every
+line of its request. Measured over real HTTP:
+`X-Request-ID: x] [job=scan:FORGED email=victim@example.com` produced
+
+    INFO [backend.app.api] [req=x] [job=scan:FORGED email=victim@example.com] GET /jobs/NOPE -> 404
+
+— a job and an email field that nothing set, on a line otherwise
+indistinguishable from a real one, corrupting exactly the audit trail the ids
+exist to provide. ANSI escapes and tabs also passed through (colour in `tail` from
+attacker input), and an 8192-char id was accepted and multiplied across every line
+of its request, which against a 10 MB × 50 rotation is a cheap way to evict
+history. h11 rejects a raw newline, so full forged lines are blocked by
+uvicorn — but not necessarily by another proxy or ASGI server in front. New
+`clean_incoming_id` accepts `[A-Za-z0-9._:-]{1,64}` and mints a fresh id for
+anything else: rejecting rather than stripping keeps the guarantee the format
+relies on, that a rendered `ctx` field was set by us. Legitimate ids still pass
+through, which is the point of honouring the header at all.
+
+All three found by cross-verification of the logging flow, and pinned by
+`tests/test_error_logging.py` (20 tests). Negative control: reverting the three
+fixes fails 7 of them, including
+`assert 'FORGED' not in ' [req=x] [job=scan:FORGED email=victim@example.com] '`.
+
+**A drafted RFQ was recorded as sent, whether or not the mail left.**
+`send_rfqs` inserted the `rfq_jobs` row with `status="rfqs_sent"` hardcoded,
+guarded only by "a draft exists and drafting did not raise" — a condition about
+the *model*, not the *sender*. `send_rfq_emails_batch` was called before the
+insert and its return value was used only for a count; per-agent outcomes were
+discarded.
+
+So a dead SMTP login, a rejected recipient, or `EMAIL_PROVIDER` misconfigured
+produced a dashboard full of jobs apparently awaiting replies from agents who
+were never contacted. Nothing later corrected it: replies attach by RFQ
+reference, and no agent holds a reference that was never delivered, so no reply
+could ever arrive to contradict the row. The failure mode presents as an
+unresponsive vendor — the operator chases the agent, or quietly drops them from
+future selections, over mail that never left this building.
+
+Three parts to the fix:
+
+- `_attach_send_status` records each draft's outcome on its own entry, **by
+  position** rather than by `vendor_name`. That name comes from the model
+  (`DraftEmail.vendor_name`) so it need not match the agent selected, and
+  multi-office agents share one name (P2-1) — a name-keyed dict collapses two
+  agents' outcomes into one. When the result count does not match the draft
+  count, positions are untrustworthy, so every entry becomes `unconfirmed`
+  rather than being guessed at.
+- `_record_job` stores `rfqs_sent` only when the sender reported `sent`, and
+  `send_failed` otherwise. `SENT_STATUS` is a single named constant, since
+  "failed", "skipped", `batch_error: …`, `unconfirmed` and a missing `status` key
+  all have to be treated identically.
+- The row is still written on failure, deliberately. A send failure can be
+  ambiguous — a timeout may have delivered — and dropping the row would strand
+  any reply that does arrive. `send_failed` is therefore in
+  `OPEN_JOB_STATUSES`, so such a job still accepts a reply and still appears in
+  the operator's queue instead of vanishing.
+
+`total_sent` in the response now counts confirmed sends rather than drafts handed
+to the sender.
+
+`tests/test_rfq_send.py` covers 14 outcomes. Restoring the hardcoded status alone
+fails 8 of them with `assert ['rfqs_sent'] == ['send_failed']`, including the
+mixed batch, the two same-named offices, the miscounted result list, and the
+batch call raising.
+
+**Approving an RFQ marked it awarded even when the acceptance email failed.**
+`rfq_service.approve` called `job_repo.set_status(reference, "approved")`
+unconditionally, outside the `try` wrapping the send, and hardcoded
+`"status": "approved"` in the response. `send_rfq_email` returns
+`{"status": "failed"}` rather than raising, so the ordinary failure — a dead SMTP
+login — never even reached the handler. The job went to `approved`, the operator
+was told it was approved, and the agent who won it was never informed.
+
+Nothing later contradicted the record: replies attach by RFQ reference, and
+`approved` is not in `OPEN_JOB_STATUSES`, so `link_reply` would not advance the
+job even if the agent wrote in. The winning vendor waits for a booking
+instruction that is not coming, and the desk believes the award is complete.
+
+This is the same defect as the send-path one below, one function later, on the
+step that commits the company to a vendor.
+
+A failure now raises `RfqError` (422) and leaves the status untouched, rather
+than recording a distinct status. Job statuses are enumerated in five places —
+`OPEN_JOB_STATUSES`, `metrics_service.JOB_STATUSES`, the `metrics_snapshots`
+columns, and two frontend status maps — so a sixth value would be uncounted in
+metrics and render as unknown in the UI until all five were updated. Leaving the
+job in its existing open status is also the truthful record: nobody has been told
+anything and a reply can still land, so `approve` is safe to call again once the
+sender is fixed. That is the operator's recovery path, and the error message says
+so.
+
+`tests/test_rfq_approve.py` covers 13 outcomes. Reverting the guard alone fails
+10 of them with `Failed: DID NOT RAISE RfqError` — `failed`, `skipped`,
+`unknown`, an empty status, a sender that raises, and a reply missing the
+`status` key all previously wrote `approved`. `dashboard/page.tsx:435`'s
+"Approved, but the acceptance email …" branch is now unreachable; the 422 renders
+through line 438.
+
+**Correlation ids were lost at every thread-pool boundary.** A contextvar is
+per-thread, so anything handed to a `ThreadPoolExecutor` started with an *empty*
+context and logged with no ids at all, however carefully the caller set them.
+asyncio tasks and anyio's threadpool (the one running FastAPI's sync endpoints)
+copy the context; a pool you create yourself does not.
+
+This voided the audit trail `logging_config.py` documents. Its carve-out keeps
+`email_classifier`'s rule lines at INFO because *"it is the only record of why an
+email got its label … with `email_id` now stamped on the line, it is a usable
+audit trail"* — but `classify_emails_batch` is a pool, so on the ingest path,
+where nearly all classification happens, those lines carried no id. Five workers
+interleaved `Classified by openai: general (85%)` with nothing to say which of
+five emails each line meant.
+
+`logging_context.carry_context` now wraps the worker at six pool sites
+(`email_classifier`, `rfq_service` drafting, `email_store` attachments,
+`gmail_connector` ×2, `backfill_3months`). It copies the four id *values* rather
+than using `copy_context()` as the wrapper: a single `Context` may only be
+entered once at a time, so N workers sharing one copy raise
+`RuntimeError: cannot enter context`.
+
+**Six of the seven scheduled jobs established no correlation id, and every one
+of them logged `str(e)` with no traceback.** Only the scan set an id, and only
+inside `run_scan`, so the handler above it did not get one either — ingest's
+lines, the attachment worker's and a concurrent scan's all arrived with an empty
+`ctx`, indistinguishable in a file they share with HTTP traffic. At two- and
+five-minute cadences that uncorrelated output is the bulk of the log.
+
+A single `_job()` wrapper in `lifespan.py` now supplies both, so a job added
+later cannot forget either. A new `job_id` contextvar carries the job *name*
+(`job=ingest:3f9a1c22`) because "which job is this?" is the first question asked
+of such a line and a bare hex id does not answer it. Job error messages changed
+text as a result: `"Scheduled scan error"` is now `"scan job failed"`.
+
+**`POST /automation/run-now` severed the request→work chain.** The 202 carried an
+`X-Request-ID` that appeared in no log line, because the scan ran in a new thread
+with an empty context — leaving wall-clock time as the only way to match an
+operator's complaint to the scan their click started. The thread target is now
+wrapped in `carry_context`.
+
+**Almost nothing logged a stack trace** — one `logger.exception` in the entire
+backend, in `errors.py`. 31 handlers now use `logger.exception`; `str(e)` alone is
+a bare key name for a `KeyError` and the empty string for a bare `RuntimeError`,
+which is not enough to act on a job that failed unattended at 3am. Nine sites
+were deliberately left as `logger.error`: each catches an already-diagnosed
+condition (missing file, bad config, DNS NXDOMAIN, expired auth code, rejected
+refresh token) or re-raises for someone else to log, and a traceback there is
+noise.
+
+**RFQ references drew from 65,536 values per day.** `new_reference` used
+`uuid4().hex[:4]`, and the suffix is scoped to a single date, so at ~150 RFQs a
+day there was a ~16% chance per day of minting a reference that already existed.
+`rfq_jobs.reference` is `unique`, so a collision never misattributed anything —
+it failed the insert *after* `send_rfq_emails_batch` had already delivered the
+mail, leaving an RFQ with an agent and no job row for its reply to attach to,
+which presents exactly like an agent who never answered. Now 8 hex characters.
+
+`_CORE` in `rfq_reference.py` was pinned to `[a-f0-9]{4}`, so widening the
+generator alone would have made every new reference unreadable. It now accepts
+`{4,8}` — the 4-char form has to keep resolving because ~150 legacy references
+are still out awaiting replies — with a trailing `(?![a-f0-9])` lookahead. The
+lookahead is load-bearing: without it a 4-char core could be shaved off the
+front of a longer hex run and resolve to a real-but-wrong job. Anything longer
+than 8 now matches nothing, on the principle that failing to attribute is
+recoverable and attributing to the wrong shipment is not.
+
+**Every Gmail failure on `/email-body/{id}` reported the message as deleted.**
+The 404 condition read `... == 404 or stored is None`, and control only reaches
+that handler when `stored` was already falsy — `email_repo.get_body` returns
+`None` for any message not yet persisted, which is the ordinary case for this
+fallback. So the second clause was always true, the 502 branch was unreachable,
+and an expired refresh token, a timeout, or a Gmail 500 all told the operator
+the mail "may have been deleted or moved" — advice to stop looking, for the one
+failure here a human can actually fix. Only Gmail's own 404 is a 404 now, and
+`GmailReauthRequired` gets its own message naming re-consent as the remedy.
+
+**No route had any test coverage.** `tests/test_inbox_routes.py` covers the six
+outcomes of a body lookup. The four provider-failure cases and the reauth case
+fail against the previous code with `assert 404 == 502`.
 
 ---
 

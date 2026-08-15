@@ -50,7 +50,9 @@ Known broken or unfinished:
 
 - Dashboard label corrections silently 422 and show "✓ Corrected" anyway
 - `frontend/src/app/page.tsx` (the "office view") is largely dead animation code
-- There are no automated tests
+- Test coverage is partial: 146 tests cover the reference matcher, the classifier
+  rules, logging, retry, and the body-lookup route — but no service or repository
+  has any, and nothing runs them on push
 
 All of it is written up with severities in [BUGS.md](BUGS.md).
 

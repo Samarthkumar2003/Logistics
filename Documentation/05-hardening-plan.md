@@ -247,7 +247,7 @@ destroys exactly the history an audit would ask for — hence the generous count
 
 ### Tier 1 — pure functions ✅ done 2026-08-12
 
-134 tests in `tests/`, offline, ~1 second: `python -m pytest`.
+146 tests in `tests/`, offline, ~1 second: `python -m pytest`.
 
 `extract_rfq_reference` got the most cases, because **all** rate-card
 attribution depends on it. Also covered: the classifier rule tiers,
