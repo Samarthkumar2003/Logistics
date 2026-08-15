@@ -1,9 +1,8 @@
-from dotenv import load_dotenv
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
-load_dotenv()
+from backend.core.rfq_reference import subject_token
 
 _client: Optional[OpenAI] = None
 
@@ -44,18 +43,15 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
         "Your job is to draft professional, concise emails to freight forwarding vendors asking for a rate quote. "
         "The user will provide SHIPMENT DETAILS and VENDOR CONTEXT. "
         f"Draft a separate email for each of these vendors: {agents_str}. "
-        f"Each email subject line MUST follow this format: \"{reference} | Request for Quotation - {mode} {origin} to {destination}\". "
+        f"Each email subject line MUST follow this format: \"{subject_token(reference)} | Request for Quotation - {mode} {origin} to {destination}\". "
+        "Keep the RFQId token exactly as written — it is how the reply gets matched back to this shipment. "
         "Keep the tone professional. Do NOT mention any historical pricing in the email to the vendor."
     )
 
-    agents_context = []
-    for a in agents:
-        entry = f"- {a['agent_name']} (specialty: {a.get('specialty', 'N/A')})"
-        if a.get("historical_rate"):
-            entry += f" [historical rate: {a['historical_rate']}]"
-        if a.get("historical_transit_days"):
-            entry += f" [historical transit: {a['historical_transit_days']} days]"
-        agents_context.append(entry)
+    agents_context = [
+        f"- {a['agent_name']} (specialty: {a.get('specialty', 'N/A')})"
+        for a in agents
+    ]
 
     weight = shipment_data.get("weight_kg")
     size = shipment_data.get("size", "")
@@ -70,7 +66,7 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
         + (f"Weight: {weight} kg\n" if weight is not None else "")
         + (f"Commodity: {commodity}\n" if commodity else "")
         + "\n"
-        f"VENDORS TO DRAFT FOR (context only, do NOT reveal historical rates):\n"
+        f"VENDORS TO DRAFT FOR (context only):\n"
         + "\n".join(agents_context)
     )
 
@@ -95,8 +91,8 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
 if __name__ == "__main__":
     mock_intake = {"origin": "Hamburg port", "destination": "Mumbai", "mode": "sea_freight", "weight_kg": 1500.0, "commodity": "spare automotive parts"}
     mock_agents = [
-        {"agent_name": "Kuehne+Nagel", "email": "quotes@kuehne-nagel.com", "specialty": "sea_freight", "historical_rate": 2100.0, "historical_transit_days": 28},
-        {"agent_name": "DB Schenker", "email": "rfq@dbschenker.com", "specialty": "sea_freight", "historical_rate": 1200.0, "historical_transit_days": 30}
+        {"agent_name": "Kuehne+Nagel", "email": "quotes@kuehne-nagel.com", "specialty": "sea_freight"},
+        {"agent_name": "DB Schenker", "email": "rfq@dbschenker.com", "specialty": "sea_freight"}
     ]
     mock_reference = "SHP-2026-0042"
     result = generate_rfq_drafts(mock_intake, mock_agents, mock_reference)

@@ -1,0 +1,102 @@
+[
+  {
+    "origin": "Sharjah, UAE",
+    "destination": "Bangalore, India",
+    "mode": "air_freight",
+    "weight_kg": 520,
+    "commodity": "industrial water pump, 1 pallet, import air freight",
+    "agent_used": "Falcon Freight LLC",
+    "rate_paid": 3200,
+    "transit_time_days": 3
+  },
+  {
+    "origin": "Nhava Sheva, India",
+    "destination": "Khorfakkan, UAE",
+    "mode": "sea_freight",
+    "weight_kg": 17500,
+    "commodity": "general cargo, 1x20FT container, EXW, export to UAE",
+    "agent_used": "Gulf Bridge Logistics",
+    "rate_paid": 950,
+    "transit_time_days": 12
+  },
+  {
+    "origin": "Mundra Port, India",
+    "destination": "Jeddah, Saudi Arabia",
+    "mode": "sea_freight",
+    "weight_kg": 288000,
+    "commodity": "foodstuff, 16x20GP containers, FOB Mundra, bulk food export to Saudi Arabia",
+    "agent_used": "Arabian Freight Services",
+    "rate_paid": 18400,
+    "transit_time_days": 18
+  },
+  {
+    "origin": "Coimbatore, India",
+    "destination": "Jeddah, Saudi Arabia",
+    "mode": "sea_freight",
+    "weight_kg": 16000,
+    "commodity": "aluminum pipes and tubes, 1x20FT container, EXW Coimbatore",
+    "agent_used": "Trans Arabia Cargo",
+    "rate_paid": 1150,
+    "transit_time_days": 20
+  },
+  {
+    "origin": "Mundra Port, India",
+    "destination": "Jebel Ali, UAE",
+    "mode": "sea_freight",
+    "weight_kg": 18000,
+    "commodity": "general cargo, 20FT FCL, Mundra to Jebel Ali",
+    "agent_used": "Falcon Freight LLC",
+    "rate_paid": 750,
+    "transit_time_days": 8
+  },
+  {
+    "origin": "Lucknow, India",
+    "destination": "Jebel Ali, UAE",
+    "mode": "sea_freight",
+    "weight_kg": 15000,
+    "commodity": "general cargo, 1x20FT, inland origin Lucknow to UAE port",
+    "agent_used": "Skyways Freight India",
+    "rate_paid": 1300,
+    "transit_time_days": 14
+  },
+  {
+    "origin": "Chennai, Tamil Nadu, India",
+    "destination": "Dubai, UAE",
+    "mode": "sea_freight",
+    "weight_kg": 42000,
+    "commodity": "out of gauge machinery, 2x40FR flat rack containers, EXW Tamil Nadu, OOG cargo",
+    "agent_used": "Heavy Cargo Solutions UAE",
+    "rate_paid": 8600,
+    "transit_time_days": 16
+  },
+  {
+    "origin": "Mundra Port, India",
+    "destination": "Jeddah, Saudi Arabia",
+    "mode": "sea_freight",
+    "weight_kg": 20000,
+    "commodity": "basmati rice, 1x20GP container, FOB Mundra, food grain export",
+    "agent_used": "Arabian Freight Services",
+    "rate_paid": 1050,
+    "transit_time_days": 18
+  },
+  {
+    "origin": "Cochin, India",
+    "destination": "Jebel Ali, UAE",
+    "mode": "sea_freight",
+    "weight_kg": 40000,
+    "commodity": "rice, 2x20GP containers, FOB Cochin, bulk grain export to UAE",
+    "agent_used": "Gulf Bridge Logistics",
+    "rate_paid": 1800,
+    "transit_time_days": 10
+  },
+  {
+    "origin": "Nhava Sheva, India",
+    "destination": "Dubai, UAE",
+    "mode": "sea_freight",
+    "weight_kg": 3500,
+    "commodity": "mixed LCL consolidated cargo, various commodities, India to UAE and Saudi Arabia",
+    "agent_used": "Consolidated Cargo India",
+    "rate_paid": 1400,
+    "transit_time_days": 15
+  }
+]

@@ -28,6 +28,24 @@ function formatReceived(iso?: string): string {
   if (isNaN(d.getTime())) return '';
   return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
+
+/* Label badge styling, keyed by label.
+ *
+ * `pending` matters: it means the classifier never managed to label the email,
+ * not that the email is unremarkable. It used to fall through to the `general`
+ * branch of a chain of ternaries here, which is exactly the mislabel the
+ * pending state exists to prevent — an unclassified enquiry that looks like a
+ * confident "general" is an RFQ nobody sends and nobody notices. */
+const LABEL_STYLE: Record<string, { bg: string; fg: string; border: string; text: string }> = {
+  customer_requirement: { bg: '#1e3a5f', fg: '#60a5fa', border: '#3b82f6', text: '📦 Customer Req' },
+  quotation_rate_card:  { bg: '#1a3a1a', fg: '#4ade80', border: '#22c55e', text: '💰 Rate Card' },
+  pending:              { bg: '#3a2a0a', fg: '#fbbf24', border: '#f59e0b', text: '⏳ Pending' },
+  general:              { bg: '#2a1a3a', fg: '#a78bfa', border: '#7c3aed', text: '📋 General' },
+};
+
+function labelStyle(label?: string) {
+  return LABEL_STYLE[label ?? ''] ?? LABEL_STYLE.general;
+}
 interface ShipmentDetails { origin: string; destination: string; weight_kg: number; commodity: string; mode: string; }
 interface HistoryMatch { commodity: string; agent_used: string; rate_paid: number; transit_time_days: number; similarity: number; }
 interface DraftEmail { vendor_name: string; subject: string; body: string; vendor_email?: string; }
@@ -64,21 +82,6 @@ interface RFQJob {
   created_at: string;
 }
 
-interface Quotation {
-  id: number;
-  agent_name: string;
-  agent_email: string;
-  rate: number;
-  currency: string;
-  transit_time_days: number;
-  validity: string;
-  terms: string;
-  ai_assessment: string;
-  predicted_low: number;
-  predicted_high: number;
-  received_at: string;
-  is_selected: boolean;
-}
 
 
 interface StepData {
@@ -327,8 +330,6 @@ export default function Office() {
   const [processResult, setProcessResult] = useState<ProcessEmailResult | null>(null);
   const [jobs, setJobs] = useState<RFQJob[]>([]);
   const [selectedJob, setSelectedJob] = useState<RFQJob | null>(null);
-  const [quotations, setQuotations] = useState<Quotation[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
@@ -371,8 +372,17 @@ export default function Office() {
   async function runAutomationNow() {
     setAutomationRunning(true);
     try {
+      // 202 = the scan was started in the background; 409 = one is already
+      // running. Neither returns results, so poll the status endpoint instead
+      // of treating the response body as a finished run.
       const res = await fetch(`${API_BASE}/automation/run-now`, { method: 'POST' });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      if (!res.ok) {
+        let detail = `Server error ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
+        throw new Error(detail);
+      }
+      // Give the scan a moment to record its first results, then refresh.
+      await new Promise(r => setTimeout(r, 3000));
       await fetchAutomationStatus();
       loadInbox(true, undefined, undefined, true);  // preserve scrolled depth
     } catch (err) {
@@ -470,47 +480,9 @@ export default function Office() {
   }
 
   async function handleSelectEmail(email: InboxEmail) {
-    setSelectedEmail(email);
-    setStatus('processing');
-    setLogs([]);
-    setProcessResult(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/process-email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sender: email.sender, subject: email.subject, body: email.body }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || `Server error ${res.status}`);
-      }
-      const result = await res.json();
-
-      // Store the process-email result for the "sent" view
-      const peResult: ProcessEmailResult = {
-        reference: result.reference,
-        shipment: result.shipment,
-        agents_contacted: result.agents_contacted || [],
-        send_results: result.send_results || [],
-      };
-      setProcessResult(peResult);
-
-      // Build a ProcessResult for the animation flow
-      const animResult: ProcessResult = {
-        job_id: result.reference || result.job_id || '',
-        shipment: result.shipment,
-        history_matches: result.history_matches || [],
-        drafts: result.drafts || [],
-      };
-      setApiResult(animResult);
-      setStep(0);
-      setStatus('running');
-      runFlow(animResult, email);
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Processing failed');
-      setStatus('error');
-    }
+    // Always route to the gated Send Request flow — never auto-process/auto-send.
+    // (The old /process-email auto-send path has been removed.)
+    return openSendRequest(email);
   }
 
   function runFlow(result: ProcessResult, email: InboxEmail) {
@@ -545,9 +517,6 @@ export default function Office() {
 
   async function loadJobDetail(job: RFQJob) {
     setSelectedJob(job);
-    setQuotations([]);
-
-    setSelectedAgent('');
     try {
       const res = await fetch(`${API_BASE}/jobs/${job.reference}`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
@@ -560,38 +529,6 @@ export default function Office() {
     }
   }
 
-  async function checkQuotations() {
-    if (!selectedJob) return;
-    try {
-      const res = await fetch(`${API_BASE}/jobs/${selectedJob.reference}/check-quotations`, {
-        method: 'POST',
-      });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      const data = await res.json();
-      setQuotations(data.quotations || []);
-
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to check quotations');
-    }
-  }
-
-  async function handleApproveQuotation() {
-    if (!selectedJob || !selectedAgent) return;
-    try {
-      const res = await fetch(`${API_BASE}/jobs/${selectedJob.reference}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_agent: selectedAgent }),
-      });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      await res.json();
-      // Refresh job detail after approval
-      loadJobDetail(selectedJob);
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Approval failed');
-    }
-  }
-
   function handleBackToInbox() {
     setSelectedEmail(null);
     setApiResult(null);
@@ -599,18 +536,12 @@ export default function Office() {
     setLogs([]);
     setProcessResult(null);
     setSelectedJob(null);
-    setQuotations([]);
-
-    setSelectedAgent('');
     setSearchQuery('');
     loadInbox(true);
   }
 
   function handleBackToJobs() {
     setSelectedJob(null);
-    setQuotations([]);
-
-    setSelectedAgent('');
     loadJobs();
   }
 
@@ -620,15 +551,6 @@ export default function Office() {
       case 'awaiting_quotes': return '#fbbf24';
       case 'quotes_received': return '#22c55e';
       case 'approved': return '#6b7280';
-      default: return '#6b7280';
-    }
-  }
-
-  function getAssessmentColor(assessment: string): string {
-    switch (assessment) {
-      case 'within_range': return '#22c55e';
-      case 'above_expected': return '#f59e0b';
-      case 'below_expected': return '#3b82f6';
       default: return '#6b7280';
     }
   }
@@ -801,20 +723,19 @@ export default function Office() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                     <span style={{
                       fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
-                      background: email.label === 'customer_requirement' ? '#1e3a5f'
-                        : email.label === 'quotation_rate_card' ? '#1a3a1a' : '#2a1a3a',
-                      color: email.label === 'customer_requirement' ? '#60a5fa'
-                        : email.label === 'quotation_rate_card' ? '#4ade80' : '#a78bfa',
-                      border: `1px solid ${email.label === 'customer_requirement' ? '#3b82f6'
-                        : email.label === 'quotation_rate_card' ? '#22c55e' : '#7c3aed'}`,
+                      background: labelStyle(email.label).bg,
+                      color: labelStyle(email.label).fg,
+                      border: `1px solid ${labelStyle(email.label).border}`,
                       textTransform: 'uppercase', letterSpacing: '0.05em',
                     }}>
-                      {email.label === 'customer_requirement' ? '📦 Customer Req'
-                        : email.label === 'quotation_rate_card' ? '💰 Rate Card'
-                        : '📋 General'}
+                      {labelStyle(email.label).text}
                     </span>
                     <span style={{ fontSize: 9, color: '#475569' }}>
-                      {email.label_confidence ? `${Math.round(email.label_confidence * 100)}%` : ''} {email.label_method ? `via ${email.label_method}` : ''}
+                      {/* No confidence or method for pending — there was no
+                          successful call to attribute one to. */}
+                      {email.label === 'pending'
+                        ? 'retrying shortly'
+                        : `${email.label_confidence ? `${Math.round(email.label_confidence * 100)}%` : ''} ${email.label_method ? `via ${email.label_method}` : ''}`}
                     </span>
                     {/* Correction dropdown */}
                     <select
@@ -1044,67 +965,14 @@ export default function Office() {
                 </div>
               </div>
 
-              {/* Check Quotations Button */}
-              <button className="approve-btn" onClick={checkQuotations}>
-                Check for Quotations
-              </button>
-
-              {/* Quotations Table */}
-              {quotations.length > 0 && (
-                <div style={{ marginTop: 14 }}>
-                  <div className="detail-label">Quotations ({quotations.length})</div>
-                  <table className="detail-table">
-                    <thead>
-                      <tr>
-                        <th></th>
-                        <th>Agent</th>
-                        <th>Rate</th>
-                        <th>Transit</th>
-                        <th>Validity</th>
-                        <th>Assessment</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {quotations.map((q) => (
-                        <tr key={q.id}>
-                          <td>
-                            <input
-                              type="radio"
-                              name="select-quotation"
-                              checked={selectedAgent === q.agent_name}
-                              onChange={() => setSelectedAgent(q.agent_name)}
-                              style={{ accentColor: '#3b82f6', cursor: 'pointer' }}
-                            />
-                          </td>
-                          <td>{q.agent_name}</td>
-                          <td>{q.currency} {q.rate.toFixed(2)}</td>
-                          <td>{q.transit_time_days}d</td>
-                          <td>{q.validity}</td>
-                          <td>
-                            <span style={{
-                              background: getAssessmentColor(q.ai_assessment),
-                              color: 'white', padding: '2px 6px', borderRadius: 10,
-                              fontSize: '0.6rem', fontWeight: 600,
-                            }}>
-                              {q.ai_assessment.replace(/_/g, ' ')}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-
-                  {/* Approve Selected */}
-                  <button
-                    className="approve-btn"
-                    onClick={handleApproveQuotation}
-                    style={{ opacity: selectedAgent ? 1 : 0.5, cursor: selectedAgent ? 'pointer' : 'not-allowed' }}
-                    disabled={!selectedAgent}
-                  >
-                    Approve Selected
-                  </button>
-                </div>
-              )}
+              {/* Agent replies live in the dashboard — this legacy view shows
+                  the job summary only. Rates are no longer parsed, so there is
+                  no table to render here. */}
+              <Link href="/dashboard" className="approve-btn" style={{
+                display: 'block', textAlign: 'center', textDecoration: 'none',
+              }}>
+                View replies in dashboard →
+              </Link>
 
               {errorMsg && status === 'job_detail' && (
                 <div style={{ color: '#ef4444', fontSize: 12, marginTop: 8 }}>{errorMsg}</div>

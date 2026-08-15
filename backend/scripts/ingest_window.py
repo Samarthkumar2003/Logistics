@@ -21,12 +21,14 @@ import sys
 from datetime import date, timedelta
 
 from backend.classifier.classification_cache import classify_with_cache, update_label
+from backend.core.db import get_db
+from backend.core.logging_config import configure_logging, default_log_file
 from backend.connectors.email_store import (
-    supabase, _existing_provider_ids, _thread_has_customer_requirement, store_attachment,
+    _existing_provider_ids, _thread_has_customer_requirement, store_attachment,
 )
 from backend.connectors.gmail_connector import iter_message_id_pages, fetch_full_records
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+configure_logging(log_file=default_log_file())  # bulk ingest: keep a record
 logger = logging.getLogger(__name__)
 
 
@@ -73,7 +75,7 @@ def ingest_window(after: date, before: date, skip_attachments: bool = False) -> 
                 except Exception as e:
                     logger.warning("thread-rule sync failed for %s: %s", key, e)
             try:
-                inserted = supabase.table("emails").insert({
+                inserted = get_db().table("emails").insert({
                     "message_id": r.get("message_id") or None,
                     "provider": r["provider"],
                     "provider_msg_id": key,

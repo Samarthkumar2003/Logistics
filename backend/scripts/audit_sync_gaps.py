@@ -13,8 +13,9 @@ import logging
 import sys
 
 from backend.connectors.email_store import audit_sync_gaps
+from backend.core.logging_config import configure_logging
 
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+configure_logging()  # read-only audit: console is enough
 logger = logging.getLogger(__name__)
 
 

@@ -1,13 +1,18 @@
 """
-Gmail connector using service account + Domain-Wide Delegation.
+Gmail connector. Two auth paths, preferred first:
 
+  1. User OAuth — a refresh token granted by the mailbox owner themselves.
+     Set GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET /
+     GMAIL_REFRESH_TOKEN. No admin involvement. See google_oauth.py and
+     backend/scripts/authorize_gmail.py.
+
+  2. Service account + Domain-Wide Delegation — service_account.json plus DWD
+     granted in the Workspace Admin Console. Legacy, being retired: the client
+     is revoking admin delegation.
+
+Both target users/me, so the whole API surface below is identical either way.
 Uses google.auth + requests directly (no googleapiclient overhead).
 AuthorizedSession is thread-safe → enables parallel message fetches.
-
-Requires:
-  - service_account.json in the project root
-  - GMAIL_MAILBOX env var (e.g. dhaval.shah@bhatiashipping.com)
-  - DWD granted in Google Workspace Admin Console
 """
 import base64
 import logging
@@ -15,47 +20,94 @@ import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
 
-from dotenv import load_dotenv
+from google.auth.exceptions import RefreshError
 from google.oauth2 import service_account
 from google.auth.transport.requests import AuthorizedSession
 
-load_dotenv()
+from backend.connectors.google_oauth import (
+    REAUTH_HINT,
+    SCOPES,
+    GmailReauthRequired,
+    build_user_credentials,
+    oauth_configured,
+)
 
 logger = logging.getLogger(__name__)
 
-SCOPES = [
-    "https://www.googleapis.com/auth/gmail.readonly",
-    "https://www.googleapis.com/auth/gmail.send",
-    "https://www.googleapis.com/auth/gmail.modify",
-]
-
+from backend.core.config import settings
 from backend.core.paths import SERVICE_ACCOUNT_FILE
 
 GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
-GMAIL_MAILBOX = (os.getenv("GMAIL_MAILBOX") or "").strip()
+GMAIL_MAILBOX = settings.gmail_mailbox
 
 _session: AuthorizedSession | None = None
+
+
+def _service_account_credentials() -> service_account.Credentials:
+    """Legacy DWD path — impersonates GMAIL_MAILBOX via admin-granted delegation."""
+    if not GMAIL_MAILBOX:
+        raise ValueError("GMAIL_MAILBOX not set in .env")
+    if not os.path.exists(SERVICE_ACCOUNT_FILE):
+        raise FileNotFoundError(f"service_account.json not found at {SERVICE_ACCOUNT_FILE}")
+    return service_account.Credentials.from_service_account_file(
+        SERVICE_ACCOUNT_FILE, scopes=SCOPES
+    ).with_subject(GMAIL_MAILBOX)
+
+
+def _verify_mailbox(session: AuthorizedSession) -> None:
+    """Confirm the token actually opens GMAIL_MAILBOX.
+
+    Under user OAuth the mailbox is whoever consented, not whoever .env names —
+    a mismatch would otherwise silently ingest the wrong inbox. Fail loudly at
+    startup instead.
+    """
+    if not GMAIL_MAILBOX:
+        return
+    resp = session.get(f"{GMAIL_BASE}/profile", timeout=15)
+    resp.raise_for_status()
+    actual = (resp.json().get("emailAddress") or "").strip()
+    if actual.lower() != GMAIL_MAILBOX.lower():
+        raise ValueError(
+            f"Gmail token belongs to {actual!r}, but GMAIL_MAILBOX is "
+            f"{GMAIL_MAILBOX!r}. Re-run authorize_gmail signed in as {GMAIL_MAILBOX}."
+        )
 
 
 def _get_session() -> AuthorizedSession:
     global _session
     if _session is not None:
         return _session
-    if not GMAIL_MAILBOX:
-        raise ValueError("GMAIL_MAILBOX not set in .env")
-    if not os.path.exists(SERVICE_ACCOUNT_FILE):
-        raise FileNotFoundError(f"service_account.json not found at {SERVICE_ACCOUNT_FILE}")
-    creds = service_account.Credentials.from_service_account_file(
-        SERVICE_ACCOUNT_FILE, scopes=SCOPES
-    ).with_subject(GMAIL_MAILBOX)
-    _session = AuthorizedSession(creds)
+    if oauth_configured():
+        logger.info("Gmail auth: user OAuth (%s)", GMAIL_MAILBOX or "mailbox unset")
+        session = AuthorizedSession(build_user_credentials())
+        try:
+            _verify_mailbox(session)
+        except RefreshError as e:
+            logger.error(REAUTH_HINT)
+            raise GmailReauthRequired(REAUTH_HINT) from e
+    else:
+        logger.warning(
+            "Gmail auth: falling back to service account + Domain-Wide Delegation. "
+            "This path dies when the client revokes admin delegation — set "
+            "GMAIL_REFRESH_TOKEN to migrate."
+        )
+        session = AuthorizedSession(_service_account_credentials())
+    _session = session
     return _session
 
 
 def _gmail_get(path: str, params: dict | None = None) -> dict:
-    """GET request to Gmail API, raises on non-200."""
+    """GET request to Gmail API, raises on non-200.
+
+    A dead refresh token surfaces as GmailReauthRequired rather than a generic
+    fetch failure — retrying never fixes it, a human has to re-consent.
+    """
     session = _get_session()
-    resp = session.get(f"{GMAIL_BASE}/{path}", params=params, timeout=15)
+    try:
+        resp = session.get(f"{GMAIL_BASE}/{path}", params=params, timeout=15)
+    except RefreshError as e:
+        logger.error(REAUTH_HINT)
+        raise GmailReauthRequired(REAUTH_HINT) from e
     resp.raise_for_status()
     return resp.json()
 

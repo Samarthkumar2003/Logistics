@@ -21,18 +21,11 @@ import time
 from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from dotenv import load_dotenv
-from supabase import create_client
-
 from backend.classifier.llm_provider import get_provider
+from backend.core.db import get_db
+from backend.core.rfq_reference import extract_rfq_reference, has_rfq_reference
 
-load_dotenv()
 logger = logging.getLogger(__name__)
-
-supabase = create_client(
-    os.environ.get("SUPABASE_URL", ""),
-    os.environ.get("SUPABASE_KEY", ""),
-)
 
 
 @dataclass
@@ -161,10 +154,14 @@ _RC_SUBJ_RE = re.compile(
 )
 
 # Cover-note body: sender says "find attached" with no rate data in plain text
+# `attach\w*` matters: the trailing \b after a bare `attach` meant "find
+# attached" — the single most common phrasing in this inbox — did not match,
+# while the literal "find attach" did. Those rate cards fell through to the LLM,
+# which sees a cover note with no rate table and answers general.
 _COVER_NOTE_RE = re.compile(
-    r"\b(kindly\s+find\s+attach|please\s+find\s+attach|find\s+attach|pfa\b|"
+    r"\b((?:kindly\s+|please\s+)?find\s+attach\w*|pfa\b|"
     r"attached\s+herewith|herewith\s+(?:pl\s+)?find|as\s+attached|"
-    r"kindly\s+find\s+the\s+(?:revised\s+)?rate|please\s+find\s+the\s+(?:revised\s+)?rate)\b",
+    r"(?:kindly|please)\s+find\s+the\s+(?:revised\s+)?rate)\b",
     re.I,
 )
 
@@ -187,7 +184,7 @@ def _extract_email_domain(sender: str) -> str:
 
 
 def classify_email(subject: str, body: str, sender: str = "") -> ClassificationResult:
-    """Classify one email. Internal-domain senders are marked general without an LLM call."""
+    """Classify one email. Rules short-circuit before any LLM call."""
     if _extract_email_domain(sender) in _INTERNAL_DOMAINS:
         logger.info("Rule: internal sender (%s) → general", sender)
         return ClassificationResult(
@@ -195,6 +192,24 @@ def classify_email(subject: str, body: str, sender: str = "") -> ClassificationR
             confidence=1.0,
             method="rule:internal_domain",
             details=f"Sender domain is internal ({sender})",
+        )
+
+    # An external sender quoting back an RFQId we issued is, by construction, an
+    # agent answering an RFQ we sent them. No model can know this better than we
+    # do — we generated the token. Certain, free, and it puts the email on the
+    # rate-card path where the scan will correlate it to its job.
+    #
+    # Subject only: the reference appears in the quoted original of every later
+    # message in the thread, so matching on the body would relabel operational
+    # follow-ups months later.
+    if has_rfq_reference(subject):
+        reference = extract_rfq_reference(subject)
+        logger.info("Rule: subject carries %s → quotation_rate_card", reference)
+        return ClassificationResult(
+            label="quotation_rate_card",
+            confidence=1.0,
+            method="rule:rfq_reference",
+            details=f"Reply to our RFQ {reference}",
         )
 
     subj_lower = subject.lower().strip()
@@ -302,16 +317,20 @@ def submit_feedback(
     corrected_label: str,
     confidence: float = 0.0,
 ) -> dict:
-    """Store a human correction in the feedback table."""
+    """Log a human correction.
+
+    This is an audit trail for measuring classifier accuracy and mining
+    disagreements for prompt work — there is no longer a training corpus to feed.
+    The label the operator actually sees comes from email_classifications, which
+    the caller updates separately."""
     try:
-        supabase.table("classification_feedback").insert({
+        get_db().table("classification_feedback").insert({
             "email_subject": email_subject,
             "email_body": email_body[:5000],
             "email_sender": email_sender,
             "predicted_label": predicted_label,
             "corrected_label": corrected_label,
             "confidence": confidence,
-            "added_to_training": False,
         }).execute()
     except Exception as e:
         logger.error("Failed to store feedback: %s", e)

@@ -1,11 +1,9 @@
 import os
 import logging
-from dotenv import load_dotenv
 from typing import Optional
 from pydantic import BaseModel, Field
 from openai import OpenAI
 import json
-from backend.core.port_normalizer import normalize_port
 from backend.core.retry_utils import with_retry
 
 log = logging.getLogger(__name__)
@@ -15,8 +13,6 @@ VALID_MODES = {"sea_freight", "air_freight", "road"}
 
 class ExtractionError(ValueError):
     """Raised when extracted shipment data fails confidence checks."""
-
-load_dotenv()
 
 _client: Optional[OpenAI] = None
 
@@ -65,9 +61,10 @@ def run_intake_agent(email_content: str) -> ShipmentDetails:
         response_format=ShipmentDetails,
     )
     result = completion.choices[0].message.parsed
-    # Normalize port names immediately after extraction
-    result.origin = normalize_port(result.origin)
-    result.destination = normalize_port(result.destination)
+    # Locations are kept exactly as the email stated them. The prompt above
+    # demands that verbatim, and port normalisation used to override it on the
+    # very next line — mapping "Mumbai" to "Nhava Sheva" and quoting the
+    # customer for a port they did not ask about.
     _validate_extraction(result)
     return result
 

@@ -23,11 +23,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dotenv import load_dotenv
 from supabase import create_client
 
+from backend.core.logging_config import configure_logging, default_log_file
+
 load_dotenv()
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s %(levelname)s [%(name)s] %(message)s",
-)
+configure_logging(log_file=default_log_file())  # bulk run: keep a record
 logger = logging.getLogger("backfill_3months")
 
 supabase = create_client(

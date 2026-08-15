@@ -13,10 +13,11 @@ import os
 from dotenv import load_dotenv
 from supabase import create_client
 
+from backend.core.logging_config import configure_logging, default_log_file
 from backend.core.paths import PROJECT_ROOT
 
 load_dotenv(PROJECT_ROOT / ".env")
-logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+configure_logging(log_file=default_log_file())  # writes agents: keep a record
 logger = logging.getLogger(__name__)
 
 AGENTS_CSV = PROJECT_ROOT / "data" / "agents_database.csv"

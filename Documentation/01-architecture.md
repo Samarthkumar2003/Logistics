@@ -1,0 +1,224 @@
+# 1. Architecture
+
+## What problem this solves
+
+A freight-forwarding desk gets a few hundred emails a day. Buried in them are
+two things that matter:
+
+1. **Customer requirements** — someone asking "what would it cost to ship X
+   from A to B?"
+2. **Rate cards** — a carrier or agent replying with prices.
+
+Everything else — bills of lading, arrival notices, invoices, "noted thanks" —
+is noise. The desk's job is to spot (1), ask several freight agents for a
+price, collect (2), compare, and pick a winner. This system does the reading,
+the drafting, and the filing. A human still decides.
+
+## The three flows
+
+The system is not one pipeline. It is three loops that meet in the database.
+
+```
+                    ┌───────────────────────────────────────────┐
+   Gmail  ────────► │  A. INGEST — every 5 min + on startup      │
+                    │  gmail_connector → classify → emails table │
+                    └───────────────────┬───────────────────────┘
+                                        │
+                     ┌──────────────────┴───────────────────┐
+                     ▼                                      ▼
+    ┌────────────────────────────────┐   ┌──────────────────────────────────┐
+    │  B. SCAN — every 5 min         │   │  C. HUMAN RFQ — operator-driven  │
+    │  unprocessed emails:           │   │  dashboard → Send Request:       │
+    │   • rate card → link to the    │   │   extract → draft → EDIT → send  │
+    │     RFQ it answers             │   │   one RFQ reference per agent    │
+    │   • customer req → count only  │   │   → rfq_jobs rows                │
+    │   • other → count only         │   └──────────────────────────────────┘
+    └────────────────────────────────┘
+```
+
+### A. Ingest — `connectors/email_store.py`
+
+Pulls mail from Gmail into the `emails` table. Two properties matter:
+
+**Idempotent.** Keyed on `provider_msg_id`. Re-running never duplicates, so
+each email is classified exactly once, ever.
+
+**Gap-proof.** It does not trust a cursor. Each run sweeps *every* page of
+message ids newer than the watermark and diffs them against what's already
+stored. This exists because a naive "stop at the first page I recognise"
+approach once silently lost ten days of mail — a gap can hide *below*
+already-ingested mail when messages arrive out of order. The watermark is held
+a day behind the newest mail and is only a performance bound, never the
+correctness mechanism. A daily audit job compares Gmail's per-day counts to the
+database and logs any day where they disagree.
+
+### B. Scan — `automation/automation.py`
+
+Every 5 minutes, claims unprocessed rows from `emails` and acts on the label.
+
+The claim is atomic (`UPDATE ... WHERE processed_at IS NULL`), so two workers
+can never both process the same email. If the work then throws, the claim is
+**handed back** and `processing_attempts` increments — up to 3, after which the
+row is left alone with `processing_error` set. (Before that, one exception
+retired an email permanently.)
+
+Only **one** branch does anything: `quotation_rate_card`, which links the reply
+to the RFQ it answers — see below. The `customer_requirement` branch counts the
+email and stops. That is intentional.
+
+A run reports why it produced its numbers via `ScanStats.status`
+(`completed` / `already_running` / `disabled` / `error`), and only `completed`
+runs are saved as the last result.
+
+### C. Human RFQ — the dashboard
+
+The only path by which an email leaves this system.
+
+```
+dashboard → click a customer request
+  → POST /extract-details    intake_agent reads the email, prefills the form
+  → POST /preview-rfq        rfq_agent drafts ONE sample email
+  → operator edits it
+  → POST /send-rfq           every selected agent gets THAT text, each with its
+                             own RFQ-YYYYMMDD-xxxx reference in the subject
+  → one rfq_jobs row per agent
+```
+
+## The human gate
+
+`automation.py` used to auto-generate and auto-send RFQs the moment it saw a
+customer requirement. That is switched off, and the function that did it has
+been deleted.
+
+**Why it matters:** these emails go to real vendors under the company's name.
+An LLM misreading a "please quote" in a quoted signature block and blasting 40
+carriers is not a recoverable mistake. The cost of a missed RFQ is an operator
+noticing it late; the cost of a wrong RFQ is a damaged vendor relationship.
+
+If you are asked to "automate the last step", push back or make it opt-in per
+customer. Do not quietly re-enable it.
+
+## Rate-card attribution
+
+When an agent replies with prices, the system does exactly one thing: work out
+*which RFQ the reply answers*, and record that link. It matches on the **RFQ
+reference**, which exists in two forms:
+
+| | | |
+|---|---|---|
+| canonical | `RFQ-20260101-a1b2` | what `rfq_jobs.reference` stores |
+| subject | `RFQId:20260101-a1b2` | what goes out in the subject line |
+
+The subject form is labelled so it survives a human retyping it and is obvious
+to an agent skimming their inbox. Matching accepts both — plus case and spacing
+variants — because ~150 RFQs went out in the bare form before the token existed.
+Extraction always returns the canonical form.
+
+**Every outgoing subject is passed through `inject_reference()`.** The RFQ
+drafting prompt also asks for the token, but asking is not enough: when the model
+deviated, the RFQ left unmatchable and its reply could never be attributed to a
+shipment. Injection replaces whatever the model produced, so exactly one
+reference is present and it is the right one.
+
+```
+reply arrives
+  → classifier: subject carries one of our references?  →  quotation_rate_card
+                (certain, no model call — we issued the token)
+  → scan: resolve the reference to a job
+      found     → emails.rfq_reference = ref, job → quotes_received
+      otherwise → left unlinked, visible in the inbox and the Needs Linking tab
+```
+
+That's the whole thing. **Rates are not extracted and prices are not
+predicted.** The operator opens the reply and reads it — body and attachments,
+as the agent wrote it.
+
+**Why it works this way.** The system used to run the reply through an LLM to
+pull out structured rates, then estimate a fair price and grade the quote
+against it. Three things went wrong with that, all of them quiet:
+
+- The extraction schema made `transit_time_days` a required integer and the
+  prompt said "use reasonable defaults" — so a reply that never mentioned
+  transit got an invented number, stored and displayed as if quoted.
+- The price verdict compared a bare number against a USD range while the
+  parsed currency sat unused next to it, so an INR quote always read "above
+  expected".
+- One reply quoting three container sizes became three rows, and everything
+  downstream that treated a row as an agent double-counted.
+
+A freight desk reads rate cards for a living. Handing them the agent's own
+email is both cheaper and more trustworthy than handing them a summary that
+might be fabricated.
+
+Matching is case-insensitive and the reference is normalised to its stored form,
+because agents retype it by hand.
+
+**Consequence you must plan for:** an agent who drops the reference is not
+linked to their job. Nothing is lost — the email is in the inbox, labelled
+💰 Rate Card — but it won't appear on the request page.
+
+Those replies are collected in the dashboard's **Needs Linking** tab
+(`GET /rate-cards/unlinked`), which is simply the query
+`classification = 'quotation_rate_card' AND rfq_reference IS NULL`. Each row
+carries a reason worked out at read time, because the two cases want different
+responses:
+
+| Reason | What it means |
+|---|---|
+| *No RFQ reference in the reply* | Routine. The agent replied fresh or stripped the subject. |
+| *Cites `RFQ-…`, which matches no job* | Worth a look — a typo, a deleted job, or a reference from somewhere that isn't this system. |
+
+The tab currently lists; it does not yet let you assign a reply to a job. That
+is the obvious next step.
+
+## Classification
+
+`classifier/email_classifier.py`. Three cheap rules short-circuit; anything
+left goes to one LLM call.
+
+| Step | Rule | Result |
+|---|---|---|
+| 1 | Sender is an internal domain | `general`, no API call |
+| 2 | **Subject carries an RFQId we issued** | `quotation_rate_card`, no API call |
+| 3 | Job-reference subject with no rate/quote keyword | `general`, no API call |
+| 4 | Rate-card subject + "please find attached" | `quotation_rate_card`, no API call |
+| 5 | One LLM call via `llm_provider` | the label |
+
+Labels: `customer_requirement`, `quotation_rate_card`, `general`.
+
+Rule 2 is the strongest signal in the system: an external sender quoting back a
+token *we generated* is, by construction, an agent answering an RFQ we sent. No
+model can know that better than we do, so it returns confidence 1.0 and skips the
+call entirely. It matches the **subject only** — the reference appears in the
+quoted original of every later message in a thread, so matching the body would
+relabel operational follow-ups months afterwards.
+
+Two design points worth understanding:
+
+**Failure is not `general`.** When the LLM call fails (quota, outage), the row
+is marked `classification_status='pending'`, not silently labelled `general`.
+An unclassified customer enquiry that *looks* like a confident "general" is an
+RFQ that never gets sent and nobody notices. A 15-minute retry job drains the
+pending queue when the provider recovers, and the UI shows "⏳ Pending".
+
+**The thread rule.** Once a thread has produced a `customer_requirement`, every
+later email in it is forced to `general`. Without this, every "kind reminder"
+in a chain spawns another RFQ job and another Send button.
+
+## Model usage
+
+Three calls, total. Everything else is plain Python.
+
+| Where | Model | Notes |
+|---|---|---|
+| Classification | `gpt-4o-mini` via `llm_provider` | Once per email, cached. Swap with `LLM_PROVIDER=openai\|gemini` |
+| Intake extraction | `gpt-4o-mini` | Structured output into `ShipmentDetails`, on demand from the Send Request form |
+| RFQ drafting | **`gpt-4o`** | The only place the expensive model is used |
+
+Only classification goes through the `llm_provider` abstraction; the other two
+call the OpenAI SDK directly with a hard-coded model. That inconsistency is
+known, not intentional.
+
+Note what is **not** on this list: nothing reads an agent's reply with a model,
+and nothing estimates a price. Rate-card handling is a regex for the reference
+plus one `UPDATE`.

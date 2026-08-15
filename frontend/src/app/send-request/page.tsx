@@ -138,6 +138,48 @@ export default function SendRequestPage() {
   const [result, setResult] = useState<SendRFQResponse | null>(null);
   const [preview, setPreview] = useState<DraftPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  // The user-editable draft, seeded from the preview. This exact text is what
+  // gets sent (one shared draft for all selected agents).
+  const [editedSubject, setEditedSubject] = useState('');
+  const [editedBody, setEditedBody] = useState('');
+  // True when the editor was opened without an AI draft (generation failed, e.g.
+  // LLM quota) — the user composes by hand. Send works identically.
+  const [manualDraft, setManualDraft] = useState(false);
+
+  // Ad-hoc recipients typed in by hand — agents not in the DB list. Merged with
+  // the checkbox-selected agents at preview/send time. Keyed by lowercased email.
+  const [manualAgents, setManualAgents] = useState<{ agent_name: string; email: string }[]>([]);
+  const [manualEmailInput, setManualEmailInput] = useState('');
+  const [manualNameInput, setManualNameInput] = useState('');
+
+  // Starter template built from the form, used when composing manually.
+  function manualStarter() {
+    const modeLabel = mode.replace('_', ' ');
+    const subject = `Request for Quotation - ${modeLabel} ${originPort.trim()} to ${destPort.trim()}`.trim();
+    const details = [
+      `Origin: ${originPort.trim() || '-'}`,
+      `Destination: ${destPort.trim() || '-'}`,
+      `Mode: ${modeLabel}`,
+      commodity.trim() ? `Commodity: ${commodity.trim()}` : null,
+      size.trim() ? `Size: ${size.trim()}` : null,
+      weightKg.trim() ? `Weight: ${weightKg.trim()} kg` : null,
+    ].filter(Boolean);
+    const body = [
+      'Dear Team,', '',
+      'We have the following shipment enquiry and would appreciate your best rate and transit time:', '',
+      ...details, '',
+      'Please share your best quotation at the earliest.', '', 'Best regards,',
+    ].join('\n');
+    return { subject, body };
+  }
+
+  function openManualDraft() {
+    const { subject, body } = manualStarter();
+    setEditedSubject(subject);
+    setEditedBody(body);
+    setManualDraft(true);
+    setPreview({ reference: '', vendor_name: '', subject, body, note: '' });
+  }
 
   useEffect(() => {
     async function init() {
@@ -197,14 +239,62 @@ export default function SendRequestPage() {
     });
   }
 
+  // Basic RFC-ish email shape check — enough to catch typos, not to be a parser.
+  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+  function addManualEmail() {
+    // Accept one or many at once — split on newline / comma / semicolon / space so
+    // Enter-per-email, paste-a-list, and "a@x.com, b@y.com" all work.
+    const tokens = manualEmailInput.split(/[\s,;]+/).map(t => t.trim()).filter(Boolean);
+    if (tokens.length === 0) return;
+
+    const invalid: string[] = [];
+    const added: { agent_name: string; email: string }[] = [];
+    setManualAgents(prev => {
+      const seen = new Set([
+        ...prev.map(m => m.email.toLowerCase()),
+        ...agents.map(a => a.email.toLowerCase()),
+      ]);
+      for (const email of tokens) {
+        const lower = email.toLowerCase();
+        if (!EMAIL_RE.test(email)) { invalid.push(email); continue; }
+        if (seen.has(lower)) continue;      // dedup against agents + already-added
+        seen.add(lower);
+        // Optional name applies only when a single address is entered.
+        const name = (tokens.length === 1 && manualNameInput.trim())
+          ? manualNameInput.trim()
+          : email.split('@')[0];
+        added.push({ agent_name: name, email });
+      }
+      return [...prev, ...added];
+    });
+
+    // Keep any invalid tokens in the box so the user can fix them; clear the rest.
+    setManualEmailInput(invalid.join(', '));
+    if (added.length > 0) setManualNameInput('');
+    setErrorMsg(invalid.length > 0 ? `Not a valid email: ${invalid.join(', ')}` : '');
+  }
+
+  function removeManualEmail(email: string) {
+    setManualAgents(prev => prev.filter(m => m.email !== email));
+  }
+
+  // Recipients = checkbox-selected DB agents + hand-entered emails.
+  const selectedAgents = agents.filter(a => selected.has(a.id));
+  const recipients = [
+    ...selectedAgents.map(a => ({ agent_name: a.agent_name, email: a.email })),
+    ...manualAgents,
+  ];
+  const totalRecipients = recipients.length;
+
   async function handlePreview() {
     setErrorMsg('');
     if (!originPort.trim() || !destPort.trim()) { setErrorMsg('Origin and destination ports are required'); return; }
 
-    // Preview addresses the first selected agent, or a placeholder if none picked yet
-    const chosen = agents.filter(a => selected.has(a.id));
-    const sampleAgent = chosen.length > 0
-      ? { agent_name: chosen[0].agent_name, email: chosen[0].email }
+    // Preview addresses the first recipient (selected agent or hand-entered
+    // email), or a placeholder if none picked yet.
+    const sampleAgent = recipients.length > 0
+      ? { agent_name: recipients[0].agent_name, email: recipients[0].email }
       : null;
 
     setPreviewing(true);
@@ -227,17 +317,24 @@ export default function SendRequestPage() {
         try { detail = (await res.json()).detail || detail; } catch { /* non-JSON body */ }
         throw new Error(detail);
       }
-      setPreview(await res.json());
+      const data = await res.json();
+      setManualDraft(false);
+      setPreview(data);
+      setEditedSubject(data.subject || '');
+      setEditedBody(data.body || '');
     } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Preview failed');
+      // Draft generation failed (commonly LLM quota). Don't dead-end — open a
+      // manual draft seeded from the form so the user can still compose & send.
+      const msg = err instanceof Error ? err.message : 'Preview failed';
+      setErrorMsg(`AI draft unavailable (${msg}) — compose the draft manually below.`);
+      openManualDraft();
     }
     setPreviewing(false);
   }
 
   async function handleSend() {
     setErrorMsg('');
-    const chosen = agents.filter(a => selected.has(a.id));
-    if (chosen.length === 0) { setErrorMsg('Select at least one agent'); return; }
+    if (recipients.length === 0) { setErrorMsg('Select at least one agent or add an email'); return; }
     if (!originPort.trim() || !destPort.trim()) { setErrorMsg('Origin and destination ports are required'); return; }
 
     setPhase('sending');
@@ -252,10 +349,15 @@ export default function SendRequestPage() {
           commodity,
           mode,
           weight_kg: weightKg.trim() ? parseFloat(weightKg) : null,
-          agents: chosen.map(a => ({ agent_name: a.agent_name, email: a.email })),
+          agents: recipients,
           customer_sender: sourceEmail?.sender || '',
           customer_subject: sourceEmail?.subject || '',
           customer_body: sourceEmail?.body || '',
+          // Links every RFQ from this request back to the customer email (Phase 1).
+          customer_email_id: sourceEmail?.id || '',
+          // Send the edited draft verbatim when one has been previewed/edited.
+          // Omitted otherwise, so the backend falls back to per-agent generation.
+          ...(preview ? { edited_subject: editedSubject, edited_body: editedBody } : {}),
         }),
       });
       if (!res.ok) {
@@ -274,7 +376,11 @@ export default function SendRequestPage() {
 
   return (
     <div style={{
-      minHeight: '100vh', background: '#0a0e17', color: '#e2e8f0',
+      // globals.css pins `body { height:100vh; overflow:hidden }` for the fixed
+      // dashboard, which clips this tall form and removes the page scrollbar.
+      // Own the scroll here: fill the viewport and scroll internally.
+      height: '100vh', overflowY: 'auto',
+      background: '#0a0e17', color: '#e2e8f0',
       fontFamily: 'monospace', padding: '32px 24px',
     }}>
       <div style={{ maxWidth: 720, margin: '0 auto' }}>
@@ -395,7 +501,7 @@ export default function SendRequestPage() {
             </div>
 
             {/* Agent multi-selects */}
-            <div style={{ display: 'grid', gap: 16, marginBottom: 24 }}>
+            <div style={{ display: 'grid', gap: 16, marginBottom: 16 }}>
               {CATEGORIES.map(c => (
                 <AgentMultiSelect
                   key={c.key}
@@ -407,6 +513,59 @@ export default function SendRequestPage() {
               ))}
             </div>
 
+            {/* Manual email entry — add recipients not in the agent list */}
+            <div style={{ marginBottom: 24 }}>
+              <span style={labelStyle}>Add emails manually</span>
+              <div style={{ display: 'flex', gap: 8 }}>
+                <input
+                  style={{ ...inputStyle, flex: 1 }}
+                  value={manualNameInput}
+                  onChange={e => setManualNameInput(e.target.value)}
+                  placeholder="Name (optional)"
+                />
+                <input
+                  style={{ ...inputStyle, flex: 2 }}
+                  value={manualEmailInput}
+                  onChange={e => setManualEmailInput(e.target.value)}
+                  onKeyDown={e => {
+                    if (e.key === 'Enter') { e.preventDefault(); addManualEmail(); }
+                  }}
+                  placeholder="email@example.com — press Enter to add"
+                  type="email"
+                />
+                <button
+                  type="button"
+                  onClick={addManualEmail}
+                  style={{
+                    ...inputStyle, width: 'auto', padding: '9px 16px', cursor: 'pointer',
+                    color: '#60a5fa', border: '1px solid #3b82f6', whiteSpace: 'nowrap',
+                  }}
+                >+ Add</button>
+              </div>
+              {manualAgents.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+                  {manualAgents.map(m => (
+                    <span key={m.email} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      background: '#1e3a5f', border: '1px solid #3b82f6', borderRadius: 14,
+                      padding: '4px 6px 4px 10px', fontSize: 11, color: '#e2e8f0',
+                    }}>
+                      {m.agent_name} · {m.email}
+                      <button
+                        type="button"
+                        onClick={() => removeManualEmail(m.email)}
+                        aria-label={`Remove ${m.email}`}
+                        style={{
+                          background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer',
+                          fontSize: 14, lineHeight: 1, padding: '0 2px',
+                        }}
+                      >×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Draft preview panel */}
             {preview && (
               <div style={{
@@ -415,27 +574,42 @@ export default function SendRequestPage() {
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
                   <span style={{ fontSize: 12, fontWeight: 700, color: '#a78bfa' }}>
-                    👁 DRAFT PREVIEW — to {preview.vendor_name}
+                    {manualDraft ? '✍️ COMPOSE DRAFT' : '✏️ EDIT DRAFT'} — sent to all {totalRecipients} agent{totalRecipients === 1 ? '' : 's'}
                   </span>
                   <button
-                    onClick={() => setPreview(null)}
+                    onClick={() => { setPreview(null); setManualDraft(false); }}
                     style={{
                       marginLeft: 'auto', background: 'transparent', border: 'none',
                       color: '#64748b', fontSize: 16, cursor: 'pointer', padding: '0 4px',
                     }}
                   >×</button>
                 </div>
-                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>{preview.note}</div>
-                <div style={{ fontSize: 12, color: '#e2e8f0', marginBottom: 8 }}>
-                  <span style={{ color: '#94a3b8' }}>Subject: </span>{preview.subject}
+                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+                  Edit freely. Each agent gets its own unique RFQ reference added to the subject
+                  automatically, so replies still match the right agent.
                 </div>
-                <div style={{
-                  fontSize: 12, color: '#cbd5e1', whiteSpace: 'pre-wrap', lineHeight: 1.6,
-                  background: '#080b12', border: '1px solid #1e293b', borderRadius: 6,
-                  padding: 12, maxHeight: 320, overflowY: 'auto',
-                }}>
-                  {preview.body}
-                </div>
+                <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 4 }}>Subject</label>
+                <input
+                  value={editedSubject}
+                  onChange={e => setEditedSubject(e.target.value)}
+                  style={{
+                    width: '100%', fontSize: 12, color: '#e2e8f0', marginBottom: 12,
+                    background: '#080b12', border: '1px solid #1e293b', borderRadius: 6,
+                    padding: '8px 10px', boxSizing: 'border-box',
+                  }}
+                />
+                <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 4 }}>Body</label>
+                <textarea
+                  value={editedBody}
+                  onChange={e => setEditedBody(e.target.value)}
+                  rows={12}
+                  style={{
+                    width: '100%', fontSize: 12, color: '#cbd5e1', lineHeight: 1.6,
+                    whiteSpace: 'pre-wrap', background: '#080b12', border: '1px solid #1e293b',
+                    borderRadius: 6, padding: 12, boxSizing: 'border-box', resize: 'vertical',
+                    fontFamily: 'inherit',
+                  }}
+                />
               </div>
             )}
 
@@ -452,8 +626,19 @@ export default function SendRequestPage() {
                   cursor: previewing ? 'default' : 'pointer',
                 }}
               >
-                {previewing ? '⏳ Drafting...' : '👁 Preview draft'}
+                {previewing ? '⏳ Drafting...' : (preview ? '🔄 Re-draft' : '👁 Draft & edit')}
               </button>
+              {!preview && (
+                <button
+                  onClick={openManualDraft}
+                  disabled={previewing || phase === 'sending'}
+                  style={{
+                    flex: '0 0 auto', padding: '14px 20px', fontSize: 13, fontWeight: 600,
+                    background: 'transparent', color: '#94a3b8',
+                    border: '1px solid #334155', borderRadius: 8, cursor: 'pointer',
+                  }}
+                >✍️ Write manually</button>
+              )}
               <button
                 onClick={handleSend}
                 disabled={phase === 'sending'}
@@ -465,8 +650,8 @@ export default function SendRequestPage() {
                 }}
               >
                 {phase === 'sending'
-                  ? 'Generating drafts & sending...'
-                  : `Send RFQ to ${selected.size} agent${selected.size === 1 ? '' : 's'}`}
+                  ? (preview ? 'Sending edited draft...' : 'Generating drafts & sending...')
+                  : `${preview ? 'Send edited draft' : 'Send RFQ'} to ${totalRecipients} agent${totalRecipients === 1 ? '' : 's'}`}
               </button>
             </div>
           </>

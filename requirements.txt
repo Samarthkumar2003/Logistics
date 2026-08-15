@@ -8,12 +8,15 @@ anthropic>=0.25.0
 msal>=1.28.0
 google-auth>=2.29.0
 google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
 google-api-python-client>=2.120.0
 google-genai>=1.0.0
-numpy>=1.26.0
-scikit-learn>=1.4.0
-sentence-transformers>=3.0.0
-torch>=2.2.0
 openpyxl>=3.1.0
 apscheduler>=3.10.0
 supabase>=2.0.0
+# Structured logs when LOG_JSON=1. Optional at runtime — logging_config falls
+# back to the text format if it is missing rather than refusing to boot.
+python-json-logger>=2.0.0
+# Tests. The suite is offline by design — no Supabase, no Gmail, no LLM — so
+# `python -m pytest` needs no secrets and is safe to run against a live .env.
+pytest>=8.0.0

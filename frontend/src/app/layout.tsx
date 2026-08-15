@@ -1,9 +1,16 @@
 import "./globals.css";
+import Script from "next/script";
 
 export const metadata = {
   title: "Logistics Copilot - Multi-Agent Office",
   description: "Visual interface for AI operations",
 };
+
+// Applied before paint so a stored light theme never flashes dark first. Dark is
+// the default. `beforeInteractive` must live in the root layout — it is injected
+// into <head> and runs before hydration, replacing the old inline <script> in the
+// dashboard layout (which React 19 refuses to execute on the client).
+const THEME_INIT = `(function(){try{var t=localStorage.getItem('dashboard-theme');document.documentElement.dataset.theme=t==='light'?'light':'dark';}catch(e){document.documentElement.dataset.theme='dark';}})();`;
 
 export default function RootLayout({
   children,
@@ -16,6 +23,9 @@ export default function RootLayout({
     // output. Suppression applies to this element only, not its subtree.
     <html lang="en" suppressHydrationWarning>
       <body>
+        <Script id="theme-init" strategy="beforeInteractive">
+          {THEME_INIT}
+        </Script>
         {children}
       </body>
     </html>

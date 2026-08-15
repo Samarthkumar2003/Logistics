@@ -1,194 +1,141 @@
 """
 daily_report.py
 ---------------
-Scans previous day's inbox (ALL emails, no filter), classifies them,
-extracts structured fields from customer_requirement and quotation_rate_card
-emails, builds a 2-sheet Excel, and emails it to REPORT_RECIPIENT.
+Summarises a day's freight enquiries and rate cards into a 2-sheet Excel
+workbook and emails it to REPORT_RECIPIENT.
+
+Reads from the Supabase `emails` table, NOT from Gmail. Ingest already persists
+every message with its body and its label, so this job needs no mailbox
+credentials and does not re-classify anything — it reuses the label the
+dashboard shows, which means the report and the UI can never disagree.
 
 Usage:
-    python daily_report.py                        # yesterday's emails → email report
-    python daily_report.py --dry-run              # save Excel locally, do not email
-    python daily_report.py --since 2026/05/01     # backfill from date (uses subject filter + 1000 cap)
-
-Schedule via Windows Task Scheduler at 8am daily (no args needed).
+    python -m backend.app.daily_report                    # yesterday → email
+    python -m backend.app.daily_report --dry-run          # save .xlsx locally
+    python -m backend.app.daily_report --since 2026-05-01 # backfill from a date
 
 Required env vars:
-    EMAIL_ACCOUNT, EMAIL_PASSWORD      (SMTP sender — labsxelta Gmail app password)
-    REPORT_RECIPIENT                   (email address to receive daily report)
-    GMAIL_MAILBOX                      (client inbox to scan)
-    EMAIL_PROVIDER=gmail_workspace
+    SUPABASE_URL, SUPABASE_KEY         (the email store)
+    OPENAI_API_KEY                     (field extraction for the spreadsheet)
+    EMAIL_ACCOUNT, EMAIL_PASSWORD      (SMTP sender)
+    REPORT_RECIPIENT                   (comma-separated recipients)
 """
 
+import argparse
 import json
 import logging
 import os
 import re
-import sys
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from io import BytesIO
 
-from dotenv import load_dotenv
 from openai import OpenAI
 import openpyxl
 from openpyxl.styles import Font, PatternFill, Alignment
 from openpyxl.utils import get_column_letter
 
-load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(levelname)s %(message)s")
+from backend.core.config import settings
+from backend.core.db import get_db
+from backend.core.logging_config import configure_logging, default_log_file
+
+# To a file, not just the console. This runs unattended at 02:30 UTC; without a
+# file, a 2am failure leaves nothing behind but whatever the caller happened to
+# redirect. (In GitHub Actions LOG_TO_FILE=0 turns this off — the runner's disk
+# is discarded and Actions captures stdout anyway.)
+configure_logging(log_file=default_log_file())
 logger = logging.getLogger(__name__)
 
-_api_key = (os.environ.get("OPENAI_API_KEY") or "").strip()
-if not _api_key:
-    raise RuntimeError("OPENAI_API_KEY is not set or is empty")
-logger_pre = logging.getLogger(__name__)
-logger_pre.info("OPENAI_API_KEY loaded: starts=%s len=%d", _api_key[:8], len(_api_key))
-openai_client = OpenAI(api_key=_api_key)
+settings.require_openai()
+openai_client = OpenAI(api_key=settings.openai_api_key)
 
-REPORT_RECIPIENT = (os.environ.get("REPORT_RECIPIENT") or "").strip()
-VALID_LABELS = {"customer_requirement", "quotation_rate_card", "general", "skip"}
+REPORT_RECIPIENT = settings.report_recipient
+
+REPORTED_LABELS = ("customer_requirement", "quotation_rate_card")
+PAGE = 500
 
 
 # ---------------------------------------------------------------------------
-# Email fetching
+# Email fetching — from the store, not the mailbox
 # ---------------------------------------------------------------------------
 
-_LOGISTICS_SUBJECT_FILTER = (
-    "subject:RFQ OR subject:quotation OR subject:\"rate request\" OR "
-    "subject:\"rate card\" OR subject:\"spot rate\" OR subject:\"rate offer\" OR "
-    "subject:\"rate sheet\" OR subject:\"rate update\" OR subject:\"freight rate\" OR "
-    "subject:\"ocean freight\" OR subject:\"air freight\" OR subject:\"sea freight\" OR "
-    "subject:enquiry OR subject:inquiry OR subject:\"quote request\" OR "
-    "subject:\"booking request\" OR subject:\"rate req\" OR subject:FCL OR "
-    "subject:LCL OR subject:\"20ft\" OR subject:\"40ft\" OR subject:\"20GP\" OR "
-    "subject:\"40HC\" OR subject:cargo OR subject:shipment OR subject:\"rate valid\" OR "
-    "subject:\"best rate\" OR subject:costing OR subject:tariff"
-)
+def _fetch_emails(since: date, before: date | None) -> list[dict]:
+    """Every reportable email received in [since, before).
 
-
-def _fetch_emails(since: str, before: str | None = None, backfill: bool = False) -> list[dict]:
-    """Fetch emails between since and before (YYYY/MM/DD).
-
-    Daily mode (backfill=False): fetches ALL emails, no subject filter, no cap.
-    Backfill mode (backfill=True): applies subject filter + 1000 cap to handle large ranges.
+    Only the two labels that appear in the report are selected, so a day of
+    routine operational mail costs nothing to skip. Rows whose classification
+    never succeeded are counted separately and warned about — they are the
+    reason a report might be short.
     """
-    provider = os.getenv("EMAIL_PROVIDER", "gmail").lower()
-
-    if provider == "gmail_workspace":
-        import time
-        from backend.connectors.gmail_connector import _get_service, _decode_header_value, _extract_body
-        from googleapiclient.errors import HttpError
-
-        query = f"after:{since}"
-        if before:
-            query += f" before:{before}"
-        if backfill:
-            query += f" ({_LOGISTICS_SUBJECT_FILTER})"
-
-        cap = 1000 if backfill else 10000
-
-        service = _get_service()
-        refs = []
-        page_token = None
-        while len(refs) < cap:
-            kwargs = {
-                "userId": "me",
-                "maxResults": min(500, cap - len(refs)),
-                "q": query,
-            }
-            if page_token:
-                kwargs["pageToken"] = page_token
-            result = service.users().messages().list(**kwargs).execute()
-            refs.extend(result.get("messages", []))
-            page_token = result.get("nextPageToken")
-            if not page_token:
-                break
-
-        logger.info("Found %d emails (%s)", len(refs), "backfill" if backfill else "daily")
-
-        # Deduplicate by threadId — keep only the first (oldest) email per thread
-        seen_threads: set[str] = set()
-        unique_refs = []
-        for ref in reversed(refs):  # reversed = oldest first
-            tid = ref.get("threadId", ref["id"])
-            if tid not in seen_threads:
-                seen_threads.add(tid)
-                unique_refs.append(ref)
-        logger.info("Unique threads: %d (deduplicated from %d)", len(unique_refs), len(refs))
-
-        emails = []
-        for i, ref in enumerate(unique_refs, 1):
-            for attempt in range(3):
-                try:
-                    msg = service.users().messages().get(
-                        userId="me", id=ref["id"], format="full"
-                    ).execute()
-                    headers = {h["name"]: h["value"]
-                               for h in msg.get("payload", {}).get("headers", [])}
-                    body = _extract_body(msg.get("payload", {})).strip()
-                    if body and len(body) >= 20:
-                        emails.append({
-                            "id": msg["id"],
-                            "thread_id": ref.get("threadId", msg["id"]),
-                            "from": headers.get("From", ""),
-                            "subject": _decode_header_value(headers.get("Subject", "")),
-                            "body": body,
-                            "date": headers.get("Date", ""),
-                        })
-                    break
-                except HttpError as e:
-                    logger.warning("Skipping %s: %s", ref["id"], e)
-                    break
-                except Exception as e:
-                    if attempt < 2:
-                        logger.warning("Retry %d for %s: %s", attempt + 1, ref["id"], e)
-                        time.sleep(2 ** attempt)
-                    else:
-                        logger.error("Failed %s after 3 attempts: %s", ref["id"], e)
-            if i % 100 == 0:
-                logger.info("  fetched %d/%d", i, len(unique_refs))
-        return emails
-
-    # Fallback: IMAP/Outlook
-    from backend.connectors.email_connector import fetch_latest_emails
-    result = fetch_latest_emails(limit=200, offset=0)
-    return result.get("emails", [])
-
-
-# ---------------------------------------------------------------------------
-# Classification
-# ---------------------------------------------------------------------------
-
-def _classify_email(email: dict) -> tuple[str, float]:
-    """Classify one email. Returns (label, confidence)."""
-    prompt = (
-        "You are classifying an email from a freight/logistics inbox.\n\n"
-        f"From: {email['from']}\n"
-        f"Subject: {email['subject']}\n"
-        f"Body (first 600 chars):\n{email['body'][:600]}\n\n"
-        "Classify into exactly one label:\n"
-        "- customer_requirement: customer or agent asking for shipping rates, booking, or freight quote\n"
-        "- quotation_rate_card: carrier or agent providing freight rates or price breakdown\n"
-        "- general: shipment status, tracking, documents, invoices, operational\n"
-        "- skip: spam, unsubscribe, out-of-office, or not logistics-related\n\n"
-        'Reply ONLY with JSON: {"label": "...", "confidence": 0.0}'
-    )
-    try:
-        resp = openai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            temperature=0,
-            max_tokens=60,
+    start = datetime.combine(since, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+    rows: list[dict] = []
+    offset = 0
+    while True:
+        q = (
+            get_db().table("emails")
+            .select("provider_msg_id, thread_id, sender, subject, body, received_at, classification")
+            .in_("classification", list(REPORTED_LABELS))
+            .gte("received_at", start)
+            .order("received_at")
+            .range(offset, offset + PAGE - 1)
         )
-        raw = resp.choices[0].message.content.strip()
-        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw, flags=re.MULTILINE).strip()
-        data = json.loads(raw)
-        label = data.get("label", "skip")
-        if label not in VALID_LABELS:
-            label = "skip"
-        return label, float(data.get("confidence", 0.0))
+        if before:
+            end = datetime.combine(before, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+            q = q.lt("received_at", end)
+        page = q.execute().data or []
+        rows.extend(page)
+        if len(page) < PAGE:
+            break
+        offset += PAGE
+
+    _warn_if_unclassified(since, before)
+
+    # One enquiry per thread: a chain of follow-ups is still a single request,
+    # and the oldest message is the one that states it.
+    seen_threads: set[str] = set()
+    emails: list[dict] = []
+    for r in rows:  # already oldest-first
+        tid = r.get("thread_id") or r["provider_msg_id"]
+        if tid in seen_threads:
+            continue
+        seen_threads.add(tid)
+        body = (r.get("body") or "").strip()
+        if len(body) < 20:
+            continue
+        emails.append({
+            "id": r["provider_msg_id"],
+            "thread_id": tid,
+            "from": r.get("sender", ""),
+            "subject": r.get("subject", ""),
+            "body": body,
+            "date": (r.get("received_at") or "")[:10],
+            "label": r["classification"],
+        })
+
+    logger.info("Reportable emails: %d (%d unique threads)", len(rows), len(emails))
+    return emails
+
+
+def _warn_if_unclassified(since: date, before: date | None) -> None:
+    """A pending row is an email the classifier never managed to label. It is
+    invisible to this report, so say so rather than quietly under-reporting."""
+    try:
+        start = datetime.combine(since, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+        q = (
+            get_db().table("emails").select("id", count="exact")
+            .eq("classification_status", "pending")
+            .gte("received_at", start).limit(1)
+        )
+        if before:
+            end = datetime.combine(before, datetime.min.time(), tzinfo=timezone.utc).isoformat()
+            q = q.lt("received_at", end)
+        pending = q.execute().count or 0
+        if pending:
+            logger.warning(
+                "%d email(s) in this window are still unclassified and are NOT in "
+                "the report — the retry job will label them later.", pending
+            )
     except Exception as e:
-        logger.warning("Classify failed for '%s': [%s] %s", email.get("subject", "")[:40], type(e).__name__, e)
-        return "skip", 0.0
+        logger.warning("Could not check for unclassified email: %s", e)
 
 
 # ---------------------------------------------------------------------------
@@ -426,47 +373,42 @@ def _send_report(excel_bytes: bytes, today: str, crq_count: int, rcq_count: int)
 # Main
 # ---------------------------------------------------------------------------
 
-def _parse_args() -> tuple[str, str | None, bool]:
-    """Parse CLI args. Returns (since, before, backfill).
+def _parse_args() -> tuple[date, date | None, bool]:
+    """Parse CLI args. Returns (since, before, dry_run).
 
-    Default (no --since): since=yesterday, before=today, backfill=False.
-    With --since DATE:    since=DATE, before=None, backfill=True (large range).
+    Default: yesterday only. With --since DATE: everything from that date on.
     """
-    for i, arg in enumerate(sys.argv):
-        if arg == "--since" and i + 1 < len(sys.argv):
-            return sys.argv[i + 1], None, True
-    yesterday = (date.today() - date.resolution * 1).strftime("%Y/%m/%d")
-    today_str = date.today().strftime("%Y/%m/%d")
-    return yesterday, today_str, False
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--since", metavar="YYYY-MM-DD",
+                        help="backfill from this date instead of reporting yesterday")
+    parser.add_argument("--dry-run", action="store_true",
+                        help="write the .xlsx locally instead of emailing it")
+    args = parser.parse_args()
+
+    if args.since:
+        since = date.fromisoformat(args.since.replace("/", "-"))
+        return since, None, args.dry_run
+
+    yesterday = date.today() - timedelta(days=1)
+    return yesterday, date.today(), args.dry_run
 
 
 def main() -> None:
-    dry_run = "--dry-run" in sys.argv
-    since, before, backfill = _parse_args()
-
-    # Report label = yesterday's date for daily runs, today for backfill
-    report_date = since.replace("/", "-") if backfill else (date.today() - date.resolution * 1).strftime("%Y-%m-%d")
+    since, before, dry_run = _parse_args()
+    backfill = before is None
+    report_date = since.isoformat()
 
     logger.info("=== Daily Report — %s ===", report_date)
-    if backfill:
-        logger.info("Backfill mode: since %s (subject filter + 1000 cap active)", since)
-    else:
-        logger.info("Daily mode: %s only, ALL emails, no filter", since)
+    logger.info("%s: reading stored labels from Supabase, no re-classification",
+                f"Backfill since {since}" if backfill else f"Daily mode, {since} only")
 
-    emails = _fetch_emails(since, before=before, backfill=backfill)
+    emails = _fetch_emails(since, before)
     if not emails:
-        logger.info("No emails found. Nothing to report.")
+        logger.info("No reportable emails in this window. Nothing to send.")
         return
 
-    logger.info("Classifying %d emails...", len(emails))
-    crq_emails, rcq_emails = [], []
-    for i, em in enumerate(emails, 1):
-        label, conf = _classify_email(em)
-        logger.info("[%3d/%d] %-26s conf=%.2f  %s", i, len(emails), label, conf, em["subject"][:55])
-        if label == "customer_requirement" and conf >= 0.75:
-            crq_emails.append(em)
-        elif label == "quotation_rate_card" and conf >= 0.75:
-            rcq_emails.append(em)
+    crq_emails = [e for e in emails if e["label"] == "customer_requirement"]
+    rcq_emails = [e for e in emails if e["label"] == "quotation_rate_card"]
 
     logger.info("Extracting fields from %d quote requests...", len(crq_emails))
     crq_rows = [_extract_fields(em, "customer_requirement") for em in crq_emails]

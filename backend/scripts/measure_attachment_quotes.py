@@ -17,8 +17,10 @@ import logging
 from dotenv import load_dotenv
 from supabase import create_client
 
+from backend.core.logging_config import configure_logging
+
 load_dotenv()
-logging.basicConfig(level=logging.INFO, format="%(message)s")
+configure_logging()  # read-only measurement: console is enough
 logger = logging.getLogger(__name__)
 
 supabase = create_client(

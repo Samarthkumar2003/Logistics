@@ -23,9 +23,7 @@ import threading
 from abc import ABC, abstractmethod
 from typing import Callable, Optional
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from backend.core.config import settings
 logger = logging.getLogger(__name__)
 
 
@@ -84,7 +82,7 @@ def get_provider() -> LLMProvider:
     with _LOCK:
         if _INSTANCE is not None:
             return _INSTANCE
-        key = os.environ.get("LLM_PROVIDER", "openai").strip().lower()
+        key = settings.llm_provider
         cls = _REGISTRY.get(key)
         if cls is None:
             raise ValueError(
@@ -106,7 +104,7 @@ class OpenAIProvider(LLMProvider):
     def __init__(self) -> None:
         from openai import OpenAI
         self._client = OpenAI()
-        self._model = os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
+        self._model = settings.openai_model
 
     def complete(
         self,

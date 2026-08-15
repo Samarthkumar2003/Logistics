@@ -14,29 +14,36 @@ State lives in Supabase, NOT on disk:
 Pipeline per run:
   1. Select unprocessed emails from `emails` (already ingested + classified
      by the ingest job — no Gmail call, no re-classification)
-  2. Atomically claim each row
-  3. customer_requirement -> intake -> lookup agents -> RFQ drafts -> send
-       -> store job. Replies in a thread that already produced a
-       customer_requirement are downgraded to general.
-  4. quotation_rate_card  -> find matching open jobs -> parse rates -> store
+  2. Atomically claim each row; a failure hands the claim back, capped by
+     emails.processing_attempts so a poison message cannot loop
+  3. customer_requirement -> recorded only. RFQs leave the system exclusively
+     through the human-gated POST /send-rfq. Replies in a thread that already
+     produced a customer_requirement are downgraded to general.
+  4. quotation_rate_card  -> linked to the job whose RFQ reference the reply
+       quotes back. Rates are NOT extracted and prices are NOT predicted — the
+       operator reads the agent's own email. A reply with no resolvable
+       reference is left unlinked and stays visible in the inbox.
 """
 
 import logging
-import os
-import re
 import threading
 import time
-import uuid
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
-from typing import List, Optional
+from typing import List
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from backend.core.config import settings
+from backend.core.logging_context import email_context, scan_context
+from backend.domain.models import Email
+from backend.services import reply_service
 
 logger = logging.getLogger("logistics_copilot.automation")
-SCAN_BATCH = 50
+SCAN_BATCH = settings.scan_batch
+
+# How many times the scan will retry one email before giving up on it. A row
+# that exhausts these stays unprocessed with processing_error set, so it can be
+# found and dealt with rather than silently retried forever.
+MAX_PROCESS_ATTEMPTS = 3
 
 # Prevents the scheduler tick and POST /automation/run-now from scanning
 # concurrently in the same process. Cross-process safety comes from the
@@ -50,6 +57,11 @@ _scan_lock = threading.Lock()
 
 @dataclass
 class ScanStats:
+    # Why this run produced the numbers below. Without it, "another scan is
+    # already running" and "automation is switched off" are indistinguishable
+    # from a genuine run that found nothing — all three are zeros, and the UI
+    # renders the last two as though the inbox were empty.
+    status: str = "completed"  # completed | already_running | disabled | error
     run_at: str = ""
     emails_scanned: int = 0
     new_emails: int = 0
@@ -58,8 +70,7 @@ class ScanStats:
     general: int = 0
     errors: int = 0
     duration_seconds: float = 0.0
-    jobs_created: List[str] = field(default_factory=list)
-    quotations_stored: int = 0
+    replies_linked: int = 0
     # Detected customer-requirement emails shown in the dashboard's last-run panel
     customer_emails: List[dict] = field(default_factory=list)
 
@@ -79,6 +90,10 @@ def _get_state_row(supabase) -> dict:
 
 
 def _save_stats(supabase, stats: ScanStats) -> None:
+    # Only a run that actually did the work is worth recording. Persisting a
+    # skipped or disabled run would overwrite the last real result with zeros.
+    if stats.status != "completed":
+        return
     try:
         supabase.table("automation_state").upsert({
             "id": 1,
@@ -102,7 +117,7 @@ def get_status(supabase) -> dict:
         )
     except Exception:
         processed_total = 0
-    email_redirect = (os.getenv("EMAIL_REDIRECT") or "").strip()
+    email_redirect = settings.email_redirect
     return {
         "enabled": row.get("enabled", True),
         "schedule": "Every 5 minutes",
@@ -110,8 +125,14 @@ def get_status(supabase) -> dict:
         "processed_total": processed_total,
         # Safety: when set, ALL outgoing mail goes here instead of vendors
         "email_redirect": email_redirect or None,
-        "safe_mode": bool(email_redirect),
+        "safe_mode": settings.safe_mode,
     }
+
+
+def scan_in_progress() -> bool:
+    """True while a scan holds the lock in this process. Lets the API reject a
+    duplicate trigger with a real answer instead of returning an empty run."""
+    return _scan_lock.locked()
 
 
 def set_enabled(supabase, enabled: bool) -> None:
@@ -148,6 +169,23 @@ def _claim_email(supabase, row_id: str) -> bool:
         return False
 
 
+def _release_claim(supabase, row_id: str, attempts: int, error: str) -> None:
+    """Hand a failed email back to the queue.
+
+    The claim is taken before the work, so without this a single exception
+    retired the row permanently — the rate card in it was never seen again.
+    `processing_attempts` caps the retries so a poison message cannot loop.
+    """
+    try:
+        supabase.table("emails").update({
+            "processed_at": None,
+            "processing_attempts": attempts + 1,
+            "processing_error": error[:500],
+        }).eq("id", row_id).execute()
+    except Exception as e:
+        logger.error("Failed to release claim on email %s: %s", row_id, e)
+
+
 def _thread_already_customer(supabase, thread_id: str, current_msg_id: str) -> bool:
     """True if another email in this thread was already processed as a
     customer_requirement — replies then get downgraded to general."""
@@ -172,345 +210,157 @@ def _thread_already_customer(supabase, thread_id: str, current_msg_id: str) -> b
 
 
 # ---------------------------------------------------------------------------
-# Customer requirement -> create RFQ job
+# Rate card -> link the reply to the request it answers
 # ---------------------------------------------------------------------------
-
-def _process_customer_email(email: dict, supabase) -> Optional[str]:
-    """Run full RFQ pipeline for one customer email. Returns RFQ reference or None."""
-    from backend.agents.intake_agent import run_intake_agent
-    from backend.agents.agents_lookup import lookup_agents
-    from backend.agents.rfq_agent import generate_rfq_drafts
-    from backend.connectors.email_sender import send_rfq_emails_batch
-
-    subject = email.get("subject", "")
-    body = email.get("body", "")
-    sender = email.get("from", "")
-    full_content = f"Subject: {subject}\n\nBody:\n{body}"
-
-    # 1. Extract shipment details
-    try:
-        shipment = run_intake_agent(full_content)
-    except Exception as e:
-        logger.error("Intake agent failed for email %s: %s", email.get("id"), e)
-        return None
-
-    # All fields are optional, but auto-sending an RFQ needs at least a route
-    if not shipment.origin or not shipment.destination:
-        logger.warning(
-            "Email %s missing origin/destination (origin=%r, destination=%r) — skipping auto-RFQ",
-            email.get("id"), shipment.origin, shipment.destination,
-        )
-        return None
-
-    # 2. Lookup agents
-    try:
-        agents = lookup_agents(
-            destination=shipment.destination,
-            destination_country=shipment.destination_country,
-            mode=shipment.mode,
-            commodity_desc=shipment.commodity,
-            origin=shipment.origin,
-        )
-    except Exception as e:
-        logger.error("Agent lookup failed: %s", e)
-        return None
-
-    if not agents:
-        logger.warning("No agents found for shipment to %s", shipment.destination)
-        return None
-
-    # 3. Generate RFQ reference + drafts
-    reference = f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:4]}"
-    agents_as_dicts = [
-        {"agent_name": a.agent_name, "email": a.email, "specialty": a.specialty,
-         "historical_rate": a.historical_rate, "historical_transit_days": a.historical_transit_days}
-        for a in agents
-    ]
-
-    try:
-        drafts_result = generate_rfq_drafts(shipment_data=shipment.model_dump(), agents=agents_as_dicts, reference=reference)
-        drafts_list = drafts_result.drafts if hasattr(drafts_result, "drafts") else drafts_result
-    except Exception as e:
-        logger.error("RFQ draft generation failed: %s", e)
-        return None
-
-    drafts_as_dicts = [
-        {"vendor_name": d.vendor_name, "vendor_email": d.vendor_email, "subject": d.subject, "body": d.body}
-        for d in (drafts_list if isinstance(drafts_list, list) else [])
-    ]
-
-    # 4. Send RFQs (EMAIL_REDIRECT routes to test inbox)
-    try:
-        send_rfq_emails_batch(drafts_as_dicts)
-    except Exception as e:
-        logger.error("Batch send failed: %s", e)
-
-    # 5. Store job in Supabase
-    job_record = {
-        "reference": reference,
-        "customer_email_sender": sender,
-        "customer_email_subject": subject,
-        "customer_email_body": body,
-        "shipment_origin": shipment.origin,
-        "shipment_destination": shipment.destination,
-        "shipment_mode": shipment.mode,
-        "shipment_weight_kg": float(shipment.weight_kg) if shipment.weight_kg is not None else None,
-        "shipment_commodity": shipment.commodity,
-        "status": "rfqs_sent",
-        "agents_contacted": [a.agent_name for a in agents],
-    }
-    try:
-        supabase.table("rfq_jobs").insert(job_record).execute()
-        logger.info("Job created: %s → %d agents contacted", reference, len(agents))
-    except Exception as e:
-        logger.error("Failed to store job %s: %s", reference, e)
-        return None
-
-    return reference
+#
+# The rule itself lives in services/reply_service.py. The scan used to carry its
+# own copy — two implementations of one rule, which is exactly how they drift.
 
 
-# ---------------------------------------------------------------------------
-# Quotation rate card -> parse and store
-# ---------------------------------------------------------------------------
+def _process_rate_card(email: dict, _supabase=None) -> int:
+    """Attach an agent's reply to the RFQ it answers. Returns 1 if linked, else 0.
 
-def _process_rate_card(email: dict, supabase) -> int:
-    """Parse a rate card email and store quotations against open jobs. Returns count stored."""
-    from backend.agents.quotation_agent import parse_quotation_email
-    from backend.classifier.price_predictor import predict_price, assess_quotation
-    from backend.agents.history_agent import find_similar_shipments
-
-    subject = email.get("subject", "")
-    body = email.get("body", "")
-    sender_raw = email.get("from", "")
-    m = re.search(r'<([^>]+)>', sender_raw)
-    sender_email = (m.group(1) if m else sender_raw).strip().lower()
-
-    # Find open jobs that contacted this agent — newest first so the fallback
-    # below genuinely targets the latest job.
-    try:
-        open_jobs = (
-            supabase.table("rfq_jobs")
-            .select("*")
-            .in_("status", ["rfqs_sent", "quotes_received"])
-            .order("created_at", desc=True)
-            .execute()
-            .data
-        )
-    except Exception as e:
-        logger.error("Failed to fetch open jobs: %s", e)
-        return 0
-
-    from backend.agents.agents_lookup import _load_agents_csv
-    all_agents = _load_agents_csv()
-    agent_email_to_name = {a.get("email", "").lower(): a.get("agent_name", "") for a in all_agents}
-    agent_name = agent_email_to_name.get(sender_email, sender_email)
-
-    # Find jobs where this agent was contacted
-    matching_jobs = [
-        j for j in open_jobs
-        if agent_name in (j.get("agents_contacted") or [])
-        or sender_email in [a.get("email", "").lower() for a in all_agents
-                           if a.get("agent_name") in (j.get("agents_contacted") or [])]
-    ]
-
-    if not matching_jobs:
-        logger.info("Rate card from %s — no matching open job, storing against latest job", sender_email)
-        matching_jobs = open_jobs[:1] if open_jobs else []
-
-    if not matching_jobs:
-        logger.warning("Rate card from %s — no open jobs at all, skipping", sender_email)
-        return 0
-
-    try:
-        parsed_rates = parse_quotation_email(body, subject)
-    except Exception as e:
-        logger.warning("Failed to parse rates from %s: %s", sender_email, e)
-        return 0
-
-    if not parsed_rates:
-        return 0
-
-    stored = 0
-    for job in matching_jobs[:1]:  # match to most recent relevant job
-        reference = job["reference"]
-        shipment = {
-            "origin": job.get("shipment_origin", ""),
-            "destination": job.get("shipment_destination", ""),
-            "mode": job.get("shipment_mode", ""),
-            "weight_kg": job.get("shipment_weight_kg", 0),
-            "commodity": job.get("shipment_commodity", ""),
-        }
-
-        try:
-            history = find_similar_shipments(origin=shipment["origin"], destination=shipment["destination"],
-                                             mode=shipment["mode"], commodity_desc=shipment["commodity"])
-            prediction = predict_price(shipment, history)
-        except Exception:
-            prediction = None
-
-        # Load existing dedup keys
-        try:
-            existing = supabase.table("quotations").select("agent_email, rate, rate_label").eq("rfq_reference", reference).execute().data
-            existing_keys = {(r["agent_email"], r["rate"], r.get("rate_label", "")) for r in existing}
-        except Exception:
-            existing_keys = set()
-
-        for parsed in parsed_rates:
-            dedup_key = (sender_email, parsed.rate, parsed.rate_label)
-            if dedup_key in existing_keys:
-                continue
-            existing_keys.add(dedup_key)
-
-            assessment = None
-            pred_low = pred_high = None
-            if prediction and parsed.rate is not None:
-                try:
-                    assessment = assess_quotation(parsed.rate, prediction)
-                    pred_low = prediction.predicted_low
-                    pred_high = prediction.predicted_high
-                except Exception:
-                    pass
-
-            record = {
-                "rfq_reference": reference,
-                "agent_name": agent_name,
-                "agent_email": sender_email,
-                "raw_email_subject": subject,
-                "raw_email_body": body,
-                "rate": parsed.rate,
-                "currency": parsed.currency,
-                "transit_time_days": parsed.transit_time_days,
-                "validity": parsed.validity,
-                "terms": parsed.terms,
-                "rate_label": parsed.rate_label,
-                "ai_assessment": assessment,
-                "predicted_low": pred_low,
-                "predicted_high": pred_high,
-                "is_selected": False,
-            }
-            try:
-                supabase.table("quotations").insert(record).execute()
-                stored += 1
-            except Exception as e:
-                logger.error("Failed to store quotation: %s", e)
-
-        if stored > 0:
-            try:
-                supabase.table("rfq_jobs").update({"status": "quotes_received"}).eq("reference", reference).execute()
-            except Exception:
-                pass
-
-    return stored
+    `_supabase` is accepted and ignored: the service reaches the database through
+    core.db, and the scan still threads a client around for its other helpers.
+    """
+    return 1 if reply_service.link_reply(Email(
+        id=email.get("id", ""),
+        sender=email.get("from", ""),
+        subject=email.get("subject", ""),
+        body=email.get("body", ""),
+    )) else 0
 
 
 # ---------------------------------------------------------------------------
 # Main scan job
 # ---------------------------------------------------------------------------
 
+def _fetch_batch(supabase) -> list[dict]:
+    """Unprocessed emails, oldest first, excluding ones the scan has given up on."""
+    return (
+        supabase.table("emails")
+        .select("id, provider_msg_id, thread_id, sender, subject, body, "
+                "classification, processing_attempts")
+        .is_("processed_at", "null")
+        .lt("processing_attempts", MAX_PROCESS_ATTEMPTS)
+        .order("received_at", desc=False)  # FIFO
+        .limit(SCAN_BATCH)
+        .execute()
+        .data or []
+    )
+
+
+def _resolve_label(supabase, row: dict, msg_id: str) -> str:
+    """The label to act on.
+
+    Ingest classifies at persist time, so this normally just reads the stored
+    value. The two exceptions: a row that was never classified, and a reply in a
+    thread that already produced a customer requirement — which is downgraded so
+    reminders and follow-ups cannot spawn duplicate RFQ jobs.
+    """
+    label = (row.get("classification") or "").strip()
+    if not label:
+        try:
+            from backend.classifier.email_classifier import classify_email
+            label = classify_email(
+                subject=row.get("subject", ""), body=row.get("body", ""),
+                sender=row.get("sender", ""),
+            ).label
+        except Exception as e:
+            logger.warning("Fallback classification failed: %s", e)
+            label = "general"
+
+    if label == "customer_requirement" and _thread_already_customer(
+        supabase, row.get("thread_id", ""), msg_id
+    ):
+        logger.info("Reply in an already-processed customer thread — treating as general")
+        label = "general"
+    return label
+
+
+def _handle_email(supabase, row: dict, stats: ScanStats) -> None:
+    """Process one claimed email. Releases the claim if anything throws."""
+    msg_id = row.get("provider_msg_id", "")
+    with email_context(msg_id):
+        label = _resolve_label(supabase, row, msg_id)
+        email = {
+            "id": msg_id,
+            "subject": row.get("subject") or "",
+            "body": row.get("body") or "",
+            "from": row.get("sender") or "",
+        }
+        try:
+            if label == "customer_requirement":
+                stats.customer_requirements += 1
+                stats.customer_emails.append({
+                    "id": msg_id, "subject": email["subject"], "sender": email["from"],
+                })
+                # NO auto-send. Recorded only, so a human can action it through
+                # the gated flow. RFQs leave the system exclusively via
+                # POST /send-rfq — never automatically.
+            elif label == "quotation_rate_card":
+                stats.quotation_rate_cards += 1
+                stats.replies_linked += _process_rate_card(email)
+            else:
+                stats.general += 1
+        except Exception as e:
+            # Hand the claim back so the next run retries it. Without this a
+            # single exception retired the email permanently.
+            attempts = row.get("processing_attempts") or 0
+            logger.error("Failed to process (%s), attempt %d/%d: %s",
+                         label, attempts + 1, MAX_PROCESS_ATTEMPTS, e)
+            _release_claim(supabase, row["id"], attempts, str(e))
+            stats.errors += 1
+
+
+def _run_scan_body(supabase, stats: ScanStats) -> None:
+    start = time.time()
+    logger.info("Starting inbox scan (batch size %d)", SCAN_BATCH)
+
+    try:
+        rows = _fetch_batch(supabase)
+    except Exception as e:
+        logger.error("Scan failed to fetch unprocessed emails: %s", e)
+        stats.status = "error"
+        stats.errors += 1
+        return
+
+    stats.emails_scanned = stats.new_emails = len(rows)
+    logger.info("Found %d unprocessed emails", len(rows))
+
+    for row in rows:
+        if not _claim_email(supabase, row["id"]):
+            continue  # another worker won the claim
+        _handle_email(supabase, row, stats)
+
+    stats.duration_seconds = round(time.time() - start, 2)
+    logger.info(
+        "Scan done in %.1fs — %d new, %d customer, %d rate cards→%d linked, %d errors",
+        stats.duration_seconds, stats.new_emails, stats.customer_requirements,
+        stats.quotation_rate_cards, stats.replies_linked, stats.errors,
+    )
+    _save_stats(supabase, stats)
+
+
 def run_scan(supabase) -> ScanStats:
-    """Process unclaimed emails from the `emails` table. Called every 5 min
-    by the scheduler and on demand via POST /automation/run-now."""
+    """Process unclaimed emails. Called every 5 min by the scheduler and on
+    demand via POST /automation/run-now."""
     stats = ScanStats(run_at=datetime.now(timezone.utc).isoformat())
 
     if not _scan_lock.acquire(blocking=False):
         logger.info("Scan already running — skipping this trigger")
+        stats.status = "already_running"
         return stats
 
     try:
-        state = _get_state_row(supabase)
-        if not state.get("enabled", True):
+        if not _get_state_row(supabase).get("enabled", True):
             logger.info("Automation disabled — skipping scan")
+            stats.status = "disabled"
             return stats
-
-        start = time.time()
-        logger.info("Starting inbox scan...")
-
-        try:
-            rows = (
-                supabase.table("emails")
-                .select("id, provider_msg_id, thread_id, sender, subject, body, classification")
-                .is_("processed_at", "null")
-                .order("received_at", desc=False)  # oldest first — FIFO
-                .limit(SCAN_BATCH)
-                .execute()
-                .data or []
-            )
-        except Exception as e:
-            logger.error("Scan failed to fetch unprocessed emails: %s", e)
-            stats.errors += 1
-            _save_stats(supabase, stats)
-            return stats
-
-        stats.emails_scanned = len(rows)
-        stats.new_emails = len(rows)
-        logger.info("Found %d unprocessed emails", len(rows))
-
-        for r in rows:
-            if not _claim_email(supabase, r["id"]):
-                continue  # another worker claimed it — not ours
-
-            msg_id = r.get("provider_msg_id", "")
-            label = (r.get("classification") or "").strip()
-
-            # Ingest normally classifies at persist time; classify here only
-            # if that step was skipped or failed.
-            if not label:
-                try:
-                    from backend.classifier.email_classifier import classify_email
-                    label = classify_email(
-                        subject=r.get("subject", ""), body=r.get("body", ""),
-                        sender=r.get("sender", ""),
-                    ).label
-                except Exception as e:
-                    logger.warning("Fallback classification failed for %s: %s", msg_id, e)
-                    label = "general"
-
-            # Replies in an already-processed customer thread -> general
-            if label == "customer_requirement" and _thread_already_customer(
-                supabase, r.get("thread_id", ""), msg_id
-            ):
-                logger.info("Email %s is a reply in an already-processed customer thread — treating as general", msg_id)
-                label = "general"
-
-            email = {
-                "id": msg_id,
-                "subject": r.get("subject") or "",
-                "body": r.get("body") or "",
-                "from": r.get("sender") or "",
-            }
-
-            try:
-                if label == "customer_requirement":
-                    stats.customer_requirements += 1
-                    stats.customer_emails.append({
-                        "id": msg_id,
-                        "subject": email["subject"],
-                        "sender": email["from"],
-                    })
-                    reference = _process_customer_email(email, supabase)
-                    if reference:
-                        stats.jobs_created.append(reference)
-
-                elif label == "quotation_rate_card":
-                    stats.quotation_rate_cards += 1
-                    n = _process_rate_card(email, supabase)
-                    stats.quotations_stored += n
-
-                else:
-                    stats.general += 1
-
-            except Exception as e:
-                logger.error("Failed to process email %s (%s): %s", msg_id, label, e)
-                stats.errors += 1
-
-        stats.duration_seconds = round(time.time() - start, 2)
-        logger.info(
-            "Scan done in %.1fs — %d new, %d customer→%d jobs, %d rate cards→%d quotations, %d errors",
-            stats.duration_seconds, stats.new_emails, stats.customer_requirements,
-            len(stats.jobs_created), stats.quotation_rate_cards, stats.quotations_stored, stats.errors,
-        )
-        _save_stats(supabase, stats)
+        # Every line this run emits carries the same scan id, so one run can be
+        # pulled out of a file that interleaves it with HTTP traffic.
+        with scan_context():
+            _run_scan_body(supabase, stats)
         return stats
-
     finally:
         _scan_lock.release()

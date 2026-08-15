@@ -14,19 +14,17 @@ import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
-from dotenv import load_dotenv
-
-load_dotenv()
+from backend.core.config import settings
 
 logger = logging.getLogger(__name__)
 
-EMAIL_ACCOUNT = os.getenv("EMAIL_ACCOUNT")
-EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
-SMTP_SERVER = os.getenv("SMTP_SERVER", "smtp.gmail.com")
-SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+EMAIL_ACCOUNT = settings.email_account
+EMAIL_PASSWORD = settings.email_password
+SMTP_SERVER = settings.smtp_server
+SMTP_PORT = settings.smtp_port
 
-EMAIL_PROVIDER = os.getenv("EMAIL_PROVIDER", "gmail").lower()
-EMAIL_REDIRECT = (os.getenv("EMAIL_REDIRECT") or "").strip()
+EMAIL_PROVIDER = settings.email_provider
+EMAIL_REDIRECT = settings.email_redirect
 
 
 def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:

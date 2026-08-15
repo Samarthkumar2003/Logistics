@@ -15,6 +15,9 @@ interface Email {
   label?: string;
   label_confidence?: number;
   received_at?: string;
+  // Only set on the unlinked rate-card list — why this reply never attached.
+  reason?: string;
+  cited_reference?: string | null;
 }
 
 function formatReceived(iso?: string): string {
@@ -38,23 +41,22 @@ interface RFQJob {
   status: string;
   agents_contacted: string[];
   created_at: string;
+  customer_email_id: string | null;
+  // How many agent replies are linked to this RFQ. One job is one agent, so
+  // >0 means that agent came back.
+  reply_count: number;
 }
 
-interface Quotation {
-  id: number;
-  agent_name: string;
-  rate: number;
-  currency: string;
-  transit_time_days: number;
-  rate_label: string;
-  validity: string;
-  terms: string;
-  ai_assessment: string;
-  is_selected: boolean;
+interface Reply {
+  id: string;
+  sender: string;
+  subject: string;
+  body: string;
   received_at: string;
+  has_attachments: boolean;
 }
 
-type Tab = 'inbox' | 'requests' | 'ratecards' | 'shipments';
+type Tab = 'inbox' | 'requests' | 'ratecards' | 'unlinked' | 'shipments';
 
 /* ─── Helpers ─────────────────────────────────────────────────── */
 function timeAgo(iso: string): string {
@@ -100,15 +102,6 @@ function statusInfo(status: string): { label: string; color: string; bg: string;
     approved:        { label: 'Approved',          color: 'var(--purple)', bg: 'var(--status-purple-bg)', desc: 'Shipment confirmed' },
   };
   return map[status] ?? { label: status, color: 'var(--muted-soft)', bg: 'var(--status-neutral-bg)', desc: '' };
-}
-
-function assessInfo(a: string): { label: string; color: string } {
-  const map: Record<string, { label: string; color: string }> = {
-    within_range:   { label: '✅ Fair price',    color: 'var(--green-soft)' },
-    above_expected: { label: '⚠️ Above average', color: 'var(--amber)' },
-    below_expected: { label: '🎉 Below average', color: 'var(--blue-soft)' },
-  };
-  return map[a] ?? { label: a || '—', color: 'var(--muted)' };
 }
 
 function dedupe(emails: Email[]): Email[] {
@@ -169,14 +162,16 @@ function decodeEntities(str: string): string {
 }
 
 /* ─── Email Card ─────────────────────────────────────────────── */
-function EmailCard({ email, expanded, onToggle, onProcessed }: {
+function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
   email: Email;
   expanded: boolean;
   onToggle: () => void;
   onProcessed?: () => void;
+  note?: string;
 }) {
   const [correcting, setCorrecting] = useState(false);
   const [correctedLabel, setCorrectedLabel] = useState<string | null>(null);
+  const [correctionError, setCorrectionError] = useState('');
   const [saving, setSaving] = useState(false);
   const [fullBody, setFullBody] = useState<string | null>(null);
   const [loadingBody, setLoadingBody] = useState(false);
@@ -186,20 +181,34 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
 
   async function submitCorrection(newLabel: string) {
     setSaving(true);
+    setCorrectionError('');
     try {
-      await fetch(`${API_BASE}/feedback`, {
+      const res = await fetch(`${API_BASE}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           email_id: email.id,
-          subject: email.subject,
-          body: email.body,
-          sender: email.sender,
-          predicted_label: email.label,
+          email_subject: email.subject,
+          // The list ships body:"" by design; the backend fills it in from
+          // email_id rather than trusting the client for something it was
+          // never given.
+          email_body: fullBody ?? '',
+          email_sender: email.sender,
+          predicted_label: email.label ?? 'unknown',
           corrected_label: newLabel,
+          confidence: email.label_confidence ?? 0,
         }),
       });
+      if (!res.ok) {
+        let detail = `Server error ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
+        throw new Error(detail);
+      }
+      // Only claim success once the server agreed. This used to be
+      // unconditional, so a rejected correction still rendered "✓ Corrected".
       setCorrectedLabel(newLabel);
+    } catch (err: unknown) {
+      setCorrectionError(err instanceof Error ? err.message : 'Correction failed');
     } finally {
       setSaving(false);
       setCorrecting(false);
@@ -270,7 +279,11 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
         </div>
         <div className="ecard-right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
           <LabelPill label={displayLabel} confidence={correctedLabel ? undefined : email.label_confidence} />
-          {correctedLabel ? (
+          {correctionError ? (
+            <span style={{ fontSize: 11, color: 'var(--red)' }} title={correctionError}>
+              ⚠️ Not saved
+            </span>
+          ) : correctedLabel ? (
             <span style={{ fontSize: 11, color: 'var(--green-soft)' }}>✓ Corrected</span>
           ) : correcting ? (
             <select
@@ -297,6 +310,14 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
         </div>
       </div>
       <div className="ecard-subject">{decodeEntities(email.subject)}</div>
+      {note && (
+        <div style={{
+          marginTop: 6, fontSize: 11, color: 'var(--amber)',
+          display: 'flex', alignItems: 'center', gap: 6,
+        }}>
+          <span>⚠️</span><span>{note}</span>
+        </div>
+      )}
       {expanded && (
         <div className="ecard-body" onClick={e => e.stopPropagation()}>
           {loadingBody
@@ -348,6 +369,14 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
               >
                 {processing ? '⏳ Opening…' : '🚀 Process this email → Send RFQs'}
               </button>
+              <a
+                href={`/request/${email.id}`}
+                onClick={e => e.stopPropagation()}
+                style={{
+                  padding: '7px 16px', borderRadius: 8, border: '1px solid var(--border)',
+                  color: 'var(--muted)', fontSize: 13, fontWeight: 600, textDecoration: 'none',
+                }}
+              >📋 View rate cards</a>
             </div>
           )}
         </div>
@@ -359,49 +388,57 @@ function EmailCard({ email, expanded, onToggle, onProcessed }: {
 /* ─── Shipment Card ──────────────────────────────────────────── */
 function ShipmentCard({ job }: { job: RFQJob }) {
   const [open, setOpen] = useState(false);
-  const [quotes, setQuotes] = useState<Quotation[]>([]);
-  const [loadingQ, setLoadingQ] = useState(false);
+  const [replies, setReplies] = useState<Reply[]>([]);
+  const [loadingR, setLoadingR] = useState(false);
   const [fetched, setFetched] = useState(false);
-  const [approving, setApproving] = useState<string | null>(null);
+  const [replyError, setReplyError] = useState('');
+  const [approving, setApproving] = useState(false);
   const [approveResult, setApproveResult] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState(job.status);
   const si = statusInfo(jobStatus);
+  const agentName = job.agents_contacted?.[0] ?? 'this agent';
 
-  async function loadQuotes() {
+  async function loadReplies() {
     if (fetched) { setOpen(o => !o); return; }
     setOpen(true);
-    setLoadingQ(true);
+    setLoadingR(true);
+    setReplyError('');
     try {
-      const r = await fetch(`${API_BASE}/jobs/${job.reference}/quotations`);
+      const r = await fetch(`${API_BASE}/jobs/${job.reference}/replies`);
+      // A 500 returns {detail}, not an array — guard before trusting the shape.
       const d = await r.json();
-      setQuotes(d ?? []);
+      if (!r.ok) throw new Error(d?.detail ?? `Server error ${r.status}`);
+      setReplies(Array.isArray(d) ? d : []);
       setFetched(true);
+    } catch (err: unknown) {
+      setReplyError(err instanceof Error ? err.message : 'Failed to load replies');
     } finally {
-      setLoadingQ(false);
+      setLoadingR(false);
     }
   }
 
-  async function approveQuote(agentName: string) {
-    setApproving(agentName);
+  // One job is one agent, so approving needs no selection — the reference is
+  // the winner. Only an acceptance goes out; nobody else is emailed.
+  async function approveJob() {
+    setApproving(true);
     setApproveResult(null);
     try {
-      const r = await fetch(`${API_BASE}/jobs/${job.reference}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_agent: agentName }),
-      });
+      const r = await fetch(`${API_BASE}/jobs/${job.reference}/approve`, { method: 'POST' });
       const d = await r.json();
       if (r.ok) {
-        setQuotes(prev => prev.map(q => ({ ...q, is_selected: q.agent_name === agentName })));
         setJobStatus('approved');
-        setApproveResult(`✅ Approved ${agentName}`);
+        setApproveResult(
+          d.acceptance_status === 'sent'
+            ? `✅ Approved ${d.agent_name} — acceptance sent`
+            : `⚠️ Approved ${d.agent_name}, but the acceptance email ${d.acceptance_status}`
+        );
       } else {
         setApproveResult(`❌ ${d.detail ?? 'Failed'}`);
       }
     } catch {
       setApproveResult('❌ Network error');
     } finally {
-      setApproving(null);
+      setApproving(false);
     }
   }
 
@@ -438,13 +475,21 @@ function ShipmentCard({ job }: { job: RFQJob }) {
         <span className="scard-from-subj">"{job.customer_email_subject}"</span>
       </div>
 
-      {/* Agents */}
+      {/* Agent, and whether they have come back */}
       {job.agents_contacted?.length > 0 && (
         <div className="scard-agents">
           <span className="scard-from-lbl">RFQ sent to:</span>
           {job.agents_contacted.map(a => (
             <span key={a} className="agent-pill">{a}</span>
           ))}
+          <span style={{
+            fontSize: 11, fontWeight: 600, marginLeft: 4,
+            color: (job.reply_count ?? 0) > 0 ? 'var(--green-soft)' : 'var(--amber)',
+          }}>
+            {(job.reply_count ?? 0) > 0
+              ? `✓ replied${job.reply_count > 1 ? ` (${job.reply_count})` : ''}`
+              : '⏳ awaiting reply'}
+          </span>
         </div>
       )}
 
@@ -454,62 +499,66 @@ function ShipmentCard({ job }: { job: RFQJob }) {
       {/* Created */}
       <div className="scard-date">{fmtDate(job.created_at)}</div>
 
-      {/* Expand quotes */}
-      <button className="scard-quotes-btn" onClick={loadQuotes}>
-        {open ? '▲ Hide Quotes' : '▼ View Quotes'}
+      {/* Expand replies */}
+      <button className="scard-quotes-btn" onClick={loadReplies}>
+        {open ? '▲ Hide Replies' : '▼ View Replies'}
       </button>
 
       {open && (
         <div className="scard-quotes">
-          {loadingQ && <div className="q-loading">Loading quotes…</div>}
-          {!loadingQ && quotes.length === 0 && (
-            <div className="q-empty">No quotes received yet for this shipment.</div>
-          )}
-          {!loadingQ && quotes.length > 0 && (
-            <div className="q-list">
-              {approveResult && (
-                <div style={{ fontSize: 13, marginBottom: 8, color: approveResult.startsWith('✅') ? 'var(--green-soft)' : 'var(--red)' }}>
-                  {approveResult}
-                </div>
-              )}
-              {quotes.map(q => {
-                const ai = assessInfo(q.ai_assessment);
-                const isApproving = approving === q.agent_name;
-                return (
-                  <div key={q.id} className={`q-card ${q.is_selected ? 'q-selected' : ''}`}>
-                    <div className="q-top">
-                      <span className="q-agent">{q.agent_name}</span>
-                      {q.is_selected
-                        ? <span className="q-winner">✅ Selected</span>
-                        : jobStatus !== 'approved' && (
-                          <button
-                            disabled={!!approving}
-                            onClick={() => approveQuote(q.agent_name)}
-                            style={{
-                              fontSize: 11, padding: '3px 10px', borderRadius: 6,
-                              border: 'none', background: isApproving ? 'var(--input-border)' : 'var(--green-solid)',
-                              color: 'var(--on-accent)', cursor: approving ? 'default' : 'pointer', fontWeight: 600,
-                            }}
-                          >
-                            {isApproving ? '⏳…' : 'Approve'}
-                          </button>
-                        )
-                      }
-                    </div>
-                    <div className="q-rate">
-                      {q.currency} {q.rate?.toLocaleString()}
-                      {q.rate_label && <span className="q-label-tag">{q.rate_label}</span>}
-                    </div>
-                    <div className="q-meta">
-                      <span>🕐 {q.transit_time_days} days transit</span>
-                      {q.validity && <span>📅 Valid: {q.validity}</span>}
-                      <span style={{ color: ai.color }}>{ai.label}</span>
-                    </div>
-                    {q.terms && <div className="q-terms">{q.terms}</div>}
-                  </div>
-                );
-              })}
+          {approveResult && (
+            <div style={{ fontSize: 13, marginBottom: 8, color: approveResult.startsWith('✅') ? 'var(--green-soft)' : 'var(--red)' }}>
+              {approveResult}
             </div>
+          )}
+          {loadingR && <div className="q-loading">Loading replies…</div>}
+          {replyError && <div className="q-empty" style={{ color: 'var(--red)' }}>⚠️ {replyError}</div>}
+          {!loadingR && !replyError && replies.length === 0 && (
+            <div className="q-empty">
+              No reply from {agentName} yet. A reply is linked when the agent keeps
+              the RFQ reference in the subject.
+            </div>
+          )}
+          {!loadingR && replies.length > 0 && (
+            <div className="q-list">
+              {replies.map(r => (
+                <div key={r.id} className="q-card">
+                  <div className="q-top">
+                    <span className="q-agent">{r.subject || '(no subject)'}</span>
+                    <span style={{ fontSize: 11, color: 'var(--faint)' }}>
+                      {formatReceived(r.received_at)}
+                    </span>
+                  </div>
+                  <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+                    {r.sender}{r.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
+                  </div>
+                  <pre style={{
+                    fontSize: 12, color: 'var(--muted-soft)', whiteSpace: 'pre-wrap',
+                    lineHeight: 1.6, margin: 0, maxHeight: 220, overflowY: 'auto',
+                  }}>{r.body?.slice(0, 2000)}{(r.body?.length ?? 0) > 2000 ? '\n…' : ''}</pre>
+                </div>
+              ))}
+              <a
+                href={`/request/${job.customer_email_id ?? ''}`}
+                style={{ fontSize: 12, color: 'var(--blue-soft)', textDecoration: 'none' }}
+              >
+                Open full request →
+              </a>
+            </div>
+          )}
+
+          {jobStatus !== 'approved' && (
+            <button
+              disabled={approving}
+              onClick={approveJob}
+              style={{
+                marginTop: 12, fontSize: 12, padding: '6px 14px', borderRadius: 6,
+                border: 'none', background: approving ? 'var(--input-border)' : 'var(--green-solid)',
+                color: 'var(--on-accent)', cursor: approving ? 'default' : 'pointer', fontWeight: 600,
+              }}
+            >
+              {approving ? '⏳ Sending…' : `Award to ${agentName}`}
+            </button>
           )}
         </div>
       )}
@@ -518,11 +567,8 @@ function ShipmentCard({ job }: { job: RFQJob }) {
 }
 
 /* ─── Summary Bar ─────────────────────────────────────────────── */
-function SummaryBar({ emails, jobs }: { emails: Email[]; jobs: RFQJob[] }) {
+function SummaryBar({ emails }: { emails: Email[] }) {
   const requests = emails.filter(e => e.label === 'customer_requirement').length;
-  const rateCards = emails.filter(e => e.label === 'quotation_rate_card').length;
-  const activeJobs = jobs.filter(j => j.status !== 'approved').length;
-  const quotesIn = jobs.filter(j => j.status === 'quotes_received').length;
 
   return (
     <div className="summary-bar">
@@ -535,21 +581,6 @@ function SummaryBar({ emails, jobs }: { emails: Email[]; jobs: RFQJob[] }) {
         <div className="sum-val" style={{ color: 'var(--blue-soft)' }}>{requests}</div>
         <div className="sum-lbl">Customer Requests</div>
       </div>
-      <div className="sum-divider" />
-      <div className="sum-item">
-        <div className="sum-val" style={{ color: 'var(--green-soft)' }}>{rateCards}</div>
-        <div className="sum-lbl">Rate Cards</div>
-      </div>
-      <div className="sum-divider" />
-      <div className="sum-item">
-        <div className="sum-val" style={{ color: 'var(--amber)' }}>{activeJobs}</div>
-        <div className="sum-lbl">Active Shipments</div>
-      </div>
-      <div className="sum-divider" />
-      <div className="sum-item">
-        <div className="sum-val" style={{ color: 'var(--purple)' }}>{quotesIn}</div>
-        <div className="sum-lbl">Ready to Approve</div>
-      </div>
     </div>
   );
 }
@@ -559,6 +590,7 @@ export default function Dashboard() {
   const [theme, toggleTheme] = useTheme();
   const [tab, setTab] = useState<Tab>('inbox');
   const [emails, setEmails] = useState<Email[]>([]);
+  const [unlinked, setUnlinked] = useState<Email[]>([]);
   const [emailTotal, setEmailTotal] = useState(0);
   const [emailOffset, setEmailOffset] = useState(0);
   // Stale-closure-free mirror of how deep the inbox is scrolled. fetchData has
@@ -599,15 +631,17 @@ export default function Dashboard() {
 
     // Jobs + automation status load first — unblocks UI immediately
     try {
-      const [jr, ar] = await Promise.all([
+      const [jr, ar, ur] = await Promise.all([
         fetch(`${API_BASE}/jobs`),
         fetch(`${API_BASE}/automation/status`),
+        fetch(`${API_BASE}/rate-cards/unlinked?limit=50`),
       ]);
       if (jr.ok) setJobs(await jr.json());
       if (ar.ok) {
         const ad = await ar.json();
         setAutomationEnabled(ad.enabled ?? false);
       }
+      if (ur.ok) setUnlinked((await ur.json()).emails ?? []);
       setLastRefresh(new Date());
       setError('');
     } catch {
@@ -683,6 +717,7 @@ export default function Dashboard() {
             expanded={expandedEmail === e.id}
             onToggle={() => setExpandedEmail(expandedEmail === e.id ? null : e.id)}
             onProcessed={() => fetchData()}
+            note={e.reason}
           />
         ))}
         {showLoadMore && emailOffset < emailTotal && (
@@ -706,6 +741,7 @@ export default function Dashboard() {
     { key: 'inbox'     as Tab, icon: '📬', label: 'All Emails',         count: emails.length,    color: 'var(--blue-soft)' },
     { key: 'requests'  as Tab, icon: '📦', label: 'Customer Requests',  count: requests.length,  color: 'var(--blue)' },
     { key: 'ratecards' as Tab, icon: '💰', label: 'Rate Cards',         count: rateCards.length, color: 'var(--green)' },
+    { key: 'unlinked'  as Tab, icon: '🔗', label: 'Needs Linking',      count: unlinked.length,  color: 'var(--amber)' },
     { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: jobs.length,      color: 'var(--yellow)' },
   ];
 
@@ -785,7 +821,7 @@ export default function Dashboard() {
         ) : (
           <>
             {/* ── Summary strip ── */}
-            <SummaryBar emails={emails} jobs={jobs} />
+            <SummaryBar emails={emails} />
 
             {/* ── Content ── */}
             <div className="content-wrap">
@@ -844,6 +880,30 @@ export default function Dashboard() {
                   </div>
                   <div className="email-list">
                     {renderEmails(rateCards, 'No rate cards found yet. They appear here once agents reply to your RFQs.')}
+                  </div>
+                </div>
+              )}
+
+              {/* NEEDS LINKING */}
+              {tab === 'unlinked' && (
+                <div className="pane">
+                  <div className="pane-header">
+                    <div>
+                      <h2 className="pane-title">🔗 Rate Cards That Need Linking</h2>
+                      <p className="pane-desc">
+                        Agent replies we could not attach to an RFQ, because the
+                        reply did not quote its <code>RFQ-…</code> reference back.
+                        Nothing is lost — these are normal inbox emails — but they
+                        will not appear on the customer request page until they are
+                        linked.
+                      </p>
+                    </div>
+                  </div>
+                  <div className="email-list">
+                    {renderEmails(
+                      unlinked,
+                      'Nothing to link — every rate card reached its RFQ. 🎉',
+                    )}
                   </div>
                 </div>
               )}

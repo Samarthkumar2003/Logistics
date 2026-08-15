@@ -13,18 +13,10 @@ import os
 import logging
 from typing import Optional
 
-from dotenv import load_dotenv
-from supabase import create_client
-
 from backend.classifier.email_classifier import classify_emails_batch
+from backend.core.db import get_db
 
-load_dotenv()
 logger = logging.getLogger(__name__)
-
-supabase = create_client(
-    os.environ.get("SUPABASE_URL", ""),
-    os.environ.get("SUPABASE_KEY", ""),
-)
 
 _TABLE = "email_classifications"
 
@@ -36,7 +28,7 @@ def get_cached(email_ids: list[str]) -> dict[str, dict]:
         return {}
     try:
         rows = (
-            supabase.table(_TABLE)
+            get_db().table(_TABLE)
             .select("email_id, label, confidence, method")
             .in_("email_id", email_ids)
             .neq("method", "error")
@@ -57,7 +49,7 @@ def store(email_id: str, subject: str, sender: str, label: str,
     if not email_id:
         return
     try:
-        supabase.table(_TABLE).upsert({
+        get_db().table(_TABLE).upsert({
             "email_id": email_id,
             "subject": (subject or "")[:500],
             "sender": (sender or "")[:300],
@@ -75,7 +67,7 @@ def update_label(email_id: str, label: str, method: str = "feedback") -> None:
     if not email_id:
         return
     try:
-        supabase.table(_TABLE).upsert({
+        get_db().table(_TABLE).upsert({
             "email_id": email_id,
             "label": label,
             "confidence": 1.0,
@@ -95,23 +87,20 @@ def classify_with_cache(emails: list[dict]) -> dict[str, dict]:
     """
     ids = [e["id"] for e in emails if e.get("id")]
     cached = get_cached(ids)
-
-    # Per-email visibility: which ids are served from cache (no API call) vs
-    # which will trigger a live LLM request.
     misses = [e for e in emails if e.get("id") and e["id"] not in cached]
+
+    # Per-email detail is DEBUG, not INFO. At INFO this emitted three or four
+    # lines per email — roughly 1,500 for a 500-email backfill — which buried
+    # everything else. One summary line below carries the same information.
     for eid in ids:
         if eid in cached:
-            logger.info("CACHE HIT  — email_id=%s label=%s (no API call)", eid, cached[eid]["label"])
+            logger.debug("cache hit  %s -> %s", eid, cached[eid]["label"])
         else:
-            logger.info("CACHE MISS — email_id=%s (API call needed)", eid)
+            logger.debug("cache miss %s -> classifying", eid)
 
-    logger.info("Classification batch: %d total, %d cache hits, %d API calls",
-                len(ids), len(cached), len(misses))
-
+    errors = 0
     if misses:
         miss_by_id = {e["id"]: e for e in misses}
-        for eid in miss_by_id:
-            logger.info("API CALL   — email_id=%s -> LLM classify request", eid)
         fresh = classify_emails_batch([
             {"id": e["id"], "subject": e.get("subject", ""),
              "body": e.get("body", ""), "sender": e.get("sender", e.get("from", ""))}
@@ -121,11 +110,18 @@ def classify_with_cache(emails: list[dict]) -> dict[str, dict]:
             eid = c["id"]
             cached[eid] = {"label": c["label"], "confidence": c["confidence"], "method": c["method"]}
             if c["method"] == "error":
+                # Not cached: an error is not a verdict. The row stays pending
+                # so the retry job re-runs it once the provider recovers.
+                errors += 1
                 continue
             src = miss_by_id.get(eid, {})
             store(eid, src.get("subject", ""), src.get("sender", src.get("from", "")),
                   c["label"], c["confidence"], c["method"])
-            logger.info("API RESULT — email_id=%s label=%s conf=%.2f method=%s (cached)",
-                        eid, c["label"], c["confidence"], c["method"])
+            logger.debug("classified %s -> %s (%.2f, %s)",
+                         eid, c["label"], c["confidence"], c["method"])
+
+    log = logger.warning if errors else logger.info
+    log("Classified %d: %d cached, %d API call(s), %d error(s)",
+        len(ids), len(cached) - len(misses) + errors, len(misses), errors)
 
     return cached

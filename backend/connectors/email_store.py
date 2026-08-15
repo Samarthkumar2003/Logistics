@@ -16,27 +16,23 @@ Tables + bucket: see sql/setup_email_store.sql.
 import os
 import uuid
 import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
 from typing import Optional
 
-from dotenv import load_dotenv
-from supabase import create_client
 
 from backend.connectors.gmail_connector import (
     fetch_messages_since, fetch_attachment, iter_message_id_pages, fetch_full_records,
     count_inbox_messages,
 )
 from backend.classifier.classification_cache import classify_with_cache
+from backend.core.config import settings
+from backend.core.db import get_db
 
-load_dotenv()
 logger = logging.getLogger(__name__)
 
-supabase = create_client(
-    os.environ.get("SUPABASE_URL", ""),
-    os.environ.get("SUPABASE_KEY", ""),
-)
-
-ATTACHMENT_BUCKET = os.environ.get("ATTACHMENT_BUCKET", "rate-card-attachments")
+ATTACHMENT_BUCKET = settings.attachment_bucket
 
 # Safety ceiling on how many new mails one ingest sweep will pull (guards against
 # a very stale watermark dragging in an unbounded backlog in a single pass).
@@ -47,6 +43,13 @@ MAX_INGEST_BATCH = 5000
 # and rows from a chunk that failed to commit still get picked up.
 WATERMARK_LOOKBACK = timedelta(days=1)
 
+# Serialize ingestion. Two callers fire it: the startup thread and the 5-min
+# scheduler job. A backlog sweep can outlast the 5-min interval, so without this
+# the two overlap on the same window — duplicate Gmail fetches, re-classification,
+# re-uploaded attachments. Non-blocking: a second caller skips this run rather
+# than queueing behind the first (the sweep is idempotent, the next tick retries).
+_ingest_lock = threading.Lock()
+
 
 # ---------------------------------------------------------------------------
 # Watermark
@@ -55,7 +58,7 @@ WATERMARK_LOOKBACK = timedelta(days=1)
 def _get_watermark(provider: str) -> Optional[datetime]:
     try:
         rows = (
-            supabase.table("sync_state")
+            get_db().table("sync_state")
             .select("last_received_at")
             .eq("provider", provider)
             .execute()
@@ -71,7 +74,7 @@ def _get_watermark(provider: str) -> Optional[datetime]:
 
 def _advance_watermark(provider: str, newest: datetime) -> None:
     try:
-        supabase.table("sync_state").upsert({
+        get_db().table("sync_state").upsert({
             "provider": provider,
             "last_received_at": newest.isoformat(),
             "updated_at": "now()",
@@ -85,8 +88,12 @@ def _advance_watermark(provider: str, newest: datetime) -> None:
 # ---------------------------------------------------------------------------
 
 def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optional[str]:
-    """Download an attachment's bytes and persist to the bucket + attachments table.
-    Returns the attachment UUID, or None on failure."""
+    """Download an attachment's bytes and persist to the bucket + attachments table,
+    synchronously. Returns the attachment UUID, or None on failure.
+
+    Kept for the manual backfill script (scripts/ingest_window.py). The live ingest
+    path uses enqueue_attachment + the background worker instead, so it is not
+    blocked on Gmail/Storage I/O — see process_pending_attachments."""
     att_uuid = str(uuid.uuid4())
     filename = meta.get("filename", "")
     ext = os.path.splitext(filename)[1].lstrip(".").lower() or "bin"
@@ -95,11 +102,11 @@ def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optiona
         data = fetch_attachment(provider_msg_id, meta["attachment_id"])
         if not data:
             return None
-        supabase.storage.from_(ATTACHMENT_BUCKET).upload(
+        get_db().storage.from_(ATTACHMENT_BUCKET).upload(
             storage_path, data,
             {"content-type": meta.get("mime_type", "application/octet-stream")},
         )
-        supabase.table("attachments").insert({
+        get_db().table("attachments").insert({
             "id": att_uuid,
             "email_id": email_id,
             "file_name": filename,
@@ -114,6 +121,138 @@ def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optiona
         return None
 
 
+# Background attachment download/upload. Keeping this off the ingest hot path is
+# what lets a backlog of mail land in minutes: ingest writes metadata-only rows
+# (pending), this worker fetches the bytes afterwards.
+_attach_lock = threading.Lock()
+MAX_ATTACHMENT_ATTEMPTS = 5  # give up after this many transient failures
+
+
+def enqueue_attachment(email_id: str, provider_msg_id: str, meta: dict) -> bool:
+    """Record attachment metadata only — no bytes fetched. The background worker
+    (process_pending_attachments) downloads + uploads later. Fast: one insert,
+    no Gmail/Storage round-trip. Returns True if the row was queued."""
+    if not meta.get("attachment_id"):
+        return False
+    try:
+        get_db().table("attachments").insert({
+            "id": str(uuid.uuid4()),
+            "email_id": email_id,
+            "file_name": meta.get("filename", ""),
+            "mime_type": meta.get("mime_type", ""),
+            "size_bytes": meta.get("size_bytes"),
+            "provider_msg_id": provider_msg_id,
+            "attachment_id": meta["attachment_id"],
+            "storage_path": "",
+            "processing_status": "pending",
+        }).execute()
+        return True
+    except Exception as e:
+        logger.warning("Failed to enqueue attachment %s (email %s): %s",
+                       meta.get("filename", ""), email_id, e)
+        return False
+
+
+def _download_pending_attachment(row: dict) -> str:
+    """Fetch one queued attachment's bytes, upload to the bucket, mark it stored.
+    Returns 'stored' | 'failed' | 'retry'. Transient errors return 'retry' (left
+    pending) until MAX_ATTACHMENT_ATTEMPTS, then 'failed' so it stops looping."""
+    att_id = row["id"]
+    attempts = (row.get("attempts") or 0) + 1
+    ext = os.path.splitext(row.get("file_name") or "")[1].lstrip(".").lower() or "bin"
+    storage_path = f"{att_id}.{ext}"
+    try:
+        data = fetch_attachment(row["provider_msg_id"], row["attachment_id"])
+        if not data:
+            # No bytes is a permanent condition, not a transient one — fail now.
+            get_db().table("attachments").update(
+                {"processing_status": "failed", "attempts": attempts}
+            ).eq("id", att_id).execute()
+            return "failed"
+        get_db().storage.from_(ATTACHMENT_BUCKET).upload(
+            storage_path, data,
+            # upsert so a retry after a half-done attempt overwrites rather than 409s.
+            {"content-type": row.get("mime_type") or "application/octet-stream",
+             "upsert": "true"},
+        )
+        get_db().table("attachments").update(
+            {"storage_path": storage_path, "processing_status": "stored", "attempts": attempts}
+        ).eq("id", att_id).execute()
+        return "stored"
+    except Exception as e:
+        terminal = attempts >= MAX_ATTACHMENT_ATTEMPTS
+        logger.warning("Attachment download failed for %s (attempt %d%s): %s",
+                       att_id, attempts, "/giving up" if terminal else "", e)
+        try:
+            get_db().table("attachments").update(
+                {"attempts": attempts,
+                 "processing_status": "failed" if terminal else "pending"}
+            ).eq("id", att_id).execute()
+        except Exception:
+            pass
+        return "failed" if terminal else "retry"
+
+
+def process_pending_attachments(max_atts: int = 150, workers: int = 4) -> dict:
+    """Drain queued (pending) attachments: download bytes from Gmail, upload to the
+    bucket, mark stored. Parallel across `workers`. Non-blocking lock — a second
+    caller skips rather than double-processing the same rows.
+    Returns {pending, stored, failed, retry}.
+
+    Deliberately throttled (4 workers × 150/tick). Higher settings saturate the
+    shared Supabase project — bulk Storage uploads starve the ingest inserts and
+    the dashboard reads (observed: dropped connections, 20s+ API latency). The
+    bytes are not time-critical, so this trails in gently rather than at full tilt.
+
+    Yields to ingest: while an ingest is running the two would fight over the same
+    shared Gmail session and Supabase client (dropped connections, chunks slowing
+    from seconds to minutes). Email recovery is the priority, so during a sweep
+    this stands down and drains only once ingest is idle. Best-effort: ingest never
+    waits on attachments, so email recovery always wins the connections."""
+    if _ingest_lock.locked():
+        logger.info("Attachment worker: ingest in progress — yielding this run")
+        return {"pending": 0, "stored": 0, "failed": 0, "retry": 0, "skipped_ingest_busy": True}
+    if not _attach_lock.acquire(blocking=False):
+        logger.info("Attachment worker: already running — skipping this run")
+        return {"pending": 0, "stored": 0, "failed": 0, "retry": 0, "skipped_locked": True}
+    try:
+        return _process_pending_attachments(max_atts=max_atts, workers=workers)
+    finally:
+        _attach_lock.release()
+
+
+def _process_pending_attachments(max_atts: int, workers: int) -> dict:
+    try:
+        rows = (
+            get_db().table("attachments")
+            .select("id, provider_msg_id, attachment_id, file_name, mime_type, attempts")
+            .eq("processing_status", "pending")
+            .order("created_at")
+            .limit(max_atts)
+            .execute().data or []
+        )
+    except Exception as e:
+        logger.warning("Attachment worker: could not read queue: %s", e)
+        return {"pending": 0, "stored": 0, "failed": 0, "retry": 0}
+    if not rows:
+        return {"pending": 0, "stored": 0, "failed": 0, "retry": 0}
+
+    logger.info("Attachment worker: %d pending", len(rows))
+    outcomes = {"stored": 0, "failed": 0, "retry": 0}
+    with ThreadPoolExecutor(max_workers=workers) as pool:
+        futures = {pool.submit(_download_pending_attachment, r): r["id"] for r in rows}
+        for fut in as_completed(futures):
+            try:
+                outcomes[fut.result()] += 1
+            except Exception as e:
+                logger.warning("Attachment worker task crashed for %s: %s",
+                               futures[fut], e)
+                outcomes["retry"] += 1
+    stats = {"pending": len(rows), **outcomes}
+    logger.info("Attachment worker done: %s", stats)
+    return stats
+
+
 # ---------------------------------------------------------------------------
 # Ingestion
 # ---------------------------------------------------------------------------
@@ -126,7 +265,7 @@ def _thread_has_customer_requirement(thread_id: str) -> bool:
         return False
     try:
         rows = (
-            supabase.table("emails")
+            get_db().table("emails")
             .select("id")
             .eq("thread_id", thread_id)
             .eq("classification", "customer_requirement")
@@ -148,7 +287,7 @@ def _already_ingested(provider_msg_id: str) -> Optional[str]:
         return None
     try:
         rows = (
-            supabase.table("emails").select("id").eq("provider_msg_id", provider_msg_id).limit(1)
+            get_db().table("emails").select("id").eq("provider_msg_id", provider_msg_id).limit(1)
             .execute().data or []
         )
         return rows[0]["id"] if rows else None
@@ -161,7 +300,7 @@ def _max_received_at() -> Optional[datetime]:
     sweep has verified completeness over the window — see ingest_new_emails."""
     try:
         rows = (
-            supabase.table("emails").select("received_at")
+            get_db().table("emails").select("received_at")
             .order("received_at", desc=True).limit(1).execute().data or []
         )
         return _parse_dt(rows[0]["received_at"]) if rows else None
@@ -180,7 +319,7 @@ def _existing_provider_ids(ids: list[str]) -> set[str]:
             continue
         try:
             rows = (
-                supabase.table("emails").select("provider_msg_id")
+                get_db().table("emails").select("provider_msg_id")
                 .in_("provider_msg_id", chunk).execute().data or []
             )
             found.update(r["provider_msg_id"] for r in rows)
@@ -192,7 +331,22 @@ def _existing_provider_ids(ids: list[str]) -> set[str]:
 def ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     """Fetch mail newer than the watermark, persist each once (idempotent on
     provider_msg_id), classify, store attachments, advance the watermark.
-    Returns {fetched, new, skipped, attachments}."""
+    Returns {fetched, new, skipped, attachments}.
+
+    Serialized via a non-blocking lock: if another ingest is already running,
+    this call returns immediately with skipped=True instead of duplicating it."""
+    if not _ingest_lock.acquire(blocking=False):
+        logger.info("Ingest %s: another ingest in progress — skipping this run", provider)
+        return {"swept": 0, "fetched": 0, "new": 0, "skipped": 0,
+                "attachments": 0, "skipped_locked": True}
+    try:
+        return _ingest_new_emails(provider=provider, max_results=max_results)
+    finally:
+        _ingest_lock.release()
+
+
+def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
+    """Ingest worker — always call ingest_new_emails() (holds the lock) instead."""
     if provider != "gmail":
         raise ValueError(f"ingest_new_emails: provider '{provider}' not yet supported")
 
@@ -276,7 +430,7 @@ def ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
                     logger.warning("Failed to sync thread-rule label for %s: %s", key, e)
 
             try:
-                inserted = supabase.table("emails").insert({
+                inserted = get_db().table("emails").insert({
                     "message_id": r.get("message_id") or None,
                     "provider": r["provider"],
                     "provider_msg_id": r["provider_msg_id"],
@@ -294,8 +448,11 @@ def ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
             except Exception as e:
                 logger.warning("Failed to persist email %s: %s", key, e)
                 continue
+            # Queue attachments as metadata only — the background worker fetches
+            # the bytes. Keeping Gmail/Storage I/O off this loop is what lets a
+            # mail backlog land in minutes instead of hours.
             for meta in r.get("attachments", []):
-                if store_attachment(email_id, r["provider_msg_id"], meta):
+                if enqueue_attachment(email_id, r["provider_msg_id"], meta):
                     att_count += 1
         logger.info("Ingest %s: committed %d/%d new mails so far", provider, new_count, total_new)
 
@@ -345,7 +502,7 @@ def audit_sync_gaps(days: int = 14) -> list[dict]:
         )
         try:
             db_n = (
-                supabase.table("emails").select("id", count="exact")
+                get_db().table("emails").select("id", count="exact")
                 .gte("received_at", f"{d0.isoformat()}T00:00:00+00:00")
                 .lt("received_at", f"{d1.isoformat()}T00:00:00+00:00")
                 .execute().count or 0
@@ -384,7 +541,7 @@ def retry_pending_classifications(batch_size: int = 20, max_emails: int = 500) -
     """
     try:
         rows = (
-            supabase.table("emails")
+            get_db().table("emails")
             .select("provider_msg_id, subject, body, sender")
             .eq("classification_status", "pending")
             .order("received_at", desc=True)
@@ -413,7 +570,7 @@ def retry_pending_classifications(batch_size: int = 20, max_emails: int = 500) -
             if res.get("method") == "error" or not res.get("label"):
                 continue  # stays pending for the next pass
             try:
-                supabase.table("emails").update({
+                get_db().table("emails").update({
                     "classification": res["label"],
                     "classification_status": "classified",
                 }).eq("provider_msg_id", pid).execute()
@@ -440,7 +597,7 @@ def backfill_classifications(batch_size: int = 20) -> dict:
     try:
         # Fetch emails not yet in email_classifications
         rows = (
-            supabase.table("emails")
+            get_db().table("emails")
             .select("provider_msg_id, subject, body, sender")
             .order("received_at", desc=True)
             .limit(500)
@@ -460,7 +617,7 @@ def backfill_classifications(batch_size: int = 20) -> dict:
         cached_ids = {
             r["email_id"]
             for r in (
-                supabase.table("email_classifications")
+                get_db().table("email_classifications")
                 .select("email_id")
                 .in_("email_id", ids)
                 .neq("method", "error")
