@@ -328,6 +328,105 @@ def _existing_provider_ids(ids: list[str]) -> set[str]:
     return found
 
 
+def _ingest_id_list(unknown_ids: list[str], provider: str) -> dict:
+    """Fetch (full), classify, insert, and enqueue-attachments for the given
+    provider_msg_ids — assumed already ordered oldest-first. Chunked so rows land
+    incrementally and a crash keeps what's committed. Returns
+    {new, attachments, fetched, newest_seen}. Does NOT touch the watermark — the
+    caller owns that (incremental advances it; a targeted backfill must not)."""
+    from backend.classifier.classification_cache import update_label
+
+    def _key(r: dict) -> str:
+        # Key on provider_msg_id everywhere — always present, so the cache and the
+        # dashboard (which read by it) never split into two rows.
+        return r["provider_msg_id"]
+
+    total = len(unknown_ids)
+    new_count = att_count = fetched = 0
+    newest_seen: Optional[datetime] = None
+    CHUNK = 50
+    for i in range(0, total, CHUNK):
+        records = fetch_full_records(unknown_ids[i:i + CHUNK])
+        fetched += len(records)
+        records.sort(key=lambda r: r.get("received_at") or "")  # oldest-first within chunk
+        labels = classify_with_cache([
+            {"id": _key(r), "subject": r["subject"], "body": r["body"], "sender": r["sender"]}
+            for r in records
+        ])
+        for r in records:
+            recv = _parse_dt(r.get("received_at"))
+            if recv and (newest_seen is None or recv > newest_seen):
+                newest_seen = recv
+            key = _key(r)
+            lab = labels.get(key, {})
+            # A failed LLM call returns label="general" with method="error". That
+            # fallback must NOT be recorded as a confident verdict — mark it pending
+            # so a retry pass reclassifies it.
+            classify_failed = lab.get("method") == "error"
+            label = lab.get("label", "")
+
+            # Thread rule: once a thread has produced a customer_requirement, every
+            # later email in it is general — reminders must not spawn duplicate jobs.
+            if label == "customer_requirement" and _thread_has_customer_requirement(r.get("thread_id", "")):
+                logger.info("Email %s is a reply in customer thread %s — labeling general",
+                            key, r.get("thread_id"))
+                label = "general"
+                try:
+                    update_label(key, "general", method="thread_rule")
+                except Exception as e:
+                    logger.warning("Failed to sync thread-rule label for %s: %s", key, e)
+
+            try:
+                inserted = get_db().table("emails").insert({
+                    "message_id": r.get("message_id") or None,
+                    "provider": r["provider"],
+                    "provider_msg_id": r["provider_msg_id"],
+                    "thread_id": r["thread_id"],
+                    "sender": r["sender"],
+                    "subject": r["subject"],
+                    "body": r["body"],
+                    "has_attachments": r["has_attachments"],
+                    "received_at": r.get("received_at"),
+                    "classification": label,
+                    "classification_status": "pending" if (not lab or classify_failed) else "classified",
+                }).execute()
+                email_id = inserted.data[0]["id"]
+                new_count += 1
+            except Exception as e:
+                logger.warning("Failed to persist email %s: %s", key, e)
+                continue
+            # Queue attachments as metadata only — the background worker fetches bytes.
+            for meta in r.get("attachments", []):
+                if enqueue_attachment(email_id, r["provider_msg_id"], meta):
+                    att_count += 1
+        logger.info("Ingest %s: committed %d/%d new mails so far", provider, new_count, total)
+    return {"new": new_count, "attachments": att_count, "fetched": fetched,
+            "newest_seen": newest_seen}
+
+
+def backfill_window(after_epoch_s: int, before_epoch_s: int, provider: str = "gmail") -> dict:
+    """Targeted backfill of one time window, WITHOUT touching the watermark. Lists
+    every INBOX id in [after, before), diffs against the DB, ingests the unknowns.
+    Used by the self-healing gap loop to re-pull a day the audit found short.
+    Returns {listed, new, attachments}."""
+    if provider != "gmail":
+        raise ValueError(f"backfill_window: provider '{provider}' not yet supported")
+    query = f"after:{after_epoch_s} before:{before_epoch_s}"
+    ids: list[str] = []
+    for page in iter_message_id_pages(query=query):
+        if not page:
+            break
+        ids.extend(page)
+    have = _existing_provider_ids(ids)
+    unknown = [i for i in ids if i not in have]
+    unknown.reverse()  # oldest-first for the thread rule
+    logger.info("Backfill window (%s): %d listed, %d new", query, len(ids), len(unknown))
+    if not unknown:
+        return {"listed": len(ids), "new": 0, "attachments": 0}
+    result = _ingest_id_list(unknown, provider)
+    return {"listed": len(ids), "new": result["new"], "attachments": result["attachments"]}
+
+
 def ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     """Fetch mail newer than the watermark, persist each once (idempotent on
     provider_msg_id), classify, store attachments, advance the watermark.
@@ -368,7 +467,21 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
         have = _existing_provider_ids(page)
         unknown_ids.extend(pid for pid in page if pid not in have)
         if len(unknown_ids) >= MAX_INGEST_BATCH:
-            logger.warning("Ingest sweep hit ceiling %d new ids; stopping early", MAX_INGEST_BATCH)
+            # INTENTIONAL bounded load. On a very large backlog — weeks of downtime,
+            # or a brand-new account whose entire mailbox is "new" — we ingest only
+            # the NEWEST MAX_INGEST_BATCH ids and stop. Pulling a whole mailbox
+            # history is load nobody asked for. The consequence is deliberate: the
+            # watermark advances past the older, un-ingested window (see the advance
+            # step below), so incremental ingest will NOT backfill it — that is what
+            # the manual scripts (backfill_3months.py / ingest_window.py) are for.
+            # Documented as "Bounded initial load" in Documentation/01-architecture.md.
+            # Do not "fix" this by removing the ceiling or holding the watermark.
+            logger.warning(
+                "Ingest %s: BOUNDED LOAD — hit MAX_INGEST_BATCH=%d newest new ids and "
+                "stopped. Older unseen mail below this batch is intentionally NOT "
+                "ingested by incremental sync; use the backfill scripts to pull "
+                "history on purpose.", provider, MAX_INGEST_BATCH,
+            )
             truncated = True
             break
 
@@ -380,81 +493,15 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     logger.info("Ingest %s: swept %d ids since %s, %d new to ingest",
                 provider, seen, watermark, total_new)
 
-    # Key on provider_msg_id everywhere — it is always present, so the cache and
-    # the dashboard (which reads by provider_msg_id) never split into two rows.
-    def _key(r: dict) -> str:
-        return r["provider_msg_id"]
-
-    from backend.classifier.classification_cache import update_label
-    new_count = att_count = fetched = 0
+    # Fetch + classify + insert + enqueue attachments for the unknown ids (shared
+    # with backfill_window, which reuses the same per-chunk machinery).
+    result = _ingest_id_list(unknown_ids, provider)
+    new_count = result["new"]
+    att_count = result["attachments"]
+    fetched = result["fetched"]
     newest_seen = watermark
-    # Fetch + classify + insert one CHUNK at a time. Chunking the *fetch* too
-    # (not just the insert) is what makes mail show up in the UI in parts: the
-    # first rows land within seconds instead of after every body is downloaded.
-    # A crash also keeps everything already committed — the next run's DB-based
-    # sweep simply re-finds whatever is still missing.
-    CHUNK = 50
-    for i in range(0, total_new, CHUNK):
-        records = fetch_full_records(unknown_ids[i:i + CHUNK])
-        fetched += len(records)
-        records.sort(key=lambda r: r.get("received_at") or "")  # oldest-first within chunk
-        labels = classify_with_cache([
-            {"id": _key(r), "subject": r["subject"], "body": r["body"], "sender": r["sender"]}
-            for r in records
-        ])
-        for r in records:
-            recv = _parse_dt(r.get("received_at"))
-            if recv and (newest_seen is None or recv > newest_seen):
-                newest_seen = recv
-            key = _key(r)
-            lab = labels.get(key, {})
-            # A failed LLM call returns label="general" with method="error". That
-            # fallback must NOT be recorded as a confident verdict — otherwise an
-            # API hiccup is indistinguishable from a real "general" and an RFQ gets
-            # silently buried. Mark it pending so a retry pass reclassifies it.
-            classify_failed = lab.get("method") == "error"
-            label = lab.get("label", "")
-
-            # Thread rule: once a thread has produced a customer_requirement,
-            # every later email in it is general — reminders and follow-ups must
-            # not spawn duplicate RFQ jobs or show a second Send RFQs button.
-            if label == "customer_requirement" and _thread_has_customer_requirement(r.get("thread_id", "")):
-                logger.info(
-                    "Email %s is a reply in customer thread %s — labeling general",
-                    key, r.get("thread_id"),
-                )
-                label = "general"
-                try:
-                    update_label(key, "general", method="thread_rule")
-                except Exception as e:
-                    logger.warning("Failed to sync thread-rule label for %s: %s", key, e)
-
-            try:
-                inserted = get_db().table("emails").insert({
-                    "message_id": r.get("message_id") or None,
-                    "provider": r["provider"],
-                    "provider_msg_id": r["provider_msg_id"],
-                    "thread_id": r["thread_id"],
-                    "sender": r["sender"],
-                    "subject": r["subject"],
-                    "body": r["body"],
-                    "has_attachments": r["has_attachments"],
-                    "received_at": r.get("received_at"),
-                    "classification": label,
-                    "classification_status": "pending" if (not lab or classify_failed) else "classified",
-                }).execute()
-                email_id = inserted.data[0]["id"]
-                new_count += 1
-            except Exception as e:
-                logger.warning("Failed to persist email %s: %s", key, e)
-                continue
-            # Queue attachments as metadata only — the background worker fetches
-            # the bytes. Keeping Gmail/Storage I/O off this loop is what lets a
-            # mail backlog land in minutes instead of hours.
-            for meta in r.get("attachments", []):
-                if enqueue_attachment(email_id, r["provider_msg_id"], meta):
-                    att_count += 1
-        logger.info("Ingest %s: committed %d/%d new mails so far", provider, new_count, total_new)
+    if result["newest_seen"] and (newest_seen is None or result["newest_seen"] > newest_seen):
+        newest_seen = result["newest_seen"]
 
     # newest_seen only covers mail this run inserted, so a fully-caught-up run
     # (0 new) would never advance and the sweep window would grow without bound.
@@ -476,6 +523,18 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     if newest_seen:
         safe = newest_seen - WATERMARK_LOOKBACK
         if watermark is None or safe > watermark:
+            if truncated:
+                # Deliberate: advancing past the un-ingested older window is exactly
+                # what bounds a new-account / stale-watermark load to
+                # MAX_INGEST_BATCH. That mail was never pulled (not lost) and is
+                # recoverable only via the manual backfill scripts. Logged loudly so
+                # this is visible whenever it happens.
+                logger.warning(
+                    "Ingest %s: advancing watermark to %s after a BOUNDED (truncated) "
+                    "run — older mail below it is intentionally skipped by incremental "
+                    "ingest. Run a backfill script if that history is wanted.",
+                    provider, safe.isoformat(),
+                )
             _advance_watermark(provider, safe)
 
     stats = {"swept": seen, "fetched": fetched, "new": new_count,
@@ -484,16 +543,36 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     return stats
 
 
+# Upper bound on the audit window so a very stale/corrupt watermark can't turn
+# one audit into a multi-year, page-heavy Gmail crawl.
+MAX_AUDIT_WINDOW = 90
+
+
 def audit_sync_gaps(days: int = 14) -> list[dict]:
-    """Per-day reconciliation: compare Gmail's INBOX count to stored rows over the
-    last `days`. Returns the days where Gmail has more than the DB (a gap), e.g.
-    [{'day': '2026-07-15', 'gmail': 180, 'db': 0, 'missing': 180}]. Empty = in sync.
-    This is how the Jul 10-19 hole would have been flagged automatically."""
+    """Per-day reconciliation: compare Gmail's INBOX count to stored rows, persist
+    every day's result to `sync_gap_audits`, and return the days where Gmail has
+    more than the DB (a gap), e.g. [{'day': '2026-07-15', 'gmail': 180, 'db': 0,
+    'missing': 180}]. Empty = in sync.
+
+    Window = max(`days`, days since the ingest watermark), capped at
+    MAX_AUDIT_WINDOW. So after downtime or a bounded (truncated) load the audit
+    widens to cover the whole period ingestion fell behind, instead of a fixed
+    14-day view that could miss an older gap entirely. `days` is the floor."""
     import calendar
     from datetime import timedelta
     today = datetime.now(tz=timezone.utc).date()
+
+    # Widen the window to cover any stretch ingestion fell behind on.
+    watermark = _get_watermark("gmail")
+    behind_days = (today - watermark.date()).days if watermark else days
+    window = min(MAX_AUDIT_WINDOW, max(days, behind_days))
+    if window > days:
+        logger.info("Sync-gap audit: widening window to %d days (watermark %s, %d behind)",
+                    window, watermark.date().isoformat() if watermark else "unset", behind_days)
+
     gaps: list[dict] = []
-    for n in range(days, 0, -1):
+    audit_rows: list[dict] = []
+    for n in range(window, 0, -1):
         d0 = today - timedelta(days=n)
         d1 = d0 + timedelta(days=1)
         gmail_n = count_inbox_messages(
@@ -510,15 +589,153 @@ def audit_sync_gaps(days: int = 14) -> list[dict]:
         except Exception as e:
             logger.warning("Gap audit DB count failed for %s: %s", d0, e)
             continue
-        if gmail_n > db_n:
-            gaps.append({"day": d0.isoformat(), "gmail": gmail_n, "db": db_n,
-                         "missing": gmail_n - db_n})
+        missing = max(0, gmail_n - db_n)
+        audit_rows.append({
+            "provider": "gmail", "day": d0.isoformat(),
+            "gmail_count": gmail_n, "db_count": db_n,
+            "missing": missing, "in_sync": missing == 0,
+        })
+        if missing > 0:
+            gaps.append({"day": d0.isoformat(), "gmail": gmail_n, "db": db_n, "missing": missing})
+
+    # Persist every audited day (upsert on provider+day) so each run refreshes it.
+    # Non-fatal: a persistence failure must not stop the audit from reporting.
+    if audit_rows:
+        try:
+            get_db().table("sync_gap_audits").upsert(
+                audit_rows, on_conflict="provider,day"
+            ).execute()
+        except Exception as e:
+            logger.warning("Gap audit: failed to persist %d day(s) "
+                           "(run sql/setup_sync_gap_audits.sql?): %s", len(audit_rows), e)
+
     if gaps:
-        logger.warning("Sync-gap audit found %d day(s) missing mail: %s",
-                       len(gaps), ", ".join(f"{g['day']} (-{g['missing']})" for g in gaps))
+        logger.warning("Sync-gap audit found %d day(s) missing mail over %d days: %s",
+                       len(gaps), window, ", ".join(f"{g['day']} (-{g['missing']})" for g in gaps))
     else:
-        logger.info("Sync-gap audit: no gaps over last %d days", days)
+        logger.info("Sync-gap audit: no gaps over last %d days", window)
     return gaps
+
+
+# Guardrails for automatic gap backfill. Above these, alert a human instead of
+# auto-pulling — a large or broad gap is more likely a Gmail API problem (or an
+# intentional bounded-load skip) than lost mail worth blindly re-fetching.
+AUTO_HEAL_MAX_MISSING_PER_DAY = 1000
+AUTO_HEAL_MAX_DAYS = 14
+
+
+def heal_sync_gaps(days: int = 14) -> dict:
+    """Self-healing loop: audit → auto-backfill each gap day (within guardrails) →
+    re-count that day → alert on anything still short. Returns
+    {gaps_found, healed, unhealed:[...]}.
+
+    Backfill is per-day and does NOT move the watermark, so healing an old day
+    never disturbs incremental sync."""
+    import calendar
+    from datetime import timedelta
+    gaps = audit_sync_gaps(days=days)
+    if not gaps:
+        return {"gaps_found": 0, "healed": 0, "unhealed": []}
+
+    # Guardrail: too many days, or a single day too large, → alert, don't auto-pull.
+    too_big = [g for g in gaps if g["missing"] > AUTO_HEAL_MAX_MISSING_PER_DAY]
+    if len(gaps) > AUTO_HEAL_MAX_DAYS or too_big:
+        logger.warning("Sync-gap heal: %d gap day(s) exceed guardrails "
+                       "(days>%d or a day missing>%d) — alerting instead of auto-pulling",
+                       len(gaps), AUTO_HEAL_MAX_DAYS, AUTO_HEAL_MAX_MISSING_PER_DAY)
+        _alert_sync_drift(gaps, healed=False)
+        return {"gaps_found": len(gaps), "healed": 0, "unhealed": gaps}
+
+    healed = 0
+    unhealed: list[dict] = []
+    for g in gaps:
+        day = datetime.fromisoformat(g["day"]).date()
+        d1 = day + timedelta(days=1)
+        after = calendar.timegm(day.timetuple())
+        before = calendar.timegm(d1.timetuple())
+        logger.info("Sync-gap heal: backfilling %s (missing %d)", g["day"], g["missing"])
+        try:
+            backfill_window(after, before)
+        except Exception as e:
+            logger.warning("Sync-gap heal: backfill of %s failed: %s", g["day"], e)
+
+        # Re-count that day and refresh its audit row.
+        gmail_n = count_inbox_messages(after_epoch_s=after, before_epoch_s=before)
+        try:
+            db_n = (get_db().table("emails").select("id", count="exact")
+                    .gte("received_at", f"{day.isoformat()}T00:00:00+00:00")
+                    .lt("received_at", f"{d1.isoformat()}T00:00:00+00:00")
+                    .execute().count or 0)
+        except Exception:
+            db_n = g["db"]
+        missing = max(0, gmail_n - db_n)
+        try:
+            get_db().table("sync_gap_audits").upsert({
+                "provider": "gmail", "day": g["day"], "gmail_count": gmail_n,
+                "db_count": db_n, "missing": missing, "in_sync": missing == 0,
+            }, on_conflict="provider,day").execute()
+        except Exception:
+            pass
+
+        if missing == 0:
+            healed += 1
+            logger.info("Sync-gap heal: %s cleared", g["day"])
+        else:
+            unhealed.append({**g, "missing": missing})
+
+    if unhealed:
+        logger.warning("Sync-gap heal: %d day(s) still short after backfill: %s",
+                       len(unhealed), ", ".join(f"{u['day']} (-{u['missing']})" for u in unhealed))
+        _alert_sync_drift(unhealed, healed=True)
+    logger.info("Sync-gap heal: %d healed, %d still short", healed, len(unhealed))
+    return {"gaps_found": len(gaps), "healed": healed, "unhealed": unhealed}
+
+
+def _alert_sync_drift(gaps: list[dict], healed: bool) -> None:
+    """Email a sync-drift alert to the operator. Non-fatal — a failed alert must
+    not break the heal loop. Recipient: SYNC_ALERT_RECIPIENT. Sends via the same
+    Gmail SMTP account (EMAIL_ACCOUNT/EMAIL_PASSWORD) the RFQ sender uses, and does
+    NOT honour EMAIL_REDIRECT — an alert must always reach the human."""
+    recipient = os.getenv("SYNC_ALERT_RECIPIENT", "bhutani.samarth@gmail.com").strip()
+    account = os.getenv("EMAIL_ACCOUNT", "").strip()
+    password = os.getenv("EMAIL_PASSWORD", "").strip()
+    if not (recipient and account and password):
+        logger.warning("Sync-drift alert NOT sent — EMAIL_ACCOUNT/EMAIL_PASSWORD/"
+                       "SYNC_ALERT_RECIPIENT not all set. Days: %s",
+                       ", ".join(f"{g['day']}(-{g['missing']})" for g in gaps))
+        return
+
+    import smtplib
+    import ssl
+    from email.mime.text import MIMEText
+
+    lines = "\n".join(f"  • {g['day']}: Gmail {g['gmail']} vs DB {g['db']} (missing {g['missing']})"
+                      for g in gaps)
+    intro = ("Some days are STILL short after an automatic backfill attempt — these "
+             "need a manual look."
+             if healed else
+             "The gap exceeds the auto-heal guardrails, so it was NOT auto-pulled. "
+             "Review before backfilling (a large/broad gap is often a Gmail API issue).")
+    body = (f"Sync-gap audit detected drift between Gmail and the database.\n\n"
+            f"{intro}\n\n{lines}\n\n"
+            f"To pull a day on purpose, run backend/scripts/ingest_window.py for that "
+            f"window.\n\nBhatia Shipping Copilot")
+    msg = MIMEText(body, "plain")
+    msg["From"] = account
+    msg["To"] = recipient
+    msg["Subject"] = f"[Copilot] Sync drift — {len(gaps)} day(s) short"
+
+    try:
+        smtp_server = os.getenv("SMTP_SERVER", "smtp.gmail.com")
+        smtp_port = int(os.getenv("SMTP_PORT", "587"))
+        ctx = ssl.create_default_context()
+        with smtplib.SMTP(smtp_server, smtp_port, timeout=30) as server:
+            server.starttls(context=ctx)
+            server.login(account, password)
+            server.sendmail(account, [recipient], msg.as_string())
+        logger.info("Sync-drift alert emailed to %s (%d day(s))", recipient, len(gaps))
+    except Exception as e:
+        logger.warning("Sync-drift alert email failed: %s", e)
 
 
 def _parse_dt(value: Optional[str]) -> Optional[datetime]:

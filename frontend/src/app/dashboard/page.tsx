@@ -356,19 +356,21 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
           {loadingAtts && attachments.length === 0 && (
             <div style={{ marginTop: 8, fontSize: 12, color: 'var(--faint)' }}>Loading attachments…</div>
           )}
-          {(displayLabel === 'customer_requirement' || correctedLabel === 'customer_requirement') && (
-            <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
-              <button
-                disabled={processing || loadingBody}
-                style={{
-                  padding: '7px 16px', borderRadius: 8, border: 'none',
-                  background: processing ? 'var(--input-border)' : 'var(--blue)', color: 'var(--on-accent)',
-                  fontSize: 13, fontWeight: 600, cursor: processing ? 'default' : 'pointer',
-                }}
-                onClick={e => { e.stopPropagation(); openSendRequest(); }}
-              >
-                {processing ? '⏳ Opening…' : '🚀 Process this email → Send RFQs'}
-              </button>
+          <div style={{ marginTop: 12, display: 'flex', alignItems: 'center', gap: 10 }}>
+            {/* Process is available on every email — the operator decides, not the classifier. */}
+            <button
+              disabled={processing || loadingBody}
+              style={{
+                padding: '7px 16px', borderRadius: 8, border: 'none',
+                background: processing ? 'var(--input-border)' : 'var(--blue)', color: 'var(--on-accent)',
+                fontSize: 13, fontWeight: 600, cursor: processing ? 'default' : 'pointer',
+              }}
+              onClick={e => { e.stopPropagation(); openSendRequest(); }}
+            >
+              {processing ? '⏳ Opening…' : '🚀 Process this email → Send RFQs'}
+            </button>
+            {/* Rate-card view is only meaningful for a customer request (it maps to an RFQ). */}
+            {(displayLabel === 'customer_requirement' || correctedLabel === 'customer_requirement') && (
               <a
                 href={`/request/${email.id}`}
                 onClick={e => e.stopPropagation()}
@@ -377,8 +379,8 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
                   color: 'var(--muted)', fontSize: 13, fontWeight: 600, textDecoration: 'none',
                 }}
               >📋 View rate cards</a>
-            </div>
-          )}
+            )}
+          </div>
         </div>
       )}
     </div>
@@ -705,6 +707,9 @@ export default function Dashboard() {
 
   const requests  = emails.filter(e => e.label === 'customer_requirement');
   const rateCards = emails.filter(e => e.label === 'quotation_rate_card');
+  // Shipments & RFQs shows only jobs we actually sent an RFQ for — i.e. at least
+  // one agent was contacted. Excludes any job row that never reached a send.
+  const sentJobs  = jobs.filter(j => (j.agents_contacted?.length ?? 0) > 0);
 
   function renderEmails(list: Email[], emptyMsg: string, showLoadMore = false) {
     if (list.length === 0) return <div className="empty-state">{emptyMsg}</div>;
@@ -742,7 +747,7 @@ export default function Dashboard() {
     { key: 'requests'  as Tab, icon: '📦', label: 'Customer Requests',  count: requests.length,  color: 'var(--blue)' },
     { key: 'ratecards' as Tab, icon: '💰', label: 'Rate Cards',         count: rateCards.length, color: 'var(--green)' },
     { key: 'unlinked'  as Tab, icon: '🔗', label: 'Needs Linking',      count: unlinked.length,  color: 'var(--amber)' },
-    { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: jobs.length,      color: 'var(--yellow)' },
+    { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: sentJobs.length,  color: 'var(--yellow)' },
   ];
 
   return (
@@ -926,10 +931,10 @@ export default function Dashboard() {
                       })}
                     </div>
                   </div>
-                  {jobs.length === 0
-                    ? <div className="empty-state">No shipments yet. Process a customer email to get started.</div>
+                  {sentJobs.length === 0
+                    ? <div className="empty-state">No RFQs sent yet. Process a customer email and send an RFQ to get started.</div>
                     : <div className="shipments-grid">
-                        {[...jobs]
+                        {[...sentJobs]
                           .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
                           .map(j => <ShipmentCard key={j.reference} job={j} />)
                         }

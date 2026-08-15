@@ -52,6 +52,20 @@ a day behind the newest mail and is only a performance bound, never the
 correctness mechanism. A daily audit job compares Gmail's per-day counts to the
 database and logs any day where they disagree.
 
+**Bounded initial load (intentional).** One run ingests at most
+`MAX_INGEST_BATCH` (5000) new emails, keeping the **newest** 5000 and stopping.
+On a very large backlog — weeks of downtime, or a brand-new account whose whole
+mailbox is "new" — this is a deliberate cap: pulling an entire mailbox history is
+load nobody asked for. The trade-off is equally deliberate — after a capped
+(`truncated`) run the watermark **still advances** past the older, un-ingested
+window, so incremental ingest will **not** backfill it. That mail was never
+pulled (it is not lost), and pulling it is the job of the manual scripts
+(`backfill_3months.py` / `ingest_window.py`), which take an explicit date window.
+Both the cap and the watermark advance log a `WARNING` when they trigger, so the
+case is visible in the logs. This is by design — see the note in
+[BUGS.md](BUGS.md#by-design); do not "fix" it by removing the ceiling or holding
+the watermark.
+
 ### B. Scan — `automation/automation.py`
 
 Every 5 minutes, claims unprocessed rows from `emails` and acts on the label.

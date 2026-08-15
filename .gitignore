@@ -43,3 +43,6 @@ Samarth_Resume.pdf
 # Local session ops helper (machine-specific paths); Render supervises in prod
 watchdog.sh
 recovery_poll.log
+
+# DB backups (contain real customer/vendor data)
+rfq_jobs_backup_*.json

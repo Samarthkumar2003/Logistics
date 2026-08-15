@@ -23,8 +23,8 @@ from fastapi import FastAPI
 from backend.automation.automation import run_scan
 from backend.classifier.llm_provider import get_provider
 from backend.connectors.email_store import (
-    audit_sync_gaps,
     backfill_classifications,
+    heal_sync_gaps,
     ingest_new_emails,
     process_pending_attachments,
     retry_pending_classifications,
@@ -91,10 +91,15 @@ def _metrics_snapshot_job() -> None:
 
 
 def _gap_audit_job() -> None:
+    # Self-healing: audit → auto-backfill each gap day within guardrails →
+    # re-audit → email an alert for anything still short.
     try:
-        audit_sync_gaps(days=14)  # WARNs with any day Gmail has and we don't
+        stats = heal_sync_gaps(days=14)
+        if stats.get("gaps_found"):
+            logger.info("Sync-gap heal: found %d, healed %d, unhealed %d",
+                        stats["gaps_found"], stats["healed"], len(stats["unhealed"]))
     except Exception as e:
-        logger.error("Sync-gap audit error: %s", e)
+        logger.error("Sync-gap heal error: %s", e)
 
 
 def run_scan_in_background() -> None:

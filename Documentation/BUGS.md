@@ -14,6 +14,26 @@ noticing outranks one that throws a visible error.
 
 ---
 
+<a id="by-design"></a>
+
+## By design — not bugs (don't "fix" these)
+
+### Bounded initial load — `ingest_new_emails` caps at `MAX_INGEST_BATCH` and advances the watermark anyway
+On a backlog larger than 5000 new emails (weeks of downtime, or a brand-new
+account's entire mailbox), one ingest run keeps only the **newest 5000** and
+stops (`truncated`), and the watermark **still advances past** the older,
+un-ingested window. So incremental ingest does **not** backfill that history.
+
+This looks like the "watermark leapfrogs un-ingested mail" gap, and it is — but
+it is **intentional**: pulling a whole mailbox history on a new account is load
+nobody asked for. Older history is pulled deliberately with the manual scripts
+(`backfill_3months.py` / `ingest_window.py`), which take an explicit date window.
+Both the cap and the truncated-advance emit a `WARNING`, so it is visible in the
+logs. Decision: 2026-08-16. Do not remove the ceiling or hold the watermark to
+"fix" it. See [01-architecture.md](01-architecture.md) → "Bounded initial load".
+
+---
+
 <a id="p0"></a>
 
 ## P0 — fix now
