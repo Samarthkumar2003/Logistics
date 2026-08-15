@@ -21,8 +21,11 @@ LABEL_CUSTOMER_REQUIREMENT = "customer_requirement"
 LABEL_RATE_CARD = "quotation_rate_card"
 LABEL_GENERAL = "general"
 
-# Job statuses that can still receive a reply.
-OPEN_JOB_STATUSES = ("rfqs_sent", "quotes_received")
+# Job statuses that can still receive a reply. `send_failed` is included because
+# a send failure can be ambiguous — a timeout may have delivered — so a reply is
+# proof the RFQ arrived after all, and should advance the job rather than be
+# filed against a job frozen as failed.
+OPEN_JOB_STATUSES = ("rfqs_sent", "quotes_received", "send_failed")
 
 
 def _s(row: dict, key: str, default: str = "") -> str:

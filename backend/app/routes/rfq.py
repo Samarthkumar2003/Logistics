@@ -107,7 +107,7 @@ def preview_rfq(payload: PreviewRFQRequest):
     except rfq_service.RfqError as e:
         raise AppException(status_code=422, detail=str(e))
     except Exception as e:
-        logger.error("Draft generation failed: %s", e)
+        logger.exception("Draft generation failed: %s", e)
         raise AppException(status_code=500, detail=f"Draft generation failed: {e}")
 
 
@@ -131,5 +131,5 @@ def send_rfq(payload: SendRFQRequest):
     except rfq_service.RfqError as e:
         raise AppException(status_code=422, detail=str(e))
     except Exception as e:
-        logger.error("Send failed: %s", e)
+        logger.exception("Send failed: %s", e)
         raise AppException(status_code=500, detail=f"Send failed: {e}")

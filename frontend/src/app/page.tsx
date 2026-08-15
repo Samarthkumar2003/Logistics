@@ -551,6 +551,9 @@ export default function Office() {
       case 'awaiting_quotes': return '#fbbf24';
       case 'quotes_received': return '#22c55e';
       case 'approved': return '#6b7280';
+      // Not grey: the RFQ never left, so this job is not waiting on an agent.
+      // Sharing 'approved' grey made a failed send read as a finished one.
+      case 'send_failed': return '#dc2626';
       default: return '#6b7280';
     }
   }

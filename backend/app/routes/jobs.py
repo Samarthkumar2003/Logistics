@@ -26,7 +26,7 @@ def list_jobs():
             [j.reference for j in jobs if j.reference]
         )
     except Exception as e:
-        logger.error("Failed to list jobs: %s", e)
+        logger.exception("Failed to list jobs: %s", e)
         raise AppException(status_code=500, detail=f"Failed to list jobs: {e}")
 
     return [
@@ -54,7 +54,7 @@ def get_job(reference: str):
     try:
         job = job_repo.get(reference)
     except Exception as e:
-        logger.error("Failed to fetch job %s: %s", reference, e)
+        logger.exception("Failed to fetch job %s: %s", reference, e)
         raise AppException(status_code=500, detail=f"Failed to fetch job: {e}")
 
     if job is None:
@@ -83,7 +83,7 @@ def list_replies(reference: str):
     try:
         return reply_service.list_for_reference(reference)
     except Exception as e:
-        logger.error("Failed to list replies for %s: %s", reference, e)
+        logger.exception("Failed to list replies for %s: %s", reference, e)
         raise AppException(status_code=500, detail=f"Failed to list replies: {e}")
 
 
@@ -93,7 +93,7 @@ def get_customer_request(customer_email_id: str):
     try:
         data = reply_service.get_customer_request(customer_email_id)
     except Exception as e:
-        logger.error("Failed to load customer request %s: %s", customer_email_id, e)
+        logger.exception("Failed to load customer request %s: %s", customer_email_id, e)
         raise AppException(status_code=500, detail=f"Failed to load customer request: {e}")
 
     if data is None:
@@ -114,5 +114,5 @@ def approve_job(reference: str):
         detail = str(e)
         raise AppException(status_code=404 if "not found" in detail else 422, detail=detail)
     except Exception as e:
-        logger.error("Approval failed for %s: %s", reference, e)
+        logger.exception("Approval failed for %s: %s", reference, e)
         raise AppException(status_code=500, detail=f"Approval failed: {e}")

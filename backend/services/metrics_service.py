@@ -28,7 +28,10 @@ logger = logging.getLogger(__name__)
 # mistaken for a healthy zero.
 UNAVAILABLE = -1
 
-JOB_STATUSES = ("rfqs_sent", "quotes_received", "approved")
+# `send_failed` is counted here so a broken sender shows up as a rising number
+# rather than only in the logs. It is deliberately absent from the snapshot row
+# below, which would need a new `metrics_snapshots` column to store it.
+JOB_STATUSES = ("rfqs_sent", "quotes_received", "approved", "send_failed")
 
 
 def _count(db, table: str, build: Callable) -> int:

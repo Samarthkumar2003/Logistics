@@ -100,6 +100,11 @@ function statusInfo(status: string): { label: string; color: string; bg: string;
     awaiting_quotes: { label: 'Awaiting Quotes',  color: 'var(--amber)', bg: 'var(--status-amber-bg)', desc: 'Agents notified, quotes pending' },
     quotes_received: { label: 'Quotes Received',  color: 'var(--green-soft)', bg: 'var(--status-green-bg)', desc: 'Quotes in — ready to compare' },
     approved:        { label: 'Approved',          color: 'var(--purple)', bg: 'var(--status-purple-bg)', desc: 'Shipment confirmed' },
+    // The RFQ never left. Written by _record_job when the sender did not confirm
+    // a send, so this job is NOT waiting on an agent — nobody was contacted.
+    // Without this entry the fallback below rendered the raw string
+    // 'send_failed' in neutral grey, which reads as an ordinary state.
+    send_failed:     { label: 'Send Failed',       color: 'var(--red)', bg: 'var(--red-tint)', desc: 'RFQ did not send — no agent was contacted' },
   };
   return map[status] ?? { label: status, color: 'var(--muted-soft)', bg: 'var(--status-neutral-bg)', desc: '' };
 }
@@ -925,7 +930,7 @@ export default function Dashboard() {
                       </p>
                     </div>
                     <div className="pane-legend">
-                      {(['rfqs_sent','quotes_received','approved'] as const).map(s => {
+                      {(['rfqs_sent','quotes_received','approved','send_failed'] as const).map(s => {
                         const si = statusInfo(s);
                         return <span key={s} className="status-legend" style={{ color: si.color, background: si.bg }}>{si.label}</span>;
                       })}
