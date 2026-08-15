@@ -80,11 +80,11 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         return {"status": "failed", "to": to_addr, "error": error_msg}
     except smtplib.SMTPException as exc:
         error_msg = f"SMTP error: {exc}"
-        logger.error(error_msg)
+        logger.exception(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
     except Exception as exc:
         error_msg = f"Unexpected error sending email: {exc}"
-        logger.error(error_msg)
+        logger.exception(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
 
 

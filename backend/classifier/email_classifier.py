@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from backend.classifier.llm_provider import get_provider
 from backend.core.db import get_db
+from backend.core.logging_context import carry_context, email_context
 from backend.core.rfq_reference import extract_rfq_reference, has_rfq_reference
 
 logger = logging.getLogger(__name__)
@@ -263,7 +264,7 @@ def classify_email(subject: str, body: str, sender: str = "") -> ClassificationR
             # the account is out of credit. Fail fast instead of burning ~40s of
             # backoff per email on a permanently failing call.
             if "insufficient_quota" in err_str:
-                logger.error("LLM quota exhausted — classification unavailable: %s", e)
+                logger.exception("LLM quota exhausted — classification unavailable: %s", e)
                 break
             if "429" in err_str or "rate_limit" in err_str.lower():
                 wait = 2 ** attempt * 5 + random.uniform(0, 2)  # 5-7s, 10-12s, 20-22s
@@ -278,23 +279,34 @@ def classify_email(subject: str, body: str, sender: str = "") -> ClassificationR
 def classify_emails_batch(emails: list[dict]) -> list[dict]:
     """Classify multiple emails concurrently. Each dict needs: id, subject, body, sender."""
     def _one(email: dict) -> dict:
-        result = classify_email(
-            subject=email.get("subject", ""),
-            body=email.get("body", ""),
-            sender=email.get("sender", email.get("from", "")),
-        )
-        return {
-            "id": email.get("id", ""),
-            "subject": email.get("subject", ""),
-            "label": result.label,
-            "confidence": result.confidence,
-            "method": result.method,
-            "details": result.details,
-        }
+        # The email id, on every line this classification emits. The rule tiers
+        # and the model verdict below log *why* a label was chosen and name no id
+        # of their own, so without this they are unattributable — five workers
+        # interleaving "Classified by openai: general (85%)" with nothing to say
+        # which of five emails each line meant.
+        with email_context(email.get("id", "")):
+            result = classify_email(
+                subject=email.get("subject", ""),
+                body=email.get("body", ""),
+                sender=email.get("sender", email.get("from", "")),
+            )
+            return {
+                "id": email.get("id", ""),
+                "subject": email.get("subject", ""),
+                "label": result.label,
+                "confidence": result.confidence,
+                "method": result.method,
+                "details": result.details,
+            }
+
+    # Carries the caller's scan/job/request id in; `email_context` above adds the
+    # per-item one. A pool worker starts with an empty context, so both are lost
+    # without this.
+    worker = carry_context(_one)
 
     results: list[dict] = [{}] * len(emails)
     with ThreadPoolExecutor(max_workers=min(len(emails), 5)) as pool:
-        future_to_idx = {pool.submit(_one, e): i for i, e in enumerate(emails)}
+        future_to_idx = {pool.submit(worker, e): i for i, e in enumerate(emails)}
         for future in as_completed(future_to_idx):
             idx = future_to_idx[future]
             try:
@@ -333,7 +345,7 @@ def submit_feedback(
             "confidence": confidence,
         }).execute()
     except Exception as e:
-        logger.error("Failed to store feedback: %s", e)
+        logger.exception("Failed to store feedback: %s", e)
         return {"status": "error", "detail": str(e)}
 
     return {"status": "ok", "detail": f"Feedback stored as '{corrected_label}'"}

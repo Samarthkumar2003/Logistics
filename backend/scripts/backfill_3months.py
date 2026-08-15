@@ -24,6 +24,7 @@ from dotenv import load_dotenv
 from supabase import create_client
 
 from backend.core.logging_config import configure_logging, default_log_file
+from backend.core.logging_context import carry_context, email_context
 
 load_dotenv()
 configure_logging(log_file=default_log_file())  # bulk run: keep a record
@@ -152,20 +153,24 @@ from backend.classifier.email_classifier import classify_email   # noqa: E402
 
 
 def _classify_one(r: dict) -> tuple[dict, str, float, str]:
-    result = classify_email(
-        subject=r.get("subject", ""),
-        body=r.get("body", ""),
-        sender=r.get("sender", ""),
-    )
-    return r, result.label, result.confidence, result.method
+    # A three-month backfill is thousands of classifications; without the id the
+    # rule-tier lines it emits cannot be traced to a message afterwards.
+    with email_context(r.get("provider_msg_id", "") or r.get("id", "")):
+        result = classify_email(
+            subject=r.get("subject", ""),
+            body=r.get("body", ""),
+            sender=r.get("sender", ""),
+        )
+        return r, result.label, result.confidence, result.method
 
 
 def classify_parallel(records: list[dict], workers: int = 5) -> list[tuple]:
     """Classify all records in parallel. Returns list of (record, label, conf, method)."""
     results = []
     total = len(records)
+    classify = carry_context(_classify_one)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_classify_one, r): r for r in records}
+        futures = {pool.submit(classify, r): r for r in records}
         done = 0
         for future in as_completed(futures):
             done += 1

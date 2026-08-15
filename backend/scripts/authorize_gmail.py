@@ -112,7 +112,7 @@ def cmd_exchange(pasted: str) -> int:
     try:
         flow.fetch_token(authorization_response=pasted.strip())
     except Exception as e:
-        logger.error("Token exchange failed: %s", e)
+        logger.exception("Token exchange failed: %s", e)
         logger.error("Codes expire in ~10 min and work once. Re-run the 'url' step.")
         return 1
 

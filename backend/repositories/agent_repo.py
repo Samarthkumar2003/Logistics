@@ -44,7 +44,7 @@ def load_csv() -> list[AgentContact]:
     except FileNotFoundError:
         logger.error("Agents CSV not found at %s", AGENTS_CSV)
     except Exception as e:
-        logger.error("Failed to load agents CSV: %s", e)
+        logger.exception("Failed to load agents CSV: %s", e)
     return agents
 
 

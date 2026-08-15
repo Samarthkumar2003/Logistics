@@ -7,24 +7,38 @@ it answers, so it lives in core rather than inside any one agent.
 
 Two forms, deliberately:
 
-    canonical   RFQ-20260101-a1b2     what rfq_jobs.reference stores
-    subject     RFQId:20260101-a1b2   what goes out in the subject line
+    canonical   RFQ-20260101-a1b2c3d4     what rfq_jobs.reference stores
+    subject     RFQId:20260101-a1b2c3d4   what goes out in the subject line
 
 The subject form is labelled so it survives a human retyping it and is obvious
 to an agent skimming their inbox. The canonical form stays as it was because 172
 jobs already use it and ~150 RFQs are out in the wild awaiting replies — so the
 pattern below matches BOTH, and extraction always returns the canonical form.
 
-The date component is kept in the subject token. Four hex characters alone would
+The date component is kept in the subject token. The hex suffix alone would
 collide across days, and a reference that is only unique within one day cannot
 attribute a reply that arrives a week later.
+
+The hex suffix is 8 characters. It was 4, which is 65,536 values scoped to one
+day: at ~150 RFQs a day that is a ~16% chance per day of drawing a reference
+that already exists. `rfq_jobs.reference` is unique, so a collision does not
+misattribute anything — the insert fails *after* the mail has gone out, leaving
+an RFQ with an agent and no job row to attach the reply to. Both widths match
+below, because shortening the pattern to 8 only would orphan every reference
+already in the wild.
 """
 
 import re
 from typing import Optional
 
-# The unique part: YYYYMMDD-xxxx.
-_CORE = r"(\d{8}-[a-f0-9]{4})"
+# The unique part: YYYYMMDD-xxxx, where xxxx is 8 hex (current) or 4 (legacy).
+#
+# The trailing lookahead is what makes accepting two widths safe. Without it a
+# 4-char match could be taken out of the front of a longer hex run and resolve
+# to a real-but-wrong job. With it, anything longer than 8 matches nothing at
+# all — refusing to attribute is recoverable, attributing to the wrong shipment
+# is not.
+_CORE = r"(\d{8}-[a-f0-9]{4,8})(?![a-f0-9])"
 
 # Matches the current subject token AND the legacy bare form. Case-insensitive
 # because agents retype references by hand; whitespace around the colon is

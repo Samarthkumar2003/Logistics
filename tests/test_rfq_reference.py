@@ -8,8 +8,12 @@ attaches to the wrong shipment — which is worse, because it looks like it work
 
 Two forms are live simultaneously and both must keep working:
 
-    RFQId:20260101-a1b2    current subject token
-    RFQ-20260101-a1b2      canonical / legacy, ~150 still out with agents
+    RFQId:20260101-a1b2c3d4    current subject token
+    RFQ-20260101-a1b2          canonical / legacy, ~150 still out with agents
+
+Two hex *widths* are also live. New references use 8 characters; every reference
+issued before the widening used 4 and many are still awaiting a reply, so
+dropping the 4-char form would strand them.
 """
 
 import pytest
@@ -154,3 +158,63 @@ def test_injected_subject_is_always_extractable():
     out, we can read the reference back out of it."""
     for subject in ("", "Rates please", "Re: RFQ-20251231-c3d4 | old", "  spaced  "):
         assert extract_rfq_reference(inject_reference(subject, REF)) == REF
+
+
+# ---------------------------------------------------------------------------
+# Hex width — 8 for new references, 4 still honoured for the ones in the wild
+# ---------------------------------------------------------------------------
+
+WIDE = "RFQ-20260101-a1b2c3d4"
+
+
+@pytest.mark.parametrize("text", [
+    "RFQId:20260101-a1b2c3d4",
+    "RFQ-20260101-a1b2c3d4",
+    "Re: RFQId:20260101-a1b2c3d4 | Mumbai to Hamburg",
+    "RFQ Id : 20260101-a1b2c3d4",
+    "RFQID:20260101-A1B2C3D4",
+])
+def test_extracts_the_8_char_form(text):
+    assert extract_rfq_reference(text) == WIDE
+
+
+def test_the_4_char_form_still_resolves():
+    """~150 legacy references are still out with agents awaiting a reply."""
+    assert extract_rfq_reference("Re: RFQId:20260101-a1b2") == REF
+
+
+def test_both_widths_round_trip_through_the_subject_line():
+    for core in ("20260101-a1b2", "20260101-a1b2c3d4", "20251231-ffffffff",
+                 "20260630-00000000", "20251231-ffff"):
+        reference = canonical(core)
+        assert extract_rfq_reference(subject_token(reference)) == reference
+
+
+def test_a_longer_hex_run_matches_nothing_rather_than_matching_wrongly():
+    """Refusing to attribute is recoverable; attributing to the wrong shipment
+    is not. A 12-char run is not a reference we ever issued, so the pattern must
+    not shave a valid-looking 8- or 4-char core off the front of it."""
+    assert extract_rfq_reference("RFQ-20260101-a1b2c3d4e5f6") is None
+    assert has_rfq_reference("RFQ-20260101-a1b2c3d4e5f6") is False
+
+
+def test_a_wide_reference_replaces_a_legacy_one_in_a_subject():
+    assert inject_reference("RFQ-20260101-a1b2 | Rates", WIDE) == \
+        "RFQId:20260101-a1b2c3d4 | Rates"
+
+
+def test_generated_references_are_8_hex_and_extractable():
+    """The generator and the matcher must not drift apart — a reference we can
+    mint but cannot read back is an RFQ whose reply can never be attributed."""
+    from backend.services.rfq_service import new_reference
+
+    seen = set()
+    for _ in range(200):
+        reference = new_reference()
+        core = reference.split("-", 2)[2]
+        assert len(core) == 8, reference
+        assert extract_rfq_reference(reference) == reference
+        seen.add(reference)
+    # Not a distribution test — just that the suffix varies at all. A constant
+    # suffix would collide on the second RFQ of the day.
+    assert len(seen) > 190

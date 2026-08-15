@@ -29,6 +29,7 @@ from backend.connectors.gmail_connector import (
 from backend.classifier.classification_cache import classify_with_cache
 from backend.core.config import settings
 from backend.core.db import get_db
+from backend.core.logging_context import carry_context
 
 logger = logging.getLogger(__name__)
 
@@ -239,8 +240,9 @@ def _process_pending_attachments(max_atts: int, workers: int) -> dict:
 
     logger.info("Attachment worker: %d pending", len(rows))
     outcomes = {"stored": 0, "failed": 0, "retry": 0}
+    download = carry_context(_download_pending_attachment)
     with ThreadPoolExecutor(max_workers=workers) as pool:
-        futures = {pool.submit(_download_pending_attachment, r): r["id"] for r in rows}
+        futures = {pool.submit(download, r): r["id"] for r in rows}
         for fut in as_completed(futures):
             try:
                 outcomes[fut.result()] += 1
@@ -765,7 +767,7 @@ def retry_pending_classifications(batch_size: int = 20, max_emails: int = 500) -
             .limit(max_emails).execute().data or []
         )
     except Exception as e:
-        logger.error("Retry queue: fetch failed: %s", e)
+        logger.exception("Retry queue: fetch failed: %s", e)
         return {"error": str(e)}
 
     if not rows:
@@ -822,7 +824,7 @@ def backfill_classifications(batch_size: int = 20) -> dict:
             .data or []
         )
     except Exception as e:
-        logger.error("Backfill: failed to fetch emails: %s", e)
+        logger.exception("Backfill: failed to fetch emails: %s", e)
         return {"error": str(e)}
 
     if not rows:
@@ -843,7 +845,7 @@ def backfill_classifications(batch_size: int = 20) -> dict:
             )
         }
     except Exception as e:
-        logger.error("Backfill: failed to fetch cached ids: %s", e)
+        logger.exception("Backfill: failed to fetch cached ids: %s", e)
         return {"error": str(e)}
 
     missing = [r for r in rows if r["provider_msg_id"] not in cached_ids]

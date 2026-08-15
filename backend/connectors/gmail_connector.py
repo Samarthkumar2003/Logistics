@@ -35,6 +35,7 @@ from backend.connectors.google_oauth import (
 logger = logging.getLogger(__name__)
 
 from backend.core.config import settings
+from backend.core.logging_context import carry_context
 from backend.core.paths import SERVICE_ACCOUNT_FILE
 
 GMAIL_BASE = "https://gmail.googleapis.com/gmail/v1/users/me"
@@ -179,8 +180,9 @@ def fetch_latest_emails(limit: int = 10, offset: int = 0) -> dict:
     page = messages[offset:offset + limit]
 
     emails: list[dict] = []
+    fetch_one = carry_context(_fetch_metadata)
     with ThreadPoolExecutor(max_workers=min(len(page), 10)) as pool:
-        future_map = {pool.submit(_fetch_metadata, ref["id"]): ref["id"] for ref in page}
+        future_map = {pool.submit(fetch_one, ref["id"]): ref["id"] for ref in page}
         for future in as_completed(future_map):
             try:
                 emails.append(future.result())
@@ -340,8 +342,9 @@ def fetch_full_records(ids: list[str]) -> list[dict]:
             return None
 
     records: list[dict] = []
+    fetch = carry_context(_fetch_one)
     with ThreadPoolExecutor(max_workers=20) as pool:
-        futures = {pool.submit(_fetch_one, mid): mid for mid in ids}
+        futures = {pool.submit(fetch, mid): mid for mid in ids}
         done = 0
         for future in as_completed(futures):
             done += 1

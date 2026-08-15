@@ -144,7 +144,7 @@ def set_enabled(supabase, enabled: bool) -> None:
         }, on_conflict="id").execute()
         logger.info("Automation %s", "enabled" if enabled else "disabled")
     except Exception as e:
-        logger.error("Failed to toggle automation: %s", e)
+        logger.exception("Failed to toggle automation: %s", e)
         raise
 
 
@@ -165,7 +165,7 @@ def _claim_email(supabase, row_id: str) -> bool:
         )
         return bool(res.data)
     except Exception as e:
-        logger.error("Failed to claim email %s: %s", row_id, e)
+        logger.exception("Failed to claim email %s: %s", row_id, e)
         return False
 
 
@@ -183,7 +183,7 @@ def _release_claim(supabase, row_id: str, attempts: int, error: str) -> None:
             "processing_error": error[:500],
         }).eq("id", row_id).execute()
     except Exception as e:
-        logger.error("Failed to release claim on email %s: %s", row_id, e)
+        logger.exception("Failed to release claim on email %s: %s", row_id, e)
 
 
 def _thread_already_customer(supabase, thread_id: str, current_msg_id: str) -> bool:
@@ -307,7 +307,7 @@ def _handle_email(supabase, row: dict, stats: ScanStats) -> None:
             # Hand the claim back so the next run retries it. Without this a
             # single exception retired the email permanently.
             attempts = row.get("processing_attempts") or 0
-            logger.error("Failed to process (%s), attempt %d/%d: %s",
+            logger.exception("Failed to process (%s), attempt %d/%d: %s",
                          label, attempts + 1, MAX_PROCESS_ATTEMPTS, e)
             _release_claim(supabase, row["id"], attempts, str(e))
             stats.errors += 1
@@ -320,7 +320,7 @@ def _run_scan_body(supabase, stats: ScanStats) -> None:
     try:
         rows = _fetch_batch(supabase)
     except Exception as e:
-        logger.error("Scan failed to fetch unprocessed emails: %s", e)
+        logger.exception("Scan failed to fetch unprocessed emails: %s", e)
         stats.status = "error"
         stats.errors += 1
         return

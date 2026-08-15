@@ -19,7 +19,7 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
     try:
         return inbox_service.get_inbox_page(limit=limit, offset=offset, search=search)
     except Exception as e:
-        logger.error("Failed to fetch inbox: %s", e)
+        logger.exception("Failed to fetch inbox: %s", e)
         raise AppException(status_code=500, detail=f"Failed to fetch inbox: {e}")
 
 
@@ -27,29 +27,43 @@ def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
 def get_email_body(message_id: str):
     """Full body from the store, falling back to a live Gmail fetch.
 
-    A message in neither is a 404, not a 500 — deleted or moved mail is an
-    ordinary outcome and the UI should say so.
+    A message Gmail itself reports as gone is a 404 — deleted or moved mail is an
+    ordinary outcome and the UI should say so. Any *other* provider failure is a
+    502, because "it may have been deleted" is a dead end for an operator whose
+    real problem is an expired token.
     """
     try:
         stored = email_repo.get_body(message_id)
     except Exception as e:
-        logger.error("Body lookup failed for %s: %s", message_id, e)
+        logger.exception("Body lookup failed for %s: %s", message_id, e)
         raise AppException(status_code=500, detail=f"Failed to fetch email body: {e}")
 
     if stored:
         return {"body": stored}
 
+    # Imported lazily, like the connector below: keeps Google's client libraries
+    # off the import path of a route that usually answers from the store.
+    from backend.connectors.google_oauth import GmailReauthRequired
+
     try:
         from backend.connectors.gmail_connector import fetch_full_message
         return {"body": fetch_full_message(message_id).get("body", "")}
+    except GmailReauthRequired as e:
+        # The most likely failure here by far, and the only one a human can act
+        # on. Must not read as "the email is missing".
+        logger.error("Body fetch for %s needs Gmail re-consent: %s", message_id, e)
+        raise AppException(status_code=502, detail=f"Gmail needs re-authorisation: {e}")
     except Exception as e:
+        # Only Gmail's own 404 means the message is gone. Reaching this handler
+        # tells us nothing on its own — `stored` is None for every message not
+        # yet persisted, which is the normal case for this fallback.
         response = getattr(e, "response", None)
-        if getattr(response, "status_code", None) == 404 or stored is None:
+        if getattr(response, "status_code", None) == 404:
             raise AppException(
                 status_code=404,
                 detail=f"No message {message_id} — it may have been deleted or moved",
             )
-        logger.error("Gmail body fetch failed for %s: %s", message_id, e)
+        logger.exception("Gmail body fetch failed for %s: %s", message_id, e)
         raise AppException(status_code=502, detail=f"Mail provider unavailable: {e}")
 
 
@@ -59,7 +73,7 @@ def get_email_attachments(message_id: str):
     try:
         return {"attachments": inbox_service.get_attachments(message_id)}
     except Exception as e:
-        logger.error("Failed to fetch attachments for %s: %s", message_id, e)
+        logger.exception("Failed to fetch attachments for %s: %s", message_id, e)
         raise AppException(status_code=500, detail=f"Failed to fetch attachments: {e}")
 
 
@@ -73,5 +87,5 @@ def list_unlinked_rate_cards(limit: int = 50, offset: int = 0):
     try:
         return reply_service.list_unlinked(limit=limit, offset=offset)
     except Exception as e:
-        logger.error("Failed to list unlinked rate cards: %s", e)
+        logger.exception("Failed to list unlinked rate cards: %s", e)
         raise AppException(status_code=500, detail=f"Failed to list unlinked rate cards: {e}")
