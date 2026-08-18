@@ -1,10 +1,14 @@
 """
 email_sender.py
 ---------------
-Sends RFQ emails via Gmail SMTP (default) or Microsoft Graph API.
+Sends RFQ emails. EMAIL_PROVIDER picks the path:
 
-Set EMAIL_PROVIDER=outlook in .env to route all sends through
-Microsoft Graph API instead of Gmail SMTP.
+  gmail_workspace (or gmail_api) — Gmail API as GMAIL_MAILBOX. Preferred: mail
+      goes out as the same mailbox the ingest reads, so replies come back in-band.
+  outlook — Microsoft Graph API.
+  gmail (default) — Gmail SMTP as EMAIL_ACCOUNT. Legacy: EMAIL_ACCOUNT is a
+      different identity from GMAIL_MAILBOX, so replies land in a mailbox nothing
+      ingests and the RFQ thread dead-ends.
 """
 
 import os
@@ -25,6 +29,39 @@ SMTP_PORT = settings.smtp_port
 
 EMAIL_PROVIDER = settings.email_provider
 EMAIL_REDIRECT = settings.email_redirect
+GMAIL_MAILBOX = settings.gmail_mailbox
+
+# Providers that send through the Gmail API as GMAIL_MAILBOX rather than SMTP.
+GMAIL_API_PROVIDERS = ("gmail_workspace", "gmail_api")
+
+
+def _apply_redirect(to_addr: str, subject: str) -> tuple[str, str]:
+    """Resolve the real recipient and subject under EMAIL_REDIRECT safe mode.
+
+    Shared by every send path so the redirect can never apply to one and not
+    another — a half-applied redirect mails a real vendor from a test run.
+    """
+    if not EMAIL_REDIRECT:
+        return to_addr, subject
+    logger.info("EMAIL_REDIRECT active — sending to %s instead of %s",
+                EMAIL_REDIRECT, to_addr)
+    return EMAIL_REDIRECT, f"[TEST → {to_addr}] {subject}"
+
+
+def _send_via_gmail_api(to_addr: str, subject: str, body: str) -> dict:
+    """Send as GMAIL_MAILBOX over the Gmail API. Same status dict as SMTP."""
+    from backend.connectors.gmail_connector import send_message
+
+    actual_to, actual_subject = _apply_redirect(to_addr, subject)
+    try:
+        msg_id = send_message(to_addr=actual_to, subject=actual_subject, body=body)
+        logger.info("Email sent via Gmail API as %s to %s (id=%s)",
+                    GMAIL_MAILBOX or "authenticated mailbox", actual_to, msg_id)
+        return {"status": "sent", "to": to_addr}
+    except Exception as exc:
+        error_msg = f"Gmail API send failed: {exc}"
+        logger.exception(error_msg)
+        return {"status": "failed", "to": to_addr, "error": error_msg}
 
 
 def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
@@ -49,19 +86,20 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         from backend.connectors.outlook_sender import send_rfq_email as _outlook_send
         return _outlook_send(to_addr=to_addr, subject=subject, body=body)
 
+    if EMAIL_PROVIDER in GMAIL_API_PROVIDERS:
+        return _send_via_gmail_api(to_addr=to_addr, subject=subject, body=body)
+
     if not EMAIL_ACCOUNT or not EMAIL_PASSWORD:
         error_msg = "EMAIL_ACCOUNT or EMAIL_PASSWORD not set in environment"
         logger.error(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
 
-    actual_to = EMAIL_REDIRECT if EMAIL_REDIRECT else to_addr
-    if EMAIL_REDIRECT:
-        logger.info("EMAIL_REDIRECT active — sending to %s instead of %s", actual_to, to_addr)
+    actual_to, actual_subject = _apply_redirect(to_addr, subject)
 
     msg = MIMEMultipart()
     msg["From"] = EMAIL_ACCOUNT
     msg["To"] = actual_to
-    msg["Subject"] = f"[TEST → {to_addr}] {subject}" if EMAIL_REDIRECT else subject
+    msg["Subject"] = actual_subject
     msg.attach(MIMEText(body, "plain"))
 
     try:

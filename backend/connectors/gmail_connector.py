@@ -19,6 +19,8 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from google.auth.exceptions import RefreshError
 from google.oauth2 import service_account
@@ -111,6 +113,39 @@ def _gmail_get(path: str, params: dict | None = None) -> dict:
         raise GmailReauthRequired(REAUTH_HINT) from e
     resp.raise_for_status()
     return resp.json()
+
+
+def _gmail_post(path: str, payload: dict) -> dict:
+    """POST request to Gmail API, raises on non-2xx.
+
+    Same reauth contract as _gmail_get: a dead refresh token is a human problem,
+    not a retryable one.
+    """
+    session = _get_session()
+    try:
+        resp = session.post(f"{GMAIL_BASE}/{path}", json=payload, timeout=30)
+    except RefreshError as e:
+        logger.error(REAUTH_HINT)
+        raise GmailReauthRequired(REAUTH_HINT) from e
+    resp.raise_for_status()
+    return resp.json()
+
+
+def send_message(to_addr: str, subject: str, body: str) -> str:
+    """Send a plain-text message as the authenticated mailbox. Returns the message id.
+
+    No From header is set on purpose: Gmail stamps it with the token owner, i.e.
+    GMAIL_MAILBOX. That is the whole point of this path — SMTP sends as
+    EMAIL_ACCOUNT, a different identity from the mailbox the ingest reads, so
+    vendor replies landed where nothing was watching. Uses the gmail.send scope
+    already granted on the same refresh token as the read path.
+    """
+    msg = MIMEMultipart()
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    return _gmail_post("messages/send", {"raw": raw}).get("id", "")
 
 
 def _decode_header_value(raw: str) -> str:
