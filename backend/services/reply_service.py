@@ -70,18 +70,44 @@ def list_for_reference(reference: str) -> list[dict[str, Any]]:
     return [_as_dict(e) for e in email_repo.list_replies_for([reference])]
 
 
-def list_unlinked(limit: int, offset: int) -> dict[str, Any]:
-    """Rate cards that never attached, with the reason worked out per row.
+def _unlinked_reason(cited: Optional[str], job_exists: bool, queued: bool) -> str:
+    """Why one rate card is still unlinked.
 
-    The reason is derived here rather than stored, because the two cases want
-    different responses: a reply that cites an unresolvable reference suggests a
-    typo or a deleted job, while one that cites nothing is routine.
+    Derived rather than stored, because the cases want different responses. The
+    reason used to be `f"Cites {cited}, which matches no job"` for every row that
+    cited anything at all — no job lookup ran, so the sentence was an assertion
+    the code had not checked. It was routinely wrong: linking happens in the
+    scan, and the scan is FIFO over `emails.processed_at`, so a reply that landed
+    minutes ago sits behind every older unprocessed email. A reply whose job was
+    sitting in `rfq_jobs` the whole time was reported as citing a reference that
+    matched nothing — which reads as data loss and sends you looking for a bug in
+    attribution instead of at a queue that has not drained.
     """
+    if not cited:
+        return "No RFQ reference in the reply"
+    if not job_exists:
+        return f"Cites {cited}, which matches no job"
+    if queued:
+        return (f"Cites {cited} — its job exists; waiting for the inbox scan to "
+                f"link it")
+    return (f"Cites {cited} — its job exists but linking did not run; "
+            f"needs a retry")
+
+
+def list_unlinked(limit: int, offset: int) -> dict[str, Any]:
+    """Rate cards that never attached, with the reason worked out per row."""
     emails, total = email_repo.list_unlinked_rate_cards(limit=limit, offset=offset)
+
+    cited_by_id = {e.id: find_reference(e.subject, e.body) for e in emails}
+    # Two batch queries for the page, not two per row.
+    jobs_present = job_repo.existing_references(
+        [ref for ref in cited_by_id.values() if ref]
+    )
+    queued = email_repo.pending_scan_ids(list(cited_by_id))
 
     items = []
     for e in emails:
-        cited = find_reference(e.subject, e.body)
+        cited = cited_by_id[e.id]
         items.append({
             "id": e.id,
             "sender": e.sender,
@@ -90,8 +116,7 @@ def list_unlinked(limit: int, offset: int) -> dict[str, Any]:
             "label": "quotation_rate_card",
             "received_at": e.received_at,
             "cited_reference": cited,
-            "reason": (f"Cites {cited}, which matches no job" if cited
-                       else "No RFQ reference in the reply"),
+            "reason": _unlinked_reason(cited, cited in jobs_present, e.id in queued),
         })
 
     return {"emails": items, "total": total, "has_more": (offset + limit) < total}

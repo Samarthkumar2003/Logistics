@@ -95,6 +95,31 @@ def list_unlinked_rate_cards(limit: int, offset: int) -> tuple[list[Email], int]
     return [Email.from_row(r) for r in (result.data or [])], (result.count or 0)
 
 
+def pending_scan_ids(provider_msg_ids: list[str]) -> set[str]:
+    """Which of these emails the scan has not claimed yet (processed_at IS NULL).
+
+    Linking happens in the scan, not at ingest, so an unlinked rate card that is
+    still queued has not failed at anything — it has not been looked at. The
+    unlinked list needs that distinction to word an honest reason.
+    """
+    if not provider_msg_ids:
+        return set()
+    pending: set[str] = set()
+    for i in range(0, len(provider_msg_ids), 100):
+        chunk = provider_msg_ids[i:i + 100]
+        try:
+            rows = (
+                get_db().table("emails").select("provider_msg_id")
+                .in_("provider_msg_id", chunk)
+                .is_("processed_at", "null").execute().data or []
+            )
+        except Exception as e:
+            logger.warning("Pending-scan lookup failed: %s", e)
+            continue
+        pending.update(r["provider_msg_id"] for r in rows if r.get("provider_msg_id"))
+    return pending
+
+
 def count_replies_by_reference(references: list[str]) -> dict[str, int]:
     """How many agent replies are linked to each of these RFQs.
 
