@@ -2,6 +2,9 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import {
+  ManualNote, ManualRecipient, describeSplit, splitManualTokens, tokenizeEmails,
+} from './manualRecipients';
 
 const API_BASE = 'http://localhost:8001';
 
@@ -43,6 +46,7 @@ interface SendRFQResponse {
   jobs: RFQJob[];
   total_sent: number;
 }
+
 
 const CATEGORIES = [
   { key: 'CHA', label: 'CHA (Origin / Customs)' },
@@ -148,9 +152,10 @@ export default function SendRequestPage() {
 
   // Ad-hoc recipients typed in by hand — agents not in the DB list. Merged with
   // the checkbox-selected agents at preview/send time. Keyed by lowercased email.
-  const [manualAgents, setManualAgents] = useState<{ agent_name: string; email: string }[]>([]);
+  const [manualAgents, setManualAgents] = useState<ManualRecipient[]>([]);
   const [manualEmailInput, setManualEmailInput] = useState('');
   const [manualNameInput, setManualNameInput] = useState('');
+  const [manualNote, setManualNote] = useState<ManualNote | null>(null);
 
   // Starter template built from the form, used when composing manually.
   function manualStarter() {
@@ -239,40 +244,37 @@ export default function SendRequestPage() {
     });
   }
 
-  // Basic RFC-ish email shape check — enough to catch typos, not to be a parser.
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
   function addManualEmail() {
-    // Accept one or many at once — split on newline / comma / semicolon / space so
-    // Enter-per-email, paste-a-list, and "a@x.com, b@y.com" all work.
-    const tokens = manualEmailInput.split(/[\s,;]+/).map(t => t.trim()).filter(Boolean);
+    const tokens = tokenizeEmails(manualEmailInput);
     if (tokens.length === 0) return;
 
-    const invalid: string[] = [];
-    const added: { agent_name: string; email: string }[] = [];
-    setManualAgents(prev => {
-      const seen = new Set([
-        ...prev.map(m => m.email.toLowerCase()),
-        ...agents.map(a => a.email.toLowerCase()),
-      ]);
-      for (const email of tokens) {
-        const lower = email.toLowerCase();
-        if (!EMAIL_RE.test(email)) { invalid.push(email); continue; }
-        if (seen.has(lower)) continue;      // dedup against agents + already-added
-        seen.add(lower);
-        // Optional name applies only when a single address is entered.
-        const name = (tokens.length === 1 && manualNameInput.trim())
-          ? manualNameInput.trim()
-          : email.split('@')[0];
-        added.push({ agent_name: name, email });
-      }
-      return [...prev, ...added];
-    });
+    // Classify first, then apply. This used to run *inside* the setManualAgents
+    // updater, which broke it twice over: the tallies were read back before React
+    // had run the updater, so no message ever reached the user; and the updater
+    // pushed into arrays declared outside itself, so its development double-invoke
+    // added every address twice, producing duplicate chips on one duplicate key.
+    const split = splitManualTokens(tokens, agents, manualAgents, manualNameInput);
+
+    if (split.added.length > 0) {
+      // Pure updater — re-filters against `prev`, so running it twice is a no-op.
+      setManualAgents(prev => {
+        const held = new Set(prev.map(m => m.email.toLowerCase()));
+        return [...prev, ...split.added.filter(m => !held.has(m.email.toLowerCase()))];
+      });
+    }
+    // An address already in the agents table is what the checkbox list is for, so
+    // select it. Skipping the token silently — the old behaviour — is why typing a
+    // known agent's address looked like the Add button doing nothing at all, and it
+    // got steadily more likely as the table grew past a hundred rows.
+    if (split.onRoster.length > 0) {
+      setSelected(prev => new Set([...prev, ...split.onRoster.map(a => a.id)]));
+    }
 
     // Keep any invalid tokens in the box so the user can fix them; clear the rest.
-    setManualEmailInput(invalid.join(', '));
-    if (added.length > 0) setManualNameInput('');
-    setErrorMsg(invalid.length > 0 ? `Not a valid email: ${invalid.join(', ')}` : '');
+    setManualEmailInput(split.invalid.join(', '));
+    if (split.added.length > 0 || split.onRoster.length > 0) setManualNameInput('');
+    setManualNote(describeSplit(split));
+    setErrorMsg('');
   }
 
   function removeManualEmail(email: string) {
@@ -526,7 +528,7 @@ export default function SendRequestPage() {
                 <input
                   style={{ ...inputStyle, flex: 2 }}
                   value={manualEmailInput}
-                  onChange={e => setManualEmailInput(e.target.value)}
+                  onChange={e => { setManualEmailInput(e.target.value); setManualNote(null); }}
                   onKeyDown={e => {
                     if (e.key === 'Enter') { e.preventDefault(); addManualEmail(); }
                   }}
@@ -542,6 +544,12 @@ export default function SendRequestPage() {
                   }}
                 >+ Add</button>
               </div>
+              {manualNote && (
+                <div style={{
+                  marginTop: 8, fontSize: 11, lineHeight: 1.5,
+                  color: manualNote.tone === 'error' ? '#f87171' : '#fbbf24',
+                }}>{manualNote.text}</div>
+              )}
               {manualAgents.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                   {manualAgents.map(m => (

@@ -202,7 +202,43 @@ quantity — ranked here by blast radius.
 
 ## Fixed on 2026-08-18
 
-All four came out of one audit, prompted by a single question: where else does a
+**"Add emails manually" looked broken because every refusal was silent.** Reported
+as a regression — it used to work — but the file had not changed since the baseline
+commit. What changed was the data. `addManualEmail` deduplicated typed addresses
+against the **agents table** as well as against what had already been entered, and
+a match was a bare `continue`: no chip, no message, and the input box cleared
+anyway. So typing the address of anyone already on the roster did nothing visible,
+and the odds of that rose with every agent added — the table is now 112 rows. The
+same silence covered typos, because the handler read its `invalid` and `added`
+tallies immediately after `setManualAgents(prev => …)` while only *filling* them
+inside that updater. React had not run the updater yet, so both arrays were still
+empty: the "Not a valid email" message could never appear, and `manualNameInput`
+was never cleared. A third defect hid in the same line — the updater pushed into
+arrays declared outside itself, so React's development double-invoke ran the loop
+twice and appended every address twice, producing duplicate chips sharing one
+`key={m.email}`.
+
+Fixed by splitting the decision from its application. `manualRecipients.ts` sorts
+a batch of tokens into four buckets (`added` / `onRoster` / `duplicates` /
+`invalid`) as a pure function, so the outcome can be inspected before any state is
+touched; the state updater is then genuinely pure and idempotent under
+double-invoke. An address that matches an agent now **selects that agent** instead
+of being dropped — that is what the checkbox list is for, and it honours the intent
+rather than discarding it. Every non-empty bucket produces a message, shown
+directly beneath the input rather than at the foot of the form where the existing
+`errorMsg` banner sits roughly a hundred pixels below the fold. Checks in
+`frontend/tests/manualRecipients.check.ts` (no test runner here — run it with
+`node --experimental-strip-types`).
+
+Ruled out while diagnosing, recorded so it is not re-walked: the backend was up and
+`/agents` returned 200 with correct CORS headers for the browser origin, so `phase`
+did reach `'ready'` and the form — gated on `phase === 'ready' || 'sending'` — was
+rendering; all 112 agent rows had string emails, so the `.toLowerCase()` inside the
+updater was not throwing; and the page owns its own scroll (`height:100vh;
+overflowY:auto`) against the `body { overflow:hidden }` in `globals.css`, so the
+block was reachable.
+
+The four below came out of one audit, prompted by a single question: where else does a
 bound quietly become *no* bound? The watermark runaway had a shape worth naming —
 a limit expressed as an optional value, where "absent" silently meant "unlimited"
 — and it was not the only instance. Each of these fails differently, which is why
