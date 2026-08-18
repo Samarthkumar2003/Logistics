@@ -382,16 +382,32 @@ def sent_contains(phrase: str, after_epoch_s: int, before_epoch_s: int) -> bool:
     return bool(result.get("messages"))
 
 
-def count_inbox_messages(after_epoch_s: int | None = None,
-                         before_epoch_s: int | None = None) -> int:
-    """Count INBOX messages in a time window (ids only, full pagination).
-    Used by the sync-gap audit to compare Gmail's truth against the DB."""
-    parts = []
-    if after_epoch_s is not None:
-        parts.append(f"after:{after_epoch_s}")
-    if before_epoch_s is not None:
-        parts.append(f"before:{before_epoch_s}")
-    query = " ".join(parts) or None
+def count_inbox_messages(after_epoch_s: int, before_epoch_s: int) -> int:
+    """Count INBOX messages in the window [after, before) — ids only, but FULL
+    pagination. Used by the sync-gap audit to compare Gmail's truth to the DB.
+
+    Both bounds are REQUIRED, and None raises rather than widening the search.
+    They used to default to None, where None meant "omit that side of the filter":
+    calling this with no arguments built no `q` at all and counted the entire
+    mailbox, 500 ids per request, with no ceiling of any kind.
+
+    That is the exact shape of the incident this codebase already paid for — a
+    lower bound that went missing turned a routine sweep into a 25,500-id
+    enumeration. It would be worse here than there: `fetch_messages_since` at
+    least stops at MAX_INCREMENTAL_FETCH, whereas a counter that only sums page
+    lengths has nothing to stop it. At 195k messages that is ~390 sequential
+    requests to produce a number nobody needed to be exact.
+
+    Both callers (the gap audit and the heal loop) always know their day window,
+    so an unbounded count is never the question being asked. Failing loudly is
+    what keeps it that way.
+    """
+    if after_epoch_s is None or before_epoch_s is None:
+        raise ValueError(
+            "count_inbox_messages requires both after_epoch_s and before_epoch_s — "
+            "an unbounded count pages the entire mailbox with no ceiling"
+        )
+    query = f"after:{after_epoch_s} before:{before_epoch_s}"
     return sum(len(page) for page in iter_message_id_pages(query=query))
 
 

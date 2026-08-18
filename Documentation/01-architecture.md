@@ -66,6 +66,37 @@ case is visible in the logs. This is by design — see the note in
 [BUGS.md](BUGS.md#by-design); do not "fix" it by removing the ceiling or holding
 the watermark.
 
+**Bounded sweep (`MAX_SWEEP_IDS`, 20k).** A second, separate ceiling, because
+`MAX_INGEST_BATCH` counts a different thing: mail we *lack*. A window full of mail
+we already have never trips it — `unknown_ids` stays at 0 while the pager walks to
+the end of the window. So a watermark that reads back fine but sits far in the past
+(seeded long ago, edited by hand, a timezone slip) paged all ~195k ids, roughly 390
+sequential Gmail requests, every five minutes. The sweep is therefore capped on ids
+*seen* as well as ids *new*. Unlike the bounded load this does **not** suppress the
+watermark advance: with 0 unknown ids there is no `newest_seen` to advance to, so
+the `_max_received_at()` promotion is the only thing that lets a lagging watermark
+move, and suppressing it would re-page the cap every five minutes forever — a
+permanent stall, strictly worse than one expensive self-healing run. The un-swept
+region below the cap is older mail, and the daily gap audit already widens its
+window by how far the watermark lags, so that region has an owner.
+
+**Bounded self-heal (`AUTO_HEAL_MAX_TOTAL_MISSING`, 2000).** The gap heal has three
+guardrails, not two, because the original pair multiplied: "at most 14 gap days"
+and "at most 1000 missing per day" were checked independently, so 14 × 1000 = 14,000
+mails — each one a Gmail full-fetch plus a real LLM classification — cleared both
+while nothing ever looked at the product. The total is enforced twice: once up front
+against the audit's estimate, then again as a running budget charged for mail
+actually pulled. Both are needed because the two numbers measure different things —
+the audit's `missing` is a count subtraction (Gmail's count for the day minus DB
+rows dated that day) while the backfill performs a set difference over
+`provider_msg_id`. Rows the DB holds for a day that Gmail no longer lists in INBOX
+(archived, deleted, moved) inflate the DB count and shrink `missing` without
+affecting the set difference, so a day reporting 50 missing can hand back 950
+unknown ids. `backfill_window` takes a `max_new` cap for exactly that reason: it
+bounds the pull at the point where the real quantity is finally known. Days left
+unattempted when the budget runs out are returned as `deferred` and retried on the
+next nightly run.
+
 ### B. Scan — `automation/automation.py`
 
 Every 5 minutes, claims unprocessed rows from `emails` and acts on the label.

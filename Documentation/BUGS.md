@@ -1,6 +1,6 @@
 # Known bugs
 
-_Last reviewed: 2026-08-16. Scope: full backend + frontend._
+_Last reviewed: 2026-08-18. Scope: full backend + frontend._
 
 Priority is **impact × silence**. A defect that corrupts data without anyone
 noticing outranks one that throws a visible error.
@@ -151,6 +151,29 @@ confirm the parts that *are* right: a permanent error consumes exactly one
 attempt, and "invalid api key … please try again" is correctly treated as
 permanent despite matching both keyword lists.
 
+### P2-7 · Four more unbounded reads, from the 2026-08-18 bounds audit
+The audit that produced the four fixes below found these and left them open. They
+are the same defect class — a limit that is absent, or attached to the wrong
+quantity — ranked here by blast radius.
+
+- **`GET /inbox?limit=` has no ceiling.** `limit: int = 20` goes straight into
+  `.range(offset, offset + limit - 1)`, so `?limit=1000000` is a full-table read.
+  Same at `/inbox/unlinked-rate-cards` (`limit: int = 50`), which also selects
+  **bodies**. Sharpened by P1-1: there is no auth, so anyone who can reach the
+  port can issue it. Fix is one line each — `Query(20, ge=1, le=200)`.
+- **`list_replies_for()` has no limit and no pagination.** `.in_(...).order(...)`
+  over `rfq_reference`, selecting bodies, bounded only by how many replies exist
+  across the references passed. Grows monotonically with deployment age.
+- **The attachment retry cap depends on a write allowed to fail silently.**
+  `_download_pending_attachment` increments `attempts` and persists it inside
+  `try/except: pass`. If that write fails the row stays `pending` with `attempts`
+  unchanged, so the 2-minute worker retries it forever — `MAX_ATTACHMENT_ATTEMPTS`
+  is only real if the bookkeeping succeeds.
+- **`daily_report._fetch_emails(since, before)` drops its upper bound when
+  `before` is `None`.** The `.lt("received_at", end)` filter is simply never
+  applied — the optional-bound shape verbatim. Lowest severity of the four: it is
+  still floored by `gte(since)`, and the only caller passes a day window.
+
 ---
 
 <a id="p3"></a>
@@ -174,6 +197,85 @@ permanent despite matching both keyword lists.
 - **Agent data quality.** "Emu Lines" and "Emulines" are listed as separate
   companies; two DP World rows carry `@unifeeder.com` addresses while Unifeeder
   is also its own entry.
+
+---
+
+## Fixed on 2026-08-18
+
+All four came out of one audit, prompted by a single question: where else does a
+bound quietly become *no* bound? The watermark runaway had a shape worth naming —
+a limit expressed as an optional value, where "absent" silently meant "unlimited"
+— and it was not the only instance. Each of these fails differently, which is why
+the audit had to look for the shape rather than grep for a symptom. Pinned by
+`tests/test_ingest_guardrails.py`.
+
+**A message count with optional bounds counted the entire mailbox.**
+`count_inbox_messages(after_epoch_s=None, before_epoch_s=None)` treated `None` as
+"omit that side of the filter", so calling it bare built no `q` at all and summed
+page lengths across all ~195k messages — about 390 sequential Gmail requests — to
+produce a number nobody needed to be exact. This is the runaway's signature with
+the safety net removed: `fetch_messages_since` at least stops at
+`MAX_INCREMENTAL_FETCH`, while a function that only sums page lengths has nothing
+to stop it. Latent rather than live — both callers always passed a day window —
+but one bare call reproduced the incident. Both bounds are now required and `None`
+raises. Both callers already know their window, so an unbounded count was never
+the question being asked.
+
+**The ingest ceiling was measuring the wrong quantity.** `MAX_INGEST_BATCH` (5000)
+bounds mail we do *not* have, and the sweep loop broke on nothing else. A window
+full of mail we already have therefore never tripped it: `unknown_ids` stayed at 0
+while the pager walked every page. A watermark that read back fine but sat far in
+the past — seeded long ago, edited by hand, a timezone slip — paged the whole
+mailbox every five minutes, which is the runaway's cost profile arriving through a
+bound that was counting the wrong thing. Now capped on ids *seen* too
+(`MAX_SWEEP_IDS`, 20k ≈ 40 requests). Deliberately **not** via the existing
+`truncated` flag: that suppresses the `_max_received_at()` promotion, and with 0
+unknown ids that promotion is the only way a lagging watermark advances at all.
+Suppressing it would re-page the cap every tick forever — a permanent stall, worse
+than the single expensive-but-self-healing run it replaced.
+
+**Two heal guardrails multiplied, and neither measured what the heal spends.**
+`AUTO_HEAL_MAX_DAYS` (14) and `AUTO_HEAL_MAX_MISSING_PER_DAY` (1000) were checked
+independently, so the pass condition was "≤14 days **and** ≤1000 each" — 14,000
+mails cleared both while no limit looked at the product. Every one costs a Gmail
+full-fetch and a real LLM classification (these ids are new by definition, so the
+classification cache cannot spare you), unattended, on a 24-hour timer. Not
+hypothetical either: what produces a dozen-plus short days at once is this
+codebase's own deliberate `MAX_INGEST_BATCH` truncation, and `audit_sync_gaps`
+widens its window precisely to notice that. Added `AUTO_HEAL_MAX_TOTAL_MISSING`
+(2000), enforced twice — up front against the estimate, then as a running budget
+charged for mail actually pulled. Twice because the two numbers are not the same
+measurement: the audit's `missing` is a count subtraction (Gmail's count for the
+day minus DB rows dated that day) while the backfill is a set difference over
+`provider_msg_id`. Rows the DB holds for that day which Gmail no longer lists in
+INBOX — archived, deleted, moved — inflate the DB count and shrink `missing`
+without touching the set difference, so a day reporting 50 missing can hand back
+950 unknown ids and sail past a 1000 guardrail that never saw a number above it.
+`backfill_window` now takes `max_new` and clips at the point the real quantity is
+finally known, keeping the newest ids so progress stays monotonic. Days skipped
+when the budget runs out come back as `deferred`, not silently dropped.
+
+**A startup job with no circuit breaker billed for every doomed batch.**
+`backfill_classifications` ran 500 rows in chunks of 20 and had no check for a
+wholly-failed batch — so with the LLM provider down or out of quota it worked
+through all 25 chunks anyway. Its sibling `retry_pending_classifications` had had
+that check all along; this one simply never got it. It compounds: `cached_ids`
+deliberately excludes `method="error"` rows so a transient failure gets another
+chance, which means a permanently unclassifiable email is retried on every boot,
+forever. And it runs on **startup**, so `--reload` charged for it on every file
+save. Now stops on the first batch where every row comes back `method="error"`,
+matching its sibling — a whole chunk failing is a provider-level condition, not
+something the next 24 chunks improve on.
+
+Found by the same audit and **not** fixed — recorded so they are not re-derived:
+`GET /inbox?limit=` and `/inbox/unlinked-rate-cards?limit=` have defaults but no
+ceiling, so `?limit=1000000` is a full-table read (and the latter selects bodies)
+— sharpened by P1-1, no auth; `list_replies_for()` has no `limit` and no
+pagination at all; the attachment retry cap depends on an `attempts` write made
+inside `try/except: pass`, so a failed bookkeeping write means the row retries
+every two minutes forever; and `daily_report._fetch_emails(since, before)` drops
+its upper-bound filter when `before` is `None` — the same optional-bound shape,
+but still floored by `gte(since)` and called only with a day window.
 
 ---
 

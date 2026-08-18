@@ -40,6 +40,25 @@ ATTACHMENT_BUCKET = settings.attachment_bucket
 # a very stale watermark dragging in an unbounded backlog in a single pass).
 MAX_INGEST_BATCH = 5000
 
+# Safety ceiling on how many ids one sweep will *page through*, which is a
+# different quantity from MAX_INGEST_BATCH and needs its own bound.
+#
+# MAX_INGEST_BATCH counts mail we do not yet have. The sweep's loop only breaks on
+# that count, so a window full of mail we ALREADY have never trips it: `unknown_ids`
+# stays at 0 while the pager walks every page in the window. A watermark that reads
+# back fine but sits far in the past (seeded long ago, edited by hand, a timezone
+# slip) against an already-ingested mailbox therefore pages all 195k ids — ~390
+# sequential Gmail requests — every five minutes until it manages to advance.
+#
+# That is the runaway's cost profile arriving through a bound that was measuring the
+# wrong thing, so the sweep is capped on ids seen as well. 20k is ~40 requests: far
+# above any legitimate catch-up (MAX_INGEST_BATCH already caps genuinely new mail at
+# 5000) and far below a whole-mailbox crawl.
+#
+# Hitting this is NOT the deliberate bounded load — see `sweep_capped` in
+# `_ingest_new_emails` for why it must not suppress the watermark advance.
+MAX_SWEEP_IDS = 20_000
+
 # How far back the watermark is held from the newest mail persisted. The sweep
 # re-lists this window every run (cheap, ids only) so late/out-of-order arrivals
 # and rows from a chunk that failed to commit still get picked up.
@@ -433,11 +452,34 @@ def _ingest_id_list(unknown_ids: list[str], provider: str) -> dict:
             "newest_seen": newest_seen}
 
 
-def backfill_window(after_epoch_s: int, before_epoch_s: int, provider: str = "gmail") -> dict:
+def backfill_window(after_epoch_s: int, before_epoch_s: int, provider: str = "gmail",
+                    max_new: int | None = None) -> dict:
     """Targeted backfill of one time window, WITHOUT touching the watermark. Lists
     every INBOX id in [after, before), diffs against the DB, ingests the unknowns.
     Used by the self-healing gap loop to re-pull a day the audit found short.
-    Returns {listed, new, attachments}."""
+    Returns {listed, new, attachments} plus `truncated: True` if `max_new` clipped it.
+
+    `max_new` caps how many unknown ids are actually pulled, and the automatic
+    caller always passes it. Without it this function had no ceiling of its own: it
+    paged the whole window and ingested every unknown id, at one Gmail full-fetch
+    and one *real* LLM classification each (these ids are by definition new, so the
+    classification cache cannot spare you).
+
+    That mattered because its caller's guardrail measures a different quantity than
+    this function pulls. `heal_sync_gaps` decides using the audit's `missing`, a
+    COUNT SUBTRACTION (Gmail's count for the day minus DB rows dated that day),
+    while the pull below is a SET DIFFERENCE over provider_msg_id. DB rows for that
+    day which Gmail no longer lists in INBOX — archived, deleted, moved — inflate
+    the DB count and shrink `missing`, but do nothing to `unknown`. So `missing`
+    can understate the real pull without limit: a day reporting 50 missing can hand
+    back 950 unknown ids, sailing past a guardrail set at 1000 that never saw a
+    number above it.
+
+    Capping here closes that gap at the point where the real quantity is finally
+    known, instead of trusting an estimate made upstream. Clipping keeps the
+    NEWEST unknown ids (the list is newest-first until the reverse below), so a
+    clipped day makes forward progress and the next run picks up where it left off.
+    """
     if provider != "gmail":
         raise ValueError(f"backfill_window: provider '{provider}' not yet supported")
     query = f"after:{after_epoch_s} before:{before_epoch_s}"
@@ -448,12 +490,28 @@ def backfill_window(after_epoch_s: int, before_epoch_s: int, provider: str = "gm
         ids.extend(page)
     have = _existing_provider_ids(ids)
     unknown = [i for i in ids if i not in have]
+
+    truncated = max_new is not None and len(unknown) > max_new
+    if truncated:
+        logger.warning(
+            "Backfill window (%s): %d unknown ids exceeds max_new=%d — pulling the "
+            "newest %d and leaving the rest for a later run. A gap this much larger "
+            "than the audit's estimate usually means the DB holds rows for this day "
+            "that Gmail no longer lists in INBOX.",
+            query, len(unknown), max_new, max_new,
+        )
+        unknown = unknown[:max_new]
+
     unknown.reverse()  # oldest-first for the thread rule
     logger.info("Backfill window (%s): %d listed, %d new", query, len(ids), len(unknown))
     if not unknown:
         return {"listed": len(ids), "new": 0, "attachments": 0}
     result = _ingest_id_list(unknown, provider)
-    return {"listed": len(ids), "new": result["new"], "attachments": result["attachments"]}
+    out = {"listed": len(ids), "new": result["new"],
+           "attachments": result["attachments"]}
+    if truncated:
+        out["truncated"] = True
+    return out
 
 
 def ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
@@ -525,7 +583,8 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     # the Jul 10-19 case), so an early stop would miss it. Full bodies are fetched
     # only for the unknown ids — mail we already have is skipped for free.
     seen = 0
-    truncated = False
+    truncated = False       # hit MAX_INGEST_BATCH — the deliberate bounded load
+    sweep_capped = False    # hit MAX_SWEEP_IDS — window too wide to page in one run
     unknown_ids: list[str] = []
     for page in iter_message_id_pages(after_epoch):
         if not page:
@@ -550,6 +609,29 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
                 "history on purpose.", provider, MAX_INGEST_BATCH,
             )
             truncated = True
+            break
+
+        if seen >= MAX_SWEEP_IDS:
+            # A wide window that is mostly mail we already have. Deliberately does
+            # NOT set `truncated`: that flag suppresses the _max_received_at()
+            # promotion below, and here the promotion is the only thing that lets a
+            # lagging watermark make progress — with 0 unknown ids there is no
+            # `newest_seen` to advance to. Suppressing it would page MAX_SWEEP_IDS
+            # every five minutes forever, which is a permanent stall and strictly
+            # worse than today's one expensive-but-self-healing run.
+            #
+            # The un-swept region below this point is OLDER mail, and the daily gap
+            # audit already widens its window based on how far the watermark lags,
+            # so that region has an owner. This cap bounds the cost; the audit keeps
+            # the correctness claim.
+            logger.warning(
+                "Ingest %s: SWEEP CAPPED — paged %d ids (MAX_SWEEP_IDS=%d) with only "
+                "%d new, so the window is mostly already-ingested mail and the "
+                "watermark is lagging badly. Stopping this pass; the ids below this "
+                "point were not examined and are the daily gap audit's job.",
+                provider, seen, MAX_SWEEP_IDS, len(unknown_ids),
+            )
+            sweep_capped = True
             break
 
     # Gmail lists ids newest-first; reverse so we process oldest-first. That
@@ -606,6 +688,10 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
 
     stats = {"swept": seen, "fetched": fetched, "new": new_count,
              "skipped": seen - fetched, "attachments": att_count}
+    # Only present when it fired, matching the `skipped_*` flags above: a caller
+    # grepping stats for a cap should not have to distinguish False from absent.
+    if sweep_capped:
+        stats["sweep_capped"] = True
     logger.info("Ingest %s done: %s", provider, stats)
     return stats
 
@@ -697,39 +783,85 @@ def audit_sync_gaps(days: int = 14) -> list[dict]:
 AUTO_HEAL_MAX_MISSING_PER_DAY = 1000
 AUTO_HEAL_MAX_DAYS = 14
 
+# Ceiling on the WHOLE run, which the two limits above do not imply.
+#
+# They are checked independently, so the pass condition is "at most 14 gap days AND
+# at most 1000 missing on each" — and 14 x 1000 = 14,000 mails cleared both while no
+# limit ever looked at the product. Every one of those costs a Gmail full-fetch and
+# a real LLM classification, unattended, on a 24-hour timer.
+#
+# The trigger is not hypothetical: what produces a dozen-plus short days at once is
+# this codebase's own deliberate MAX_INGEST_BATCH truncation, and audit_sync_gaps
+# widens its window precisely to notice that. Over AUTO_HEAL_MAX_DAYS it alerts
+# instead; 1-14 days was the unbudgeted range.
+#
+# 2000 is a night's worth of catch-up that a human never needs to approve. Anything
+# larger is a decision, not a repair, and belongs to the backfill scripts.
+AUTO_HEAL_MAX_TOTAL_MISSING = 2000
+
 
 def heal_sync_gaps(days: int = 14) -> dict:
     """Self-healing loop: audit → auto-backfill each gap day (within guardrails) →
     re-count that day → alert on anything still short. Returns
-    {gaps_found, healed, unhealed:[...]}.
+    {gaps_found, healed, unhealed:[...], deferred:[...]}.
 
     Backfill is per-day and does NOT move the watermark, so healing an old day
-    never disturbs incremental sync."""
+    never disturbs incremental sync.
+
+    Three guardrails, because the first two multiply: at most
+    AUTO_HEAL_MAX_DAYS gap days, at most AUTO_HEAL_MAX_MISSING_PER_DAY on any one
+    day, and at most AUTO_HEAL_MAX_TOTAL_MISSING pulled across the whole run. The
+    total is enforced twice — once up front against the audit's estimate, then again
+    as a running budget charged for mail actually pulled, because the estimate and
+    the pull measure different things (see `backfill_window`). Days left unattempted
+    when the budget runs out come back as `deferred` and are retried next run."""
     import calendar
     from datetime import timedelta
     gaps = audit_sync_gaps(days=days)
     if not gaps:
-        return {"gaps_found": 0, "healed": 0, "unhealed": []}
+        return {"gaps_found": 0, "healed": 0, "unhealed": [], "deferred": []}
 
-    # Guardrail: too many days, or a single day too large, → alert, don't auto-pull.
+    # Guardrail: too many days, one day too large, or too much in total → alert,
+    # don't auto-pull. The total is checked because the other two multiply.
     too_big = [g for g in gaps if g["missing"] > AUTO_HEAL_MAX_MISSING_PER_DAY]
-    if len(gaps) > AUTO_HEAL_MAX_DAYS or too_big:
-        logger.warning("Sync-gap heal: %d gap day(s) exceed guardrails "
-                       "(days>%d or a day missing>%d) — alerting instead of auto-pulling",
-                       len(gaps), AUTO_HEAL_MAX_DAYS, AUTO_HEAL_MAX_MISSING_PER_DAY)
+    total_missing = sum(g["missing"] for g in gaps)
+    if (len(gaps) > AUTO_HEAL_MAX_DAYS or too_big
+            or total_missing > AUTO_HEAL_MAX_TOTAL_MISSING):
+        logger.warning("Sync-gap heal: %d gap day(s), %d missing in total, exceed "
+                       "guardrails (days>%d, a day missing>%d, or total>%d) — "
+                       "alerting instead of auto-pulling",
+                       len(gaps), total_missing, AUTO_HEAL_MAX_DAYS,
+                       AUTO_HEAL_MAX_MISSING_PER_DAY, AUTO_HEAL_MAX_TOTAL_MISSING)
         _alert_sync_drift(gaps, healed=False)
-        return {"gaps_found": len(gaps), "healed": 0, "unhealed": gaps}
+        return {"gaps_found": len(gaps), "healed": 0, "unhealed": gaps, "deferred": []}
 
     healed = 0
     unhealed: list[dict] = []
+    deferred: list[dict] = []
+    # Spend against a real budget rather than re-trusting `total_missing`. That
+    # figure is a count subtraction and can badly understate what backfill_window
+    # actually finds (see its docstring), so the budget is decremented by mail
+    # PULLED, and each day is additionally capped at the per-day limit. Without
+    # this, one lying estimate re-opens the 14,000-mail hole the total check closes.
+    budget = AUTO_HEAL_MAX_TOTAL_MISSING
     for g in gaps:
+        if budget <= 0:
+            # Report the untouched days instead of silently dropping them; the next
+            # nightly run picks them up with a fresh budget.
+            deferred.append(g)
+            continue
         day = datetime.fromisoformat(g["day"]).date()
         d1 = day + timedelta(days=1)
         after = calendar.timegm(day.timetuple())
         before = calendar.timegm(d1.timetuple())
-        logger.info("Sync-gap heal: backfilling %s (missing %d)", g["day"], g["missing"])
+        day_cap = min(AUTO_HEAL_MAX_MISSING_PER_DAY, budget)
+        logger.info("Sync-gap heal: backfilling %s (missing %d, cap %d, budget %d)",
+                    g["day"], g["missing"], day_cap, budget)
         try:
-            backfill_window(after, before)
+            result = backfill_window(after, before, max_new=day_cap)
+            # Charge the budget for mail actually pulled. `new` is the closest proxy
+            # available for what the run cost: one classification per inserted row.
+            budget -= result.get("new", 0)
         except Exception as e:
             logger.warning("Sync-gap heal: backfill of %s failed: %s", g["day"], e)
 
@@ -761,8 +893,18 @@ def heal_sync_gaps(days: int = 14) -> dict:
         logger.warning("Sync-gap heal: %d day(s) still short after backfill: %s",
                        len(unhealed), ", ".join(f"{u['day']} (-{u['missing']})" for u in unhealed))
         _alert_sync_drift(unhealed, healed=True)
-    logger.info("Sync-gap heal: %d healed, %d still short", healed, len(unhealed))
-    return {"gaps_found": len(gaps), "healed": healed, "unhealed": unhealed}
+    if deferred:
+        # Not a failure — the budget did its job. Logged at WARNING because a run
+        # that keeps deferring means the gap is bigger than automatic repair should
+        # be handling, and that is a human's call.
+        logger.warning("Sync-gap heal: budget of %d exhausted — %d day(s) not "
+                       "attempted this run: %s",
+                       AUTO_HEAL_MAX_TOTAL_MISSING, len(deferred),
+                       ", ".join(d["day"] for d in deferred))
+    logger.info("Sync-gap heal: %d healed, %d still short, %d deferred",
+                healed, len(unhealed), len(deferred))
+    return {"gaps_found": len(gaps), "healed": healed, "unhealed": unhealed,
+            "deferred": deferred}
 
 
 def _alert_sync_drift(gaps: list[dict], healed: bool) -> None:
@@ -929,12 +1071,29 @@ def backfill_classifications(batch_size: int = 20) -> dict:
     total = 0
     for i in range(0, len(missing), batch_size):
         chunk = missing[i:i + batch_size]
-        classify_with_cache([
+        out = classify_with_cache([
             {"id": r["provider_msg_id"], "subject": r["subject"],
              "body": r["body"], "sender": r["sender"]}
             for r in chunk
         ])
         total += len(chunk)
         logger.info("Backfill: done %d/%d", total, len(missing))
+
+        # Circuit breaker, matching retry_pending_classifications. Without it this
+        # loop ground through all 500 rows in chunks of 20 even when every single
+        # LLM call was failing — 25 doomed batches per run, and this runs on STARTUP,
+        # so `--reload` charged for it on every file save.
+        #
+        # It compounds: `cached_ids` above deliberately excludes method="error" rows
+        # so a transient failure gets another chance, which means a permanently
+        # unclassifiable email is retried on every boot forever. A whole chunk
+        # failing is a provider-level condition (quota exhausted, outage, bad key),
+        # not something the next 24 chunks will do better on.
+        if out and all((out.get(r["provider_msg_id"], {}) or {}).get("method") == "error"
+                       for r in chunk):
+            logger.error("Backfill: whole batch failed (provider down/quota) — "
+                         "stopping after %d/%d; the rest retry on the next run",
+                         total, len(missing))
+            break
 
     return {"backfilled": total}
