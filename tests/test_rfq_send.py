@@ -10,7 +10,7 @@ looking like an agent who did not bother to answer.
 
 import pytest
 
-from backend.domain.models import OPEN_JOB_STATUSES
+from backend.domain.models import OPEN_JOB_STATUSES, STATUS_SENDING
 from backend.services import rfq_service
 from backend.services.rfq_service import SelectedAgent
 
@@ -20,9 +20,28 @@ CUSTOMER = {"email_id": "", "sender": "shipper@example.com", "subject": "Rates?"
 
 @pytest.fixture
 def sent_jobs(monkeypatch):
-    """Capture every RfqJob handed to the repository."""
+    """A stand-in `rfq_jobs` table, as the two-phase write sees it.
+
+    The send reserves rows at `sending` and then advances each one, so a plain
+    capture list is not enough — the fake has to honour the status guard, or the
+    tests could not tell an honest update from one that clobbered a reply.
+    Assertions read the final `.status` of each row, which is what the dashboard
+    would show.
+    """
     captured = []
-    monkeypatch.setattr(rfq_service.job_repo, "insert", captured.append)
+
+    def _insert_many(jobs):
+        captured.extend(jobs)
+
+    def _set_status_if(reference, status, expected):
+        for job in captured:
+            if job.reference == reference and job.status == expected:
+                job.status = status
+                return True
+        return False
+
+    monkeypatch.setattr(rfq_service.job_repo, "insert_many", _insert_many)
+    monkeypatch.setattr(rfq_service.job_repo, "set_status_if", _set_status_if)
     monkeypatch.setattr(rfq_service.agent_repo, "ensure_agents", lambda _a: None)
     monkeypatch.setattr(rfq_service.email_repo, "get_thread_id", lambda _e: "")
     return captured
@@ -215,17 +234,95 @@ def test_a_drafting_failure_writes_no_row(monkeypatch, sender, sent_jobs):
     assert "draft failed" in result["jobs"][0]["status"]
 
 
-def test_a_persist_failure_is_surfaced_and_not_reported_as_a_clean_send(
-    drafts_succeed, sender, monkeypatch,
+# ---------------------------------------------------------------------------
+# Phase one: the row exists before the mail does
+# ---------------------------------------------------------------------------
+
+def test_every_row_is_committed_before_the_first_mail_leaves(
+    drafts_succeed, monkeypatch, sent_jobs,
 ):
+    """The reason the write moved ahead of the send: a vendor auto-responder can
+    reply before this process gets back to the database, and a reply whose
+    reference has no job row cannot be filed against anything."""
+    seen_at_send = {}
+
+    def _batch(drafts):
+        seen_at_send["rows"] = [(j.reference, j.status) for j in sent_jobs]
+        return [{"status": "sent"} for _ in drafts]
+
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch", _batch)
+    result = _send(_agents("Alpha", "Beta"))
+
+    references = {j["reference"] for j in result["jobs"]}
+    assert {r for r, _ in seen_at_send["rows"]} == references
+    # Reserved, not claimed as delivered — that only happens after the sender
+    # reports back.
+    assert {s for _, s in seen_at_send["rows"]} == {STATUS_SENDING}
+
+
+def test_a_reservation_failure_aborts_before_anything_is_sent(
+    drafts_succeed, monkeypatch,
+):
+    """Failing this direction is the safe one: an un-sent RFQ can be re-sent,
+    whereas a sent RFQ with no row is a quote that silently never arrives."""
     monkeypatch.setattr(rfq_service.agent_repo, "ensure_agents", lambda _a: None)
     monkeypatch.setattr(rfq_service.email_repo, "get_thread_id", lambda _e: "")
 
-    def _boom(_job):
+    def _boom(_jobs):
         raise RuntimeError("supabase down")
 
-    monkeypatch.setattr(rfq_service.job_repo, "insert", _boom)
+    sent = []
+    monkeypatch.setattr(rfq_service.job_repo, "insert_many", _boom)
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch",
+                        lambda drafts: sent.extend(drafts) or [])
+
+    with pytest.raises(rfq_service.RfqError) as excinfo:
+        _send(_agents("Alpha"))
+
+    assert "nothing was sent" in str(excinfo.value)
+    assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Phase two: recording the outcome, and losing the race gracefully
+# ---------------------------------------------------------------------------
+
+def test_a_status_update_failure_is_surfaced_and_not_reported_as_a_clean_send(
+    drafts_succeed, sender, sent_jobs, monkeypatch,
+):
+    """The row and its reference survive, so a reply is still attributable — but
+    the operator must not be told the send was clean."""
+    def _boom(_reference, _status, _expected):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(rfq_service.job_repo, "set_status_if", _boom)
     sender(["sent"])
     result = _send(_agents("Alpha"))
 
-    assert "job persist failed" in result["jobs"][0]["status"]
+    assert "job status update failed" in result["jobs"][0]["status"]
+
+
+def test_a_reply_that_beat_the_update_is_not_overwritten(
+    drafts_succeed, sender, sent_jobs, monkeypatch,
+):
+    """An auto-responder can answer in under a second, linking and advancing the
+    job while this process is still working through the batch. A blind update
+    would bury a quote that had already arrived under `rfqs_sent`."""
+    def _batch(drafts):
+        for job in sent_jobs:          # the reply lands mid-send
+            job.status = "quotes_received"
+        return [{"status": "sent"} for _ in drafts]
+
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch", _batch)
+    result = _send(_agents("Alpha"))
+
+    assert [j.status for j in sent_jobs] == ["quotes_received"]
+    # The send itself still succeeded, and is reported as such.
+    assert result["total_sent"] == 1
+
+
+def test_a_reply_can_land_while_a_job_is_still_sending():
+    """`mark_quotes_received` refuses statuses outside OPEN_JOB_STATUSES, so
+    excluding `sending` would drop exactly the fast reply this design exists to
+    catch."""
+    assert STATUS_SENDING in OPEN_JOB_STATUSES

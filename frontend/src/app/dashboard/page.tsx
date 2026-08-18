@@ -97,12 +97,17 @@ function modeLabel(mode: string): string {
 function statusInfo(status: string): { label: string; color: string; bg: string; desc: string } {
   const map: Record<string, { label: string; color: string; bg: string; desc: string }> = {
     rfqs_sent:       { label: 'RFQs Sent',       color: 'var(--blue-soft)', bg: 'var(--status-blue-bg)', desc: 'Waiting for agents to reply' },
-    awaiting_quotes: { label: 'Awaiting Quotes',  color: 'var(--amber)', bg: 'var(--status-amber-bg)', desc: 'Agents notified, quotes pending' },
+    // The row exists but the mail has not been handed to the provider yet — the
+    // backend writes it before sending so a reply can never arrive against a
+    // reference with no job. Normally lasts seconds; the label says "sending"
+    // rather than anything reassuring because a job still here minutes later
+    // means the send died mid-flight and needs a human.
+    sending:         { label: 'Sending…',          color: 'var(--amber)', bg: 'var(--status-amber-bg)', desc: 'Handing the RFQ to the mail provider' },
     quotes_received: { label: 'Quotes Received',  color: 'var(--green-soft)', bg: 'var(--status-green-bg)', desc: 'Quotes in — ready to compare' },
     approved:        { label: 'Approved',          color: 'var(--purple)', bg: 'var(--status-purple-bg)', desc: 'Shipment confirmed' },
-    // The RFQ never left. Written by _record_job when the sender did not confirm
-    // a send, so this job is NOT waiting on an agent — nobody was contacted.
-    // Without this entry the fallback below rendered the raw string
+    // The RFQ never left. Written by _record_outcome when the sender did not
+    // confirm a send, so this job is NOT waiting on an agent — nobody was
+    // contacted. Without this entry the fallback below rendered the raw string
     // 'send_failed' in neutral grey, which reads as an ordinary state.
     send_failed:     { label: 'Send Failed',       color: 'var(--red)', bg: 'var(--red-tint)', desc: 'RFQ did not send — no agent was contacted' },
   };
@@ -930,7 +935,8 @@ export default function Dashboard() {
                       </p>
                     </div>
                     <div className="pane-legend">
-                      {(['rfqs_sent','quotes_received','approved','send_failed'] as const).map(s => {
+                      {/* Lifecycle order, so the legend reads as the path a job takes. */}
+                      {(['sending','rfqs_sent','quotes_received','approved','send_failed'] as const).map(s => {
                         const si = statusInfo(s);
                         return <span key={s} className="status-legend" style={{ color: si.color, background: si.bg }}>{si.label}</span>;
                       })}
