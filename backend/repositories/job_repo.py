@@ -83,6 +83,11 @@ def _row(job: RfqJob) -> dict:
         "agents_contacted": job.agents_contacted,
         "customer_email_id": job.customer_email_id or None,
         "customer_thread_id": job.customer_thread_id or None,
+        # The drafted mail, kept so a send abandoned mid-flight can be resent
+        # verbatim. See sql/add_rfq_draft_columns.sql.
+        "draft_subject": job.draft_subject or None,
+        "draft_body": job.draft_body or None,
+        "draft_to": job.draft_to or None,
     }
 
 

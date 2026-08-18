@@ -108,6 +108,17 @@ class RfqJob:
     size: str = ""
     weight_kg: Optional[float] = None
     created_at: Optional[str] = None
+    # The mail we drafted, stored when the row is reserved. A crash between
+    # reserving and sending leaves the row at `sending` with the drafted text
+    # otherwise lost to the dead process, and the retry sweep needs it to resend
+    # the same words rather than newly invented ones. Pre-redirect, so a retry
+    # applies whatever EMAIL_REDIRECT is set at retry time.
+    draft_subject: str = ""
+    draft_body: str = ""
+    # The address the RFQ was addressed to. Kept because `agents_contacted` holds
+    # a name, and a name shared by several offices cannot be resolved back to one
+    # address without guessing a branch.
+    draft_to: str = ""
 
     @classmethod
     def from_row(cls, row: dict) -> "RfqJob":
@@ -127,6 +138,9 @@ class RfqJob:
             size=_s(row, "shipment_size"),
             weight_kg=row.get("shipment_weight_kg"),
             created_at=row.get("created_at"),
+            draft_subject=_s(row, "draft_subject"),
+            draft_body=_s(row, "draft_body"),
+            draft_to=_s(row, "draft_to"),
         )
 
     @property

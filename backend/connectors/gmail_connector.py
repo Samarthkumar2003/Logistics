@@ -352,6 +352,36 @@ def iter_message_id_pages(after_epoch_s: int | None = None, page_size: int = 500
             break
 
 
+def sent_contains(phrase: str, after_epoch_s: int, before_epoch_s: int) -> bool:
+    """Is there a message in SENT matching `phrase` within this window?
+
+    A point lookup, deliberately unlike everything else in this module. The
+    retry sweep asks this per stuck RFQ to find out whether the mail actually
+    left, so the answer is one boolean and the cost must not scale with mailbox
+    size:
+
+      * `labelIds: SENT` — never INBOX, so this cannot perturb the scan queue.
+      * `maxResults: 1` — a hit or nothing; the id itself is not wanted.
+      * no pagination. `iter_message_id_pages` is the function that enumerated
+        25,500 ids when its `after:` filter went missing; a sweep must never
+        borrow that behaviour.
+      * `after:`/`before:` are required, not optional, for the same reason. The
+        caller knows within seconds when the mail would have been sent, so an
+        unbounded search is never the right question.
+
+    Raises on transport or auth failure rather than returning False: "no evidence
+    of a send" and "could not look" lead to opposite decisions, and a resend is
+    not something to do on a failed lookup.
+    """
+    result = _gmail_get("messages", params={
+        "labelIds": "SENT",
+        "q": f'"{phrase}" after:{after_epoch_s} before:{before_epoch_s}',
+        "maxResults": 1,
+        "fields": "messages/id",
+    })
+    return bool(result.get("messages"))
+
+
 def count_inbox_messages(after_epoch_s: int | None = None,
                          before_epoch_s: int | None = None) -> int:
     """Count INBOX messages in a time window (ids only, full pagination).

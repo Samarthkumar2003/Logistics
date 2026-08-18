@@ -13,6 +13,7 @@ from backend.core.config import settings
 from backend.core.db import get_db
 from backend.repositories import email_repo
 from backend.services.metrics_service import collect_metrics
+from backend.services.retry_service import sweep_stuck_sends
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["ops"])
@@ -65,6 +66,24 @@ def metrics():
     curl. Swapping the rendering later is a formatting change, not a data one.
     """
     return collect_metrics()
+
+
+@router.post("/admin/retry-stuck-sends")
+def retry_stuck_sends():
+    """Run the stuck-send recovery now, instead of waiting for the 15-minute
+    sweep. Returns the tally: how many rows were reconciled (found already sent),
+    resent, or flagged for a human.
+
+    Bounded and synchronous, unlike the scan/ingest run-now endpoints: the sweep
+    caps itself at a handful of rows, so it finishes in seconds and the operator
+    gets the outcome in the response rather than having to poll. The same
+    single-flight lock as the scheduled sweep means a manual run during a
+    scheduled one simply reports already_running rather than doubling up.
+    """
+    try:
+        return sweep_stuck_sends()
+    except Exception as e:
+        raise AppException(status_code=500, detail=f"Stuck-send sweep failed: {e}")
 
 
 @router.post("/feedback")

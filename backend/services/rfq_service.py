@@ -178,6 +178,11 @@ def _reserve_jobs(
     Raises RfqError if the reservation fails, which aborts before the send. That
     is the safe direction to fail: an un-sent RFQ can be re-sent, whereas a sent
     one with no row is a quote that silently never arrives.
+
+    The drafted subject and body go in too, so a send abandoned mid-flight can be
+    resent verbatim instead of re-drafted into different words. Pre-redirect
+    text: the sender applies EMAIL_REDIRECT, so a retry picks up whatever redirect
+    is configured then rather than replaying a stale test address.
     """
     try:
         job_repo.insert_many([
@@ -185,6 +190,11 @@ def _reserve_jobs(
                 reference=e["reference"],
                 status=STATUS_SENDING,
                 agents_contacted=[e["agent_name"]],
+                draft_subject=e["draft"].subject,
+                draft_body=e["draft"].body,
+                # The same resolution the sender uses below, so the stored
+                # recipient is the one actually addressed.
+                draft_to=e["draft"].vendor_email or e["email"],
                 customer_email_id=customer_email_id or None,
                 customer_thread_id=thread_id or None,
                 customer_sender=customer.get("sender", ""),

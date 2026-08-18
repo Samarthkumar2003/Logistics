@@ -17,6 +17,7 @@ import smtplib
 import logging
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
+from typing import Optional
 
 from backend.core.config import settings
 
@@ -124,6 +125,43 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         error_msg = f"Unexpected error sending email: {exc}"
         logger.exception(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
+
+
+def was_sent(phrase: str, after_epoch_s: int, before_epoch_s: int) -> Optional[bool]:
+    """Did a message containing `phrase` leave this mailbox in that window?
+
+    True / False / None, and the None matters as much as the other two. The retry
+    sweep uses this to decide whether an RFQ abandoned mid-send actually went
+    out, and only a definite False may lead to a resend:
+
+        True   the mail left. Fix the bookkeeping, send nothing.
+        False  it provably never left. Safe to send.
+        None   cannot tell — no Sent access on this provider, or the lookup
+               failed. Send NOTHING and let a human decide.
+
+    Only the Gmail API path can answer. SMTP has no Sent folder to read (mail
+    sent via smtplib is never stored anywhere we can query), and the Outlook path
+    has no equivalent implemented, so both return None rather than a guess. That
+    makes the conservative answer the default for every provider that cannot
+    prove anything.
+    """
+    if EMAIL_PROVIDER not in GMAIL_API_PROVIDERS:
+        logger.warning(
+            "EMAIL_PROVIDER=%s cannot prove whether a message was sent — "
+            "no Sent-folder lookup available, so no retry can be authorised",
+            EMAIL_PROVIDER,
+        )
+        return None
+
+    from backend.connectors.gmail_connector import sent_contains
+
+    try:
+        return sent_contains(phrase, after_epoch_s, before_epoch_s)
+    except Exception as exc:
+        # Deliberately not False. A failed lookup that read as "never sent"
+        # would authorise a duplicate RFQ to a real vendor.
+        logger.warning("Sent-folder lookup for %r failed: %s", phrase, exc)
+        return None
 
 
 def send_rfq_emails_batch(drafts: list[dict]) -> list[dict]:

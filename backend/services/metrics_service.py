@@ -39,13 +39,6 @@ UNAVAILABLE = -1
 JOB_STATUSES = ("rfqs_sent", "quotes_received", "approved", "send_failed",
                 STATUS_SENDING)
 
-# How long a job may sit at `sending` before it is treated as abandoned. A send
-# is a handful of seconds; anything past this means the process died between
-# reserving the row and recording the outcome, and no further status will ever
-# arrive on its own. Generous, because counting a slow-but-live send as stuck
-# would train the desk to ignore the number.
-STALE_SENDING_MINUTES = 15
-
 
 def _count(db, table: str, build: Callable) -> int:
     try:
@@ -80,11 +73,11 @@ def collect_metrics() -> dict[str, Any]:
         status: _count(db, "rfq_jobs", lambda q, s=status: q.eq("status", s))
         for status in JOB_STATUSES
     }
-    # Reserved a reference, never recorded an outcome. These need a human: from
-    # here, "never sent" and "sent, then the process died" are indistinguishable,
-    # and re-sending an RFQ that did go out cannot be taken back.
+    # Reserved a reference, never recorded an outcome. The retry sweep works
+    # these off (reconcile against Sent, then resend the proven-unsent); a count
+    # that stays high means the sweep is failing to clear them and needs a human.
     stale_before = (datetime.now(timezone.utc)
-                    - timedelta(minutes=STALE_SENDING_MINUTES)).isoformat()
+                    - timedelta(minutes=settings.stale_sending_minutes)).isoformat()
     jobs["sending_stuck"] = _count(
         db, "rfq_jobs",
         lambda q: q.eq("status", STATUS_SENDING).lt("created_at", stale_before),
