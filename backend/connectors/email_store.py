@@ -473,6 +473,12 @@ def ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
         _ingest_lock.release()
 
 
+def ingest_in_progress() -> bool:
+    """True while a sweep holds the lock. Lets a manual trigger answer 409
+    instead of firing a run that would immediately skip itself."""
+    return _ingest_lock.locked()
+
+
 def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     """Ingest worker — always call ingest_new_emails() (holds the lock) instead."""
     if provider != "gmail":
