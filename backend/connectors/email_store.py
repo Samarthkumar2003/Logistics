@@ -30,6 +30,7 @@ from backend.classifier.classification_cache import classify_with_cache
 from backend.core.config import settings
 from backend.core.db import get_db
 from backend.core.logging_context import carry_context
+from backend.core.retry_utils import with_retry
 
 logger = logging.getLogger(__name__)
 
@@ -56,20 +57,46 @@ _ingest_lock = threading.Lock()
 # Watermark
 # ---------------------------------------------------------------------------
 
+class WatermarkUnavailable(RuntimeError):
+    """The watermark could not be read.
+
+    Deliberately distinct from a return of None, which means "no watermark
+    exists yet" — a legitimate first-run state. Collapsing the two is what made a
+    transient Supabase disconnect ("Server disconnected") look like a brand-new
+    account: the `after:` filter was dropped and a 268-id incremental sweep
+    became a full-mailbox crawl (30,500 ids, 5,279 "new") that held
+    _ingest_lock for hours and starved the attachment worker. Neither state now
+    sweeps unbounded — see _ingest_new_emails.
+    """
+
+
+@with_retry(max_attempts=3, base_delay=0.5)
+def _read_watermark_row(provider: str) -> list[dict]:
+    """Raw sync_state read, retried on transient faults. Raises if it can't."""
+    return (
+        get_db().table("sync_state")
+        .select("last_received_at")
+        .eq("provider", provider)
+        .execute()
+        .data
+        or []
+    )
+
+
 def _get_watermark(provider: str) -> Optional[datetime]:
+    """The ingest floor for `provider`, or None if none has been recorded yet.
+
+    Raises WatermarkUnavailable if the read itself failed — callers must decide,
+    because "unknown" and "none" demand opposite behaviour.
+    """
     try:
-        rows = (
-            get_db().table("sync_state")
-            .select("last_received_at")
-            .eq("provider", provider)
-            .execute()
-            .data
-            or []
-        )
-        if rows and rows[0].get("last_received_at"):
-            return datetime.fromisoformat(rows[0]["last_received_at"].replace("Z", "+00:00"))
+        rows = _read_watermark_row(provider)
     except Exception as e:
-        logger.warning("Watermark read failed for %s: %s", provider, e)
+        raise WatermarkUnavailable(
+            f"watermark read failed for {provider}: {e}"
+        ) from e
+    if rows and rows[0].get("last_received_at"):
+        return datetime.fromisoformat(rows[0]["last_received_at"].replace("Z", "+00:00"))
     return None
 
 
@@ -451,8 +478,40 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     if provider != "gmail":
         raise ValueError(f"ingest_new_emails: provider '{provider}' not yet supported")
 
-    watermark = _get_watermark(provider)
-    after_epoch = int(watermark.timestamp()) if watermark else None
+    try:
+        watermark = _get_watermark(provider)
+    except WatermarkUnavailable as e:
+        # Fail closed. Sweeping without a floor is not a degraded run, it is a
+        # different and far more expensive operation — and it would then advance
+        # the watermark past the truncated window (BOUNDED LOAD below), losing the
+        # very position we failed to read. The next tick is 5 minutes away and the
+        # row is still in the DB, so skipping costs nothing.
+        logger.warning("Ingest %s: %s — skipping this run, retrying next tick",
+                       provider, e)
+        return {"swept": 0, "fetched": 0, "new": 0, "skipped": 0,
+                "attachments": 0, "skipped_watermark_unavailable": True}
+
+    if watermark is None:
+        # No floor recorded. Incremental ingest refuses to run unbounded: without
+        # `after:` this sweeps the entire mailbox (195k messages here), which is
+        # load nobody asked for and, via the BOUNDED LOAD ceiling below, would
+        # then advance the watermark past everything it did not pull.
+        #
+        # Seed the floor instead so the next tick is a normal bounded run — a
+        # fresh install must not sit skipping forever. History before this point
+        # is reachable only on purpose, via backfill_3months.py / ingest_window.py,
+        # which is the same contract a truncated bounded run already has.
+        seed = datetime.now(timezone.utc) - WATERMARK_LOOKBACK
+        logger.warning(
+            "Ingest %s: no watermark recorded — NOT sweeping the whole mailbox. "
+            "Seeding the floor at %s; the next run ingests from there. Use a "
+            "backfill script for anything older.", provider, seed.isoformat(),
+        )
+        _advance_watermark(provider, seed)
+        return {"swept": 0, "fetched": 0, "new": 0, "skipped": 0,
+                "attachments": 0, "skipped_watermark_unset": True}
+
+    after_epoch = int(watermark.timestamp())
 
     # Sweep the whole after-watermark window (bounded), collecting ids we do not
     # already have. We page through EVERY page rather than stopping at the first
@@ -502,7 +561,7 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     att_count = result["attachments"]
     fetched = result["fetched"]
     newest_seen = watermark
-    if result["newest_seen"] and (newest_seen is None or result["newest_seen"] > newest_seen):
+    if result["newest_seen"] and result["newest_seen"] > newest_seen:
         newest_seen = result["newest_seen"]
 
     # newest_seen only covers mail this run inserted, so a fully-caught-up run
@@ -514,7 +573,7 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     # nothing about completeness beneath it. The verified sweep is what earns it.)
     if not truncated:
         newest_stored = _max_received_at()
-        if newest_stored and (newest_seen is None or newest_stored > newest_seen):
+        if newest_stored and newest_stored > newest_seen:
             newest_seen = newest_stored
 
     # Advance the watermark, minus a lookback buffer. The sweep is DB-diff based,
@@ -524,7 +583,7 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
     # that failed to commit.
     if newest_seen:
         safe = newest_seen - WATERMARK_LOOKBACK
-        if watermark is None or safe > watermark:
+        if safe > watermark:
             if truncated:
                 # Deliberate: advancing past the un-ingested older window is exactly
                 # what bounds a new-account / stale-watermark load to
@@ -564,8 +623,15 @@ def audit_sync_gaps(days: int = 14) -> list[dict]:
     from datetime import timedelta
     today = datetime.now(tz=timezone.utc).date()
 
-    # Widen the window to cover any stretch ingestion fell behind on.
-    watermark = _get_watermark("gmail")
+    # Widen the window to cover any stretch ingestion fell behind on. Unlike
+    # ingest, a failed read here is not dangerous — it only costs the widening,
+    # and `days` remains a sane floor — so the audit still runs.
+    try:
+        watermark = _get_watermark("gmail")
+    except WatermarkUnavailable as e:
+        logger.warning("Sync-gap audit: %s — auditing the default %d-day window",
+                       e, days)
+        watermark = None
     behind_days = (today - watermark.date()).days if watermark else days
     window = min(MAX_AUDIT_WINDOW, max(days, behind_days))
     if window > days:
