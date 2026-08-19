@@ -126,9 +126,11 @@ the one guess that cannot be recovered from.
 Tier 3 is **recorded, not dropped** — the row still appears in the email's
 attachment list, keeping the mail's true contents honest, and the whole decision
 reverses with one `UPDATE` because no bytes were ever fetched. The 25,316 rows
-already queued when this landed were retired the same way (matched on `image/*`
-under 20 kB, since the header was not captured at the time they were enqueued),
-taking the queue from ~36k to ~10.5k.
+already queued when this landed were retired the same way by
+`scripts/retire_inline_attachment_backlog.py` (matched on `image/*` under 20 kB,
+since the header was not captured at the time they were enqueued), taking the
+queue from ~36k to ~10.5k. That script is dry-run by default and carries the
+reversal SQL in its docstring.
 
 ### B. Scan — `automation/automation.py`
 
