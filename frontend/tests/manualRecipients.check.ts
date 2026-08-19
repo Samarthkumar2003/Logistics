@@ -19,7 +19,7 @@
 
 import assert from 'node:assert/strict';
 import {
-  describeSplit, splitManualTokens, tokenizeEmails,
+  dedupeByEmail, describeSplit, mergeManualRecipients, splitManualTokens, tokenizeEmails,
 } from '../src/app/send-request/manualRecipients.ts';
 import type { ManualRecipient, RosterAgent } from '../src/app/send-request/manualRecipients.ts';
 
@@ -94,5 +94,33 @@ const NONE: ManualRecipient[] = [];
 
 // 7. Empty / whitespace-only input is a no-op at the tokenizer.
 assert.deepEqual(tokenizeEmails('   \n , ; '), []);
+
+// 8. THE SECOND REPORTED BUG: adding one agent by hand read "Send RFQ to 2 agents"
+// and sent that vendor two RFQs. The merge updater is what React double-invokes, so
+// applying it twice has to be indistinguishable from applying it once.
+{
+  const added: ManualRecipient[] = [{ agent_name: 'Dhaval', email: 'dhaval@acme.com' }];
+  const once = mergeManualRecipients([], added);
+  assert.deepEqual(once.map(m => m.email), ['dhaval@acme.com']);
+  assert.deepEqual(mergeManualRecipients(once, added), once, 'double-invoke must not append twice');
+  // Padding and case differ between the text box and the agents table.
+  assert.deepEqual(
+    mergeManualRecipients(once, [{ agent_name: 'x', email: ' DHAVAL@Acme.com ' }]), once,
+  );
+}
+
+// 9. The count on the send button and the posted list are the same array, so an
+// address reachable from both the checkbox list and the text box must appear once.
+{
+  const merged = dedupeByEmail([
+    { agent_name: 'Maersk Line', email: 'quotes@maersk.com' },
+    { agent_name: 'Dhaval', email: 'dhaval@acme.com' },
+    { agent_name: 'quotes', email: 'QUOTES@maersk.com ' },
+    { agent_name: 'blank', email: '  ' },
+  ]);
+  assert.deepEqual(merged.map(m => m.email), ['quotes@maersk.com', 'dhaval@acme.com']);
+  assert.deepEqual(merged.map(m => m.agent_name), ['Maersk Line', 'Dhaval'],
+    'keep the first spelling — the roster name, not the email local part');
+}
 
 console.log('all manual-recipient checks passed');

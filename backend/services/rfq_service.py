@@ -261,6 +261,33 @@ def _record_outcome(entry: dict[str, Any]) -> str:
     return send_status
 
 
+def _dedupe_recipients(agents: list[SelectedAgent]) -> list[SelectedAgent]:
+    """One address, one RFQ. Keeps the first spelling of each.
+
+    The recipient list is whatever the browser posted, and one address twice means
+    a vendor gets the same enquiry twice under two references — unrecallable, and it
+    reads to them as either a mistake or a duplicate booking attempt. It has already
+    happened: a state updater in the send form appended each hand-typed address
+    twice, and since the copies shared a render key the page showed one recipient
+    while the payload carried two. That is fixed in the form, but a browser tab left
+    open keeps posting the old bundle, so the guard that counts is this one.
+    """
+    seen: set[str] = set()
+    unique: list[SelectedAgent] = []
+    for agent in agents:
+        key = (agent.email or "").strip().lower()
+        if not key:
+            logger.warning("Dropping recipient %r with no email address", agent.agent_name)
+            continue
+        if key in seen:
+            logger.warning("Dropping duplicate recipient %s (%s) — already sending to it once",
+                           agent.email, agent.agent_name)
+            continue
+        seen.add(key)
+        unique.append(agent)
+    return unique
+
+
 def send_rfqs(
     shipment: dict[str, Any],
     agents: list[SelectedAgent],
@@ -269,6 +296,8 @@ def send_rfqs(
     edited_body: str = "",
 ) -> dict[str, Any]:
     """Draft, send, and record one RFQ per agent."""
+    # Before the empty check, so a list of nothing but blanks is refused, not sent.
+    agents = _dedupe_recipients(agents)
     if not agents:
         raise RfqError("Select at least one agent")
     if not shipment.get("origin") or not shipment.get("destination"):

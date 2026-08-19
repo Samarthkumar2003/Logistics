@@ -200,6 +200,41 @@ quantity — ranked here by blast radius.
 
 ---
 
+## Fixed on 2026-08-19
+
+**One hand-added agent sent two RFQs — and nothing on screen said so.** Reported
+from the desk: after adding a single address by hand the button read "Send RFQ to 2
+agents", and two RFQs went out to that one vendor under two references. The cause
+was the double-add described in the 2026-08-18 entry below, seen from the other
+end: the duplicated entries shared `key={m.email}`, so React rendered **one** chip
+while state held **two**. The recipient count and the posted payload came from
+`manualAgents.length`, so both were 2 while the operator could only see 1. The
+browser tab predated the fix landing in the local frontend, which is why it was
+still reproducible after the form was corrected.
+
+Fixed at both layers, because they fail for different reasons. In the form,
+`mergeManualRecipients` and `dedupeByEmail` (`manualRecipients.ts`) key on the
+trimmed, lowercased address: the merge updater is now idempotent under React's
+double-invoke by construction rather than by care, and `recipients` — the same
+array the button counts and `handleSend` posts — cannot hold one address twice
+even when the checkbox list and the text box both name it. In the service,
+`_dedupe_recipients` does the same to whatever the browser posted, logging each
+drop at `WARNING` with the address. The backend guard is the one that matters: a
+tab left open keeps posting the old bundle no matter what the source says, and the
+recipient list is client input in the first place. It runs **before** the
+`if not agents` check so a payload of nothing but blank addresses is refused rather
+than drafted. First spelling wins, which keeps the roster's real agent name in
+`agents_contacted` instead of an email local part.
+
+Worth stating plainly, since it sets how hard to guard here: a duplicate RFQ is not
+a cosmetic bug. Two references for one enquiry means two job rows, two expected
+replies, and a vendor who reads it as either sloppiness or a double booking. It
+cannot be recalled once sent. Covered in `tests/test_rfq_send.py` ("One address,
+one RFQ" — six cases, including case/whitespace variants and the all-blank refusal)
+and checks 8–9 of `frontend/tests/manualRecipients.check.ts`.
+
+---
+
 ## Fixed on 2026-08-18
 
 **"Add emails manually" looked broken because every refusal was silent.** Reported

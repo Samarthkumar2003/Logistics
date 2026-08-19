@@ -3,7 +3,8 @@
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import {
-  ManualNote, ManualRecipient, describeSplit, splitManualTokens, tokenizeEmails,
+  ManualNote, ManualRecipient, dedupeByEmail, describeSplit, mergeManualRecipients,
+  splitManualTokens, tokenizeEmails,
 } from './manualRecipients';
 
 const API_BASE = 'http://localhost:8001';
@@ -257,10 +258,7 @@ export default function SendRequestPage() {
 
     if (split.added.length > 0) {
       // Pure updater — re-filters against `prev`, so running it twice is a no-op.
-      setManualAgents(prev => {
-        const held = new Set(prev.map(m => m.email.toLowerCase()));
-        return [...prev, ...split.added.filter(m => !held.has(m.email.toLowerCase()))];
-      });
+      setManualAgents(prev => mergeManualRecipients(prev, split.added));
     }
     // An address already in the agents table is what the checkbox list is for, so
     // select it. Skipping the token silently — the old behaviour — is why typing a
@@ -281,12 +279,16 @@ export default function SendRequestPage() {
     setManualAgents(prev => prev.filter(m => m.email !== email));
   }
 
-  // Recipients = checkbox-selected DB agents + hand-entered emails.
+  // Recipients = checkbox-selected DB agents + hand-entered emails, one per address.
+  // The dedup is not decoration. These are two independent states that can name the
+  // same person, the count below is what the send button promises, and this list is
+  // what gets posted — so any address appearing twice here is a second enquiry to a
+  // vendor under a second reference, sent without anything on screen showing it.
   const selectedAgents = agents.filter(a => selected.has(a.id));
-  const recipients = [
+  const recipients = dedupeByEmail([
     ...selectedAgents.map(a => ({ agent_name: a.agent_name, email: a.email })),
     ...manualAgents,
-  ];
+  ]);
   const totalRecipients = recipients.length;
 
   async function handlePreview() {

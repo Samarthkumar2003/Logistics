@@ -326,3 +326,71 @@ def test_a_reply_can_land_while_a_job_is_still_sending():
     excluding `sending` would drop exactly the fast reply this design exists to
     catch."""
     assert STATUS_SENDING in OPEN_JOB_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# One address, one RFQ
+# ---------------------------------------------------------------------------
+# Reported from the desk: adding one agent by hand showed "Send RFQ to 2 agents"
+# and sent that vendor two RFQs. The cause was in the send form, but the form is
+# not where this can be enforced — a browser tab open since before the fix keeps
+# posting the duplicated payload, and the recipient list is client input either
+# way. A vendor receiving one enquiry twice under two references cannot be undone.
+
+def test_the_same_address_twice_sends_one_rfq(drafts_succeed, sender, sent_jobs):
+    sender(["sent"])
+    result = _send([SelectedAgent("Dhaval", "dhaval@acme.com"),
+                    SelectedAgent("Dhaval", "dhaval@acme.com")])
+
+    assert len(sent_jobs) == 1, "a duplicated recipient must not reserve a second job row"
+    assert result["total_sent"] == 1
+
+
+def test_duplicate_recipients_are_matched_regardless_of_case_or_padding(
+    drafts_succeed, sender, sent_jobs,
+):
+    """The two sources are a database column and a text box, so the same address
+    arrives spelled differently. Mail routing ignores the difference; so must this."""
+    sender(["sent"])
+    result = _send([SelectedAgent("Dhaval", "Dhaval@Acme.com"),
+                    SelectedAgent("dhaval", " dhaval@acme.com ")])
+
+    assert len(sent_jobs) == 1
+    assert result["total_sent"] == 1
+
+
+def test_the_first_spelling_of_a_duplicated_recipient_is_the_one_used(
+    drafts_succeed, sender, sent_jobs,
+):
+    """Dropping the later copy keeps the checkbox-selected agent's real name, which
+    is what the job row records and what the operator sees on the dashboard."""
+    sender(["sent"])
+    _send([SelectedAgent("Maersk Line", "quotes@maersk.com"),
+           SelectedAgent("quotes", "quotes@maersk.com")])
+
+    assert [j.agents_contacted for j in sent_jobs] == [["Maersk Line"]]
+
+
+def test_distinct_recipients_are_all_kept(drafts_succeed, sender, sent_jobs):
+    """The dedup must not become a cap: this desk really does send to a dozen."""
+    sender(["sent"] * 3)
+    result = _send(_agents("Alpha", "Beta", "Gamma"))
+
+    assert len(sent_jobs) == 3
+    assert result["total_sent"] == 3
+
+
+def test_a_recipient_with_no_address_is_dropped(drafts_succeed, sender, sent_jobs):
+    sender(["sent"])
+    _send([SelectedAgent("Alpha", "alpha@example.com"), SelectedAgent("No Email", "  ")])
+
+    assert [j.agents_contacted for j in sent_jobs] == [["Alpha"]]
+
+
+def test_a_list_of_nothing_but_blanks_is_refused_rather_than_sent(sent_jobs):
+    """Dedup runs before the empty check on purpose — otherwise a payload of
+    unaddressed recipients passes the guard and drafts mail with nowhere to go."""
+    with pytest.raises(rfq_service.RfqError, match="at least one agent"):
+        _send([SelectedAgent("No Email", ""), SelectedAgent("Also None", "   ")])
+
+    assert sent_jobs == []

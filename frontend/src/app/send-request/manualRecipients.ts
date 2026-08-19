@@ -73,6 +73,38 @@ export function splitManualTokens(
   return split;
 }
 
+/** Append `added` to `prev`, skipping anything already held.
+ *
+ *  Named and pure so it can be handed to setState and applied twice with the same
+ *  result. That is not hypothetical tidiness: the original code built its additions
+ *  by pushing into an array declared outside the updater, so React's development
+ *  double-invoke ran the loop twice and appended every address twice. The two copies
+ *  shared `key={m.email}`, so React rendered one chip while state held two entries —
+ *  the UI showed one recipient and the send went to that address twice.
+ */
+export function mergeManualRecipients(
+  prev: ManualRecipient[], added: ManualRecipient[],
+): ManualRecipient[] {
+  const held = new Set(prev.map(m => m.email.trim().toLowerCase()));
+  return [...prev, ...added.filter(m => !held.has(m.email.trim().toLowerCase()))];
+}
+
+/** One address, one RFQ. The checkbox list and the hand-typed list are separate
+ *  states that can name the same person, and the count shown on the send button has
+ *  to be the same list that gets sent — a recipient the operator cannot see is a
+ *  duplicate enquiry to a vendor under two references, which cannot be taken back. */
+export function dedupeByEmail(recipients: ManualRecipient[]): ManualRecipient[] {
+  const seen = new Set<string>();
+  const unique: ManualRecipient[] = [];
+  for (const r of recipients) {
+    const key = r.email.trim().toLowerCase();
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    unique.push(r);
+  }
+  return unique;
+}
+
 /** Say something for every outcome. Silence was the actual defect: a typo and an
  *  address that happened to match an agent both cleared the box and left no trace,
  *  which reads as "Add is broken". */
