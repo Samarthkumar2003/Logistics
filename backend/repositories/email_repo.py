@@ -182,7 +182,11 @@ def list_attachments(provider_msg_id: str) -> list[Attachment]:
     rows = (
         get_db().table("attachments")
         .select("id, file_name, mime_type, size_bytes, storage_path")
-        .eq("email_id", email_rows[0]["id"]).execute().data or []
+        .eq("email_id", email_rows[0]["id"])
+        # Body furniture (processing_status='skipped') is recorded but never
+        # downloaded, so it would list forever as an attachment with no URL. A
+        # signature logo the operator cannot open is not an attachment to them.
+        .neq("processing_status", "skipped").execute().data or []
     )
 
     attachments = []

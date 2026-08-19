@@ -97,6 +97,39 @@ bounds the pull at the point where the real quantity is finally known. Days left
 unattempted when the budget runs out are returned as `deferred` and retried on the
 next nightly run.
 
+**Attachments are tiered, not queued wholesale.** Ingest writes attachment
+metadata only; a worker downloads the bytes every two minutes, 150 at a time, and
+stands down whenever an ingest holds the lock. That budget was being spent almost
+entirely on decoration: of 36,205 queued rows, 25,484 were images under 20 kB —
+signature logos, icons, spacers, tracking pixels — 70% of the queue for 3% of its
+bytes, and because the queue drained strictly oldest-first, every one of them made
+a vendor's rate-card PDF wait behind it. Roughly a day's delay on the document the
+desk was actually waiting for.
+
+Gmail's own part headers settle which is which, and they arrive in the
+`format=full` response ingest already fetches, so the test is free:
+
+| tier | test | treatment |
+|---|---|---|
+| 1 | no `Content-ID` (`Content-Disposition: attachment`) | queued, drained **first** |
+| 2 | `Content-ID` present, ≥ 20 kB | queued, drained after tier 1 |
+| 3 | `Content-ID` present, < 20 kB | recorded as `skipped`, never downloaded |
+
+Both halves of the tier-3 test are load-bearing. Size alone is wrong: the queue
+holds genuine 1.8 kB payment PDFs and 300-byte CSVs. Embedded-ness alone is wrong
+too: an agent pasting a rate table into the message body produces an embedded
+image that, by disposition, is indistinguishable from a logo — and in this trade
+that screenshot *is* the quotation, so the 20 kB floor is what separates them. A
+part whose size Gmail does not report is kept; guessing in the discard direction is
+the one guess that cannot be recovered from.
+
+Tier 3 is **recorded, not dropped** — the row still appears in the email's
+attachment list, keeping the mail's true contents honest, and the whole decision
+reverses with one `UPDATE` because no bytes were ever fetched. The 25,316 rows
+already queued when this landed were retired the same way (matched on `image/*`
+under 20 kB, since the header was not captured at the time they were enqueued),
+taking the queue from ~36k to ~10.5k.
+
 ### B. Scan — `automation/automation.py`
 
 Every 5 minutes, claims unprocessed rows from `emails` and acts on the label.

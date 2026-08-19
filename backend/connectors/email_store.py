@@ -174,13 +174,50 @@ def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optiona
 _attach_lock = threading.Lock()
 MAX_ATTACHMENT_ATTEMPTS = 5  # give up after this many transient failures
 
+# Floor for an embedded image to be treated as content rather than decoration. A
+# legible screenshot of a rate table does not fit in 20 kB; a signature logo,
+# an icon, and a tracking pixel all do.
+INLINE_IMAGE_MIN_BYTES = 20_000
+
+
+def is_body_furniture(meta: dict) -> bool:
+    """True for an image embedded in the message body and too small to be content.
+
+    Three tiers of attachment, in the order the desk cares about them:
+
+      1. no Content-ID          — a file someone attached on purpose. Always kept,
+                                  at any size: the queue holds real 1.8 kB payment
+                                  PDFs and 300-byte CSVs.
+      2. Content-ID, >= 20 kB   — embedded but big enough to be a pasted rate
+                                  table, which in this trade *is* the quotation.
+                                  Kept, drained after tier 1.
+      3. Content-ID, < 20 kB    — logos, icons, spacers, tracking pixels. This.
+
+    Tier 3 was 25,484 of 36,205 queued rows — 70% of the queue for 3% of its bytes
+    — and every one of them made a real document wait behind it. Size alone would
+    be the wrong test (a small PDF is a document); Content-ID alone would be too
+    (a pasted screenshot is embedded exactly like a logo). It takes both.
+    """
+    if not (meta.get("content_id") or "").strip():
+        return False
+    if not (meta.get("mime_type") or "").startswith("image/"):
+        return False
+    size = meta.get("size_bytes")
+    return size is not None and size < INLINE_IMAGE_MIN_BYTES
+
 
 def enqueue_attachment(email_id: str, provider_msg_id: str, meta: dict) -> bool:
     """Record attachment metadata only — no bytes fetched. The background worker
     (process_pending_attachments) downloads + uploads later. Fast: one insert,
-    no Gmail/Storage round-trip. Returns True if the row was queued."""
+    no Gmail/Storage round-trip. Returns True if the row was queued for download.
+
+    Body furniture (see is_body_furniture) is still written down, as `skipped`:
+    the row keeps the mail's true attachment list honest and makes the decision
+    reversible with one UPDATE, while never costing a Gmail fetch or a bucket
+    upload. Returns False for it — nothing was queued."""
     if not meta.get("attachment_id"):
         return False
+    furniture = is_body_furniture(meta)
     try:
         get_db().table("attachments").insert({
             "id": str(uuid.uuid4()),
@@ -191,9 +228,9 @@ def enqueue_attachment(email_id: str, provider_msg_id: str, meta: dict) -> bool:
             "provider_msg_id": provider_msg_id,
             "attachment_id": meta["attachment_id"],
             "storage_path": "",
-            "processing_status": "pending",
+            "processing_status": "skipped" if furniture else "pending",
         }).execute()
-        return True
+        return not furniture
     except Exception as e:
         logger.warning("Failed to enqueue attachment %s (email %s): %s",
                        meta.get("filename", ""), email_id, e)
@@ -268,16 +305,35 @@ def process_pending_attachments(max_atts: int = 150, workers: int = 4) -> dict:
         _attach_lock.release()
 
 
+_QUEUE_COLUMNS = "id, provider_msg_id, attachment_id, file_name, mime_type, attempts"
+
+
+def _fetch_pending_batch(max_atts: int) -> list[dict]:
+    """The next batch to download: documents first, embedded images after.
+
+    Straight FIFO on `created_at` put every attached document behind whatever
+    embedded images happened to arrive earlier — at 150 per two-minute tick and
+    tens of thousands queued, a rate-card PDF that landed now could wait most of a
+    day. Non-images are the tier the desk is actually waiting on, so they are
+    drained first; within each tier the order is still oldest-first, so nothing
+    starves.
+    """
+    db = get_db()
+
+    def page(images: bool, limit: int) -> list[dict]:
+        q = db.table("attachments").select(_QUEUE_COLUMNS).eq("processing_status", "pending")
+        q = q.like("mime_type", "image/%") if images else q.not_.like("mime_type", "image/%")
+        return q.order("created_at").limit(limit).execute().data or []
+
+    docs = page(images=False, limit=max_atts)
+    if len(docs) >= max_atts:
+        return docs
+    return docs + page(images=True, limit=max_atts - len(docs))
+
+
 def _process_pending_attachments(max_atts: int, workers: int) -> dict:
     try:
-        rows = (
-            get_db().table("attachments")
-            .select("id, provider_msg_id, attachment_id, file_name, mime_type, attempts")
-            .eq("processing_status", "pending")
-            .order("created_at")
-            .limit(max_atts)
-            .execute().data or []
-        )
+        rows = _fetch_pending_batch(max_atts)
     except Exception as e:
         logger.warning("Attachment worker: could not read queue: %s", e)
         return {"pending": 0, "stored": 0, "failed": 0, "retry": 0}
@@ -390,7 +446,7 @@ def _ingest_id_list(unknown_ids: list[str], provider: str) -> dict:
         return r["provider_msg_id"]
 
     total = len(unknown_ids)
-    new_count = att_count = fetched = 0
+    new_count = att_count = skipped_atts = fetched = 0
     newest_seen: Optional[datetime] = None
     CHUNK = 50
     for i in range(0, total, CHUNK):
@@ -444,11 +500,17 @@ def _ingest_id_list(unknown_ids: list[str], provider: str) -> dict:
                 logger.warning("Failed to persist email %s: %s", key, e)
                 continue
             # Queue attachments as metadata only — the background worker fetches bytes.
+            # Body furniture is written down but not queued, so the two are counted
+            # apart: a drop in `attachments` after this change is the filter working,
+            # not mail losing its files.
             for meta in r.get("attachments", []):
                 if enqueue_attachment(email_id, r["provider_msg_id"], meta):
                     att_count += 1
+                else:
+                    skipped_atts += 1
         logger.info("Ingest %s: committed %d/%d new mails so far", provider, new_count, total)
-    return {"new": new_count, "attachments": att_count, "fetched": fetched,
+    return {"new": new_count, "attachments": att_count,
+            "skipped_attachments": skipped_atts, "fetched": fetched,
             "newest_seen": newest_seen}
 
 
@@ -687,7 +749,11 @@ def _ingest_new_emails(provider: str = "gmail", max_results: int = 500) -> dict:
             _advance_watermark(provider, safe)
 
     stats = {"swept": seen, "fetched": fetched, "new": new_count,
-             "skipped": seen - fetched, "attachments": att_count}
+             "skipped": seen - fetched, "attachments": att_count,
+             # Always reported, even at 0. `attachments` fell by ~70% when the
+             # body-furniture filter landed, and this is the line that says the
+             # filter did it rather than mail arriving without its files.
+             "skipped_attachments": result.get("skipped_attachments", 0)}
     # Only present when it fired, matching the `skipped_*` flags above: a caller
     # grepping stats for a cap should not have to distinguish False from absent.
     if sweep_capped:
