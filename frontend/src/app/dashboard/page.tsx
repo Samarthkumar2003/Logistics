@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import { groupByThread } from './replyThreads';
 import './dashboard.css';
 
 const API_BASE = 'http://localhost:8001';
@@ -402,6 +403,92 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
   );
 }
 
+/* ─── Reply thread ─────────────────────────────────────────────── */
+function MessageBody({ body }: { body: string }) {
+  return (
+    <pre style={{
+      fontSize: 12, color: 'var(--muted-soft)', whiteSpace: 'pre-wrap',
+      lineHeight: 1.6, margin: 0, maxHeight: 220, overflowY: 'auto',
+    }}>{body?.slice(0, 2000)}{(body?.length ?? 0) > 2000 ? '\n…' : ''}</pre>
+  );
+}
+
+/* Same thread, but this message did not quote the RFQ reference itself. Shown
+   for context; it is not attribution. */
+function ThreadOnlyChip() {
+  return (
+    <span
+      title="Same thread as a linked reply, but this message did not quote the RFQ reference"
+      style={{
+        marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10,
+        fontWeight: 700, color: 'var(--amber)', border: '1px solid var(--amber)',
+      }}
+    >THREAD ONLY</span>
+  );
+}
+
+function ThreadCard({ messages }: { messages: Reply[] }) {
+  const [showEarlier, setShowEarlier] = useState(false);
+  // Newest first from the API, so the head is the agent's latest word — and when
+  // they replied twice, the correction rather than the version it supersedes.
+  const [latest, ...earlier] = messages;
+  // groupByThread never yields an empty group, but a card is not worth a white
+  // screen if that ever stops being true.
+  if (!latest) return null;
+
+  return (
+    <div className="q-card">
+      <div className="q-top">
+        <span className="q-agent">{latest.subject || '(no subject)'}</span>
+        <span style={{ fontSize: 11, color: 'var(--faint)' }}>
+          {formatReceived(latest.received_at)}
+        </span>
+      </div>
+      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
+        {latest.sender}{latest.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
+        {earlier.length > 0 && (
+          <span style={{ marginLeft: 8, color: 'var(--faint)' }}>
+            · latest of {messages.length} messages
+          </span>
+        )}
+        {!latest.linked && <ThreadOnlyChip />}
+      </div>
+
+      <MessageBody body={latest.body} />
+
+      {earlier.length > 0 && (
+        <>
+          <button
+            onClick={() => setShowEarlier(s => !s)}
+            style={{
+              marginTop: 8, padding: 0, border: 'none', background: 'none',
+              color: 'var(--blue-soft)', fontSize: 11, cursor: 'pointer',
+            }}
+          >
+            {showEarlier
+              ? '▲ Hide earlier messages'
+              : `▼ ${earlier.length} earlier message${earlier.length > 1 ? 's' : ''} in this thread`}
+          </button>
+          {showEarlier && earlier.map(m => (
+            // Indented inside the same card, so the thread reads as one
+            // conversation with history rather than as separate replies.
+            <div key={m.id} style={{
+              marginTop: 8, paddingLeft: 10, borderLeft: '2px solid var(--border)',
+            }}>
+              <div style={{ fontSize: 11, color: 'var(--faint)', marginBottom: 4 }}>
+                {formatReceived(m.received_at)}
+                {m.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
+                {!m.linked && <ThreadOnlyChip />}
+              </div>
+              <MessageBody body={m.body} />
+            </div>
+          ))}
+        </>
+      )}
+    </div>
+  );
+}
+
 /* ─── Shipment Card ──────────────────────────────────────────── */
 function ShipmentCard({ job }: { job: RFQJob }) {
   const [open, setOpen] = useState(false);
@@ -547,49 +634,8 @@ function ShipmentCard({ job }: { job: RFQJob }) {
           )}
           {replies.length > 0 && (
             <div className="q-list">
-              {/* The API returns newest first, so the head of the list is the
-                  agent's latest word — say so, because a second message is
-                  usually a correction to the first. */}
-              <div style={{ fontSize: 11, color: 'var(--faint)', marginBottom: 6 }}>
-                {replies.length === 1
-                  ? '1 message in this thread'
-                  : `${replies.length} messages in this thread, newest first`}
-              </div>
-              {replies.map((r, i) => (
-                <div key={r.id} className="q-card">
-                  <div className="q-top">
-                    <span className="q-agent">{r.subject || '(no subject)'}</span>
-                    <span style={{ fontSize: 11, color: 'var(--faint)' }}>
-                      {formatReceived(r.received_at)}
-                    </span>
-                  </div>
-                  <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
-                    {r.sender}{r.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
-                    {i === 0 && replies.length > 1 && (
-                      <span style={{
-                        marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10,
-                        fontWeight: 700, color: 'var(--green-soft)',
-                        border: '1px solid var(--green-soft)',
-                      }}>LATEST</span>
-                    )}
-                    {!r.linked && (
-                      // Shown for context, not attribution: same Gmail thread, but
-                      // this message did not carry the RFQ reference itself.
-                      <span
-                        title="Same thread as a linked reply, but this message did not quote the RFQ reference"
-                        style={{
-                          marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10,
-                          fontWeight: 700, color: 'var(--amber)',
-                          border: '1px solid var(--amber)',
-                        }}
-                      >THREAD ONLY</span>
-                    )}
-                  </div>
-                  <pre style={{
-                    fontSize: 12, color: 'var(--muted-soft)', whiteSpace: 'pre-wrap',
-                    lineHeight: 1.6, margin: 0, maxHeight: 220, overflowY: 'auto',
-                  }}>{r.body?.slice(0, 2000)}{(r.body?.length ?? 0) > 2000 ? '\n…' : ''}</pre>
-                </div>
+              {groupByThread(replies).map(thread => (
+                <ThreadCard key={thread[0].thread_id || thread[0].id} messages={thread} />
               ))}
               <a
                 href={`/request/${job.customer_email_id ?? ''}`}
