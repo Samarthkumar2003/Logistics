@@ -6,6 +6,10 @@ import {
   ManualNote, ManualRecipient, dedupeByEmail, describeSplit, mergeManualRecipients,
   splitManualTokens, tokenizeEmails,
 } from './manualRecipients';
+import {
+  CONTAINER_OPTIONS, ContainerSelection, NO_CONTAINERS, containerSizeText,
+  containerSummary, hasContainers, setManualText, toggleContainer, toggleManual,
+} from './containerSize';
 
 const API_BASE = 'http://localhost:8001';
 
@@ -123,6 +127,80 @@ function AgentMultiSelect({ label, agents, selected, onToggle }: {
   );
 }
 
+/* ─── Size / Container multi-select ─────────────────────────────── */
+function ContainerMultiSelect({ selection, onChange }: {
+  selection: ContainerSelection;
+  onChange: (next: ContainerSelection) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const chosen = hasContainers(selection);
+
+  const row: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+    fontSize: 12, color: '#e2e8f0', cursor: 'pointer', borderRadius: 4,
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <span style={labelStyle}>Size / Container</span>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        style={{
+          ...inputStyle, textAlign: 'left', cursor: 'pointer',
+          color: chosen ? '#60a5fa' : '#64748b',
+          border: `1px solid ${chosen ? '#3b82f6' : '#2a2a3a'}`,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >
+        {containerSummary(selection)} {open ? '▲' : '▼'}
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', zIndex: 10, top: '100%', left: 0, right: 0, marginTop: 4,
+          background: '#0d1117', border: '1px solid #3b82f6', borderRadius: 6, padding: 4,
+        }}>
+          {CONTAINER_OPTIONS.map(o => (
+            <label
+              key={o}
+              style={{ ...row, background: selection.picked.includes(o) ? '#1e3a5f' : 'transparent' }}
+            >
+              <input
+                type="checkbox"
+                checked={selection.picked.includes(o)}
+                onChange={() => onChange(toggleContainer(selection, o))}
+                style={{ accentColor: '#3b82f6' }}
+              />
+              <span>{o}</span>
+            </label>
+          ))}
+          <label style={{
+            ...row, background: selection.manualOn ? '#1e3a5f' : 'transparent',
+            borderTop: '1px solid #1e293b', borderRadius: 0, marginTop: 2,
+          }}>
+            <input
+              type="checkbox"
+              checked={selection.manualOn}
+              onChange={() => onChange(toggleManual(selection))}
+              style={{ accentColor: '#3b82f6' }}
+            />
+            <span>Manual entry<span style={{ color: '#64748b', fontSize: 10 }}> — anything not listed</span></span>
+          </label>
+          {selection.manualOn && (
+            <input
+              style={{ ...inputStyle, marginTop: 4 }}
+              value={selection.manual}
+              onChange={e => onChange(setManualText(selection, e.target.value))}
+              placeholder="e.g. 2 x 45ft reefer — separate several with commas"
+              autoFocus
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Page ──────────────────────────────────────────────────────── */
 export default function SendRequestPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -130,7 +208,11 @@ export default function SendRequestPage() {
   const [sourceEmail, setSourceEmail] = useState<SourceEmail | null>(null);
 
   // Form fields
-  const [size, setSize] = useState('');
+  // Size / Container is chosen from the fixed list (plus a manual option) and is
+  // deliberately not prefilled from the customer email — see the extraction step
+  // in init() below.
+  const [containers, setContainers] = useState<ContainerSelection>(NO_CONTAINERS);
+  const size = containerSizeText(containers);
   const [originPort, setOriginPort] = useState('');
   const [destPort, setDestPort] = useState('');
   const [commodity, setCommodity] = useState('');
@@ -225,6 +307,9 @@ export default function SendRequestPage() {
         if (res.ok) {
           const data = await res.json();
           const s = data.shipment || {};
+          // Size / Container is not taken from the email, deliberately, even if a
+          // later extraction learns to guess one: a wrong box quotes the customer
+          // for freight they never asked for, and the operator picks it below.
           setOriginPort(s.origin || '');
           setDestPort(s.destination || '');
           setCommodity(s.commodity || '');
@@ -482,10 +567,7 @@ export default function SendRequestPage() {
                 <span style={labelStyle}>Receiving Port (Destination) *</span>
                 <input style={inputStyle} value={destPort} onChange={e => setDestPort(e.target.value)} placeholder="e.g. Tema" />
               </div>
-              <div>
-                <span style={labelStyle}>Size / Container</span>
-                <input style={inputStyle} value={size} onChange={e => setSize(e.target.value)} placeholder="e.g. 20 x 40' HC" />
-              </div>
+              <ContainerMultiSelect selection={containers} onChange={setContainers} />
               <div>
                 <span style={labelStyle}>Commodity</span>
                 <input style={inputStyle} value={commodity} onChange={e => setCommodity(e.target.value)} placeholder="e.g. general cargo" />
