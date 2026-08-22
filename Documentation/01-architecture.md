@@ -66,6 +66,72 @@ case is visible in the logs. This is by design — see the note in
 [BUGS.md](BUGS.md#by-design); do not "fix" it by removing the ceiling or holding
 the watermark.
 
+**Bounded sweep (`MAX_SWEEP_IDS`, 20k).** A second, separate ceiling, because
+`MAX_INGEST_BATCH` counts a different thing: mail we *lack*. A window full of mail
+we already have never trips it — `unknown_ids` stays at 0 while the pager walks to
+the end of the window. So a watermark that reads back fine but sits far in the past
+(seeded long ago, edited by hand, a timezone slip) paged all ~195k ids, roughly 390
+sequential Gmail requests, every five minutes. The sweep is therefore capped on ids
+*seen* as well as ids *new*. Unlike the bounded load this does **not** suppress the
+watermark advance: with 0 unknown ids there is no `newest_seen` to advance to, so
+the `_max_received_at()` promotion is the only thing that lets a lagging watermark
+move, and suppressing it would re-page the cap every five minutes forever — a
+permanent stall, strictly worse than one expensive self-healing run. The un-swept
+region below the cap is older mail, and the daily gap audit already widens its
+window by how far the watermark lags, so that region has an owner.
+
+**Bounded self-heal (`AUTO_HEAL_MAX_TOTAL_MISSING`, 2000).** The gap heal has three
+guardrails, not two, because the original pair multiplied: "at most 14 gap days"
+and "at most 1000 missing per day" were checked independently, so 14 × 1000 = 14,000
+mails — each one a Gmail full-fetch plus a real LLM classification — cleared both
+while nothing ever looked at the product. The total is enforced twice: once up front
+against the audit's estimate, then again as a running budget charged for mail
+actually pulled. Both are needed because the two numbers measure different things —
+the audit's `missing` is a count subtraction (Gmail's count for the day minus DB
+rows dated that day) while the backfill performs a set difference over
+`provider_msg_id`. Rows the DB holds for a day that Gmail no longer lists in INBOX
+(archived, deleted, moved) inflate the DB count and shrink `missing` without
+affecting the set difference, so a day reporting 50 missing can hand back 950
+unknown ids. `backfill_window` takes a `max_new` cap for exactly that reason: it
+bounds the pull at the point where the real quantity is finally known. Days left
+unattempted when the budget runs out are returned as `deferred` and retried on the
+next nightly run.
+
+**Attachments are tiered, not queued wholesale.** Ingest writes attachment
+metadata only; a worker downloads the bytes every two minutes, 150 at a time, and
+stands down whenever an ingest holds the lock. That budget was being spent almost
+entirely on decoration: of 36,205 queued rows, 25,484 were images under 20 kB —
+signature logos, icons, spacers, tracking pixels — 70% of the queue for 3% of its
+bytes, and because the queue drained strictly oldest-first, every one of them made
+a vendor's rate-card PDF wait behind it. Roughly a day's delay on the document the
+desk was actually waiting for.
+
+Gmail's own part headers settle which is which, and they arrive in the
+`format=full` response ingest already fetches, so the test is free:
+
+| tier | test | treatment |
+|---|---|---|
+| 1 | no `Content-ID` (`Content-Disposition: attachment`) | queued, drained **first** |
+| 2 | `Content-ID` present, ≥ 20 kB | queued, drained after tier 1 |
+| 3 | `Content-ID` present, < 20 kB | recorded as `skipped`, never downloaded |
+
+Both halves of the tier-3 test are load-bearing. Size alone is wrong: the queue
+holds genuine 1.8 kB payment PDFs and 300-byte CSVs. Embedded-ness alone is wrong
+too: an agent pasting a rate table into the message body produces an embedded
+image that, by disposition, is indistinguishable from a logo — and in this trade
+that screenshot *is* the quotation, so the 20 kB floor is what separates them. A
+part whose size Gmail does not report is kept; guessing in the discard direction is
+the one guess that cannot be recovered from.
+
+Tier 3 is **recorded, not dropped** — the row still appears in the email's
+attachment list, keeping the mail's true contents honest, and the whole decision
+reverses with one `UPDATE` because no bytes were ever fetched. The 25,316 rows
+already queued when this landed were retired the same way by
+`scripts/retire_inline_attachment_backlog.py` (matched on `image/*` under 20 kB,
+since the header was not captured at the time they were enqueued), taking the
+queue from ~36k to ~10.5k. That script is dry-run by default and carries the
+reversal SQL in its docstring.
+
 ### B. Scan — `automation/automation.py`
 
 Every 5 minutes, claims unprocessed rows from `emails` and acts on the label.

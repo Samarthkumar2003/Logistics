@@ -2,6 +2,15 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import {
+  ManualNote, ManualRecipient, dedupeByEmail, describeSplit, mergeManualRecipients,
+  splitManualTokens, tokenizeEmails,
+} from './manualRecipients';
+import {
+  CONTAINER_OPTIONS, ContainerSelection, MAX_QUANTITY, MIN_QUANTITY, NO_CONTAINERS,
+  containerSizeText, containerSummary, hasContainers, quantityOf, setManualText,
+  setQuantity, toggleContainer, toggleManual,
+} from './containerSize';
 
 const API_BASE = 'http://localhost:8001';
 
@@ -43,6 +52,7 @@ interface SendRFQResponse {
   jobs: RFQJob[];
   total_sent: number;
 }
+
 
 const CATEGORIES = [
   { key: 'CHA', label: 'CHA (Origin / Customs)' },
@@ -118,6 +128,104 @@ function AgentMultiSelect({ label, agents, selected, onToggle }: {
   );
 }
 
+/* ─── Size / Container multi-select ─────────────────────────────── */
+function ContainerMultiSelect({ selection, onChange }: {
+  selection: ContainerSelection;
+  onChange: (next: ContainerSelection) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const chosen = hasContainers(selection);
+
+  const row: React.CSSProperties = {
+    display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
+    fontSize: 12, color: '#e2e8f0', cursor: 'pointer', borderRadius: 4,
+  };
+
+  return (
+    <div style={{ position: 'relative' }}>
+      <span style={labelStyle}>Size / Container</span>
+      <button
+        type="button"
+        onClick={() => setOpen(!open)}
+        style={{
+          ...inputStyle, textAlign: 'left', cursor: 'pointer',
+          color: chosen ? '#60a5fa' : '#64748b',
+          border: `1px solid ${chosen ? '#3b82f6' : '#2a2a3a'}`,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >
+        {containerSummary(selection)} {open ? '▲' : '▼'}
+      </button>
+      {open && (
+        <div style={{
+          position: 'absolute', zIndex: 10, top: '100%', left: 0, right: 0, marginTop: 4,
+          background: '#0d1117', border: '1px solid #3b82f6', borderRadius: 6, padding: 4,
+        }}>
+          {CONTAINER_OPTIONS.map(o => {
+            const on = selection.picked.includes(o);
+            return (
+              // The count sits outside the <label> on purpose: inside it, every
+              // click that lands on the spinner would also toggle the tick.
+              <div
+                key={o}
+                style={{ ...row, background: on ? '#1e3a5f' : 'transparent', cursor: 'default' }}
+              >
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={() => onChange(toggleContainer(selection, o))}
+                    style={{ accentColor: '#3b82f6' }}
+                  />
+                  <span>{o}</span>
+                </label>
+                {on && (
+                  <>
+                    <span style={{ fontSize: 10, color: '#64748b' }}>QTY</span>
+                    <input
+                      type="number"
+                      min={MIN_QUANTITY}
+                      max={MAX_QUANTITY}
+                      value={quantityOf(selection, o)}
+                      onChange={e => onChange(setQuantity(selection, o, e.target.value))}
+                      // Typed and pasted values walk past min/max, so the value is
+                      // clamped again on the way out of the field.
+                      onBlur={e => onChange(setQuantity(selection, o, e.target.value))}
+                      aria-label={`Quantity of ${o}`}
+                      style={{ ...inputStyle, width: 62, padding: '4px 6px', textAlign: 'center' }}
+                    />
+                  </>
+                )}
+              </div>
+            );
+          })}
+          <label style={{
+            ...row, background: selection.manualOn ? '#1e3a5f' : 'transparent',
+            borderTop: '1px solid #1e293b', borderRadius: 0, marginTop: 2,
+          }}>
+            <input
+              type="checkbox"
+              checked={selection.manualOn}
+              onChange={() => onChange(toggleManual(selection))}
+              style={{ accentColor: '#3b82f6' }}
+            />
+            <span>Manual entry<span style={{ color: '#64748b', fontSize: 10 }}> — anything not listed</span></span>
+          </label>
+          {selection.manualOn && (
+            <input
+              style={{ ...inputStyle, marginTop: 4 }}
+              value={selection.manual}
+              onChange={e => onChange(setManualText(selection, e.target.value))}
+              placeholder="e.g. 2 x 45ft reefer — separate several with commas"
+              autoFocus
+            />
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /* ─── Page ──────────────────────────────────────────────────────── */
 export default function SendRequestPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -125,7 +233,11 @@ export default function SendRequestPage() {
   const [sourceEmail, setSourceEmail] = useState<SourceEmail | null>(null);
 
   // Form fields
-  const [size, setSize] = useState('');
+  // Size / Container is chosen from the fixed list (plus a manual option) and is
+  // deliberately not prefilled from the customer email — see the extraction step
+  // in init() below.
+  const [containers, setContainers] = useState<ContainerSelection>(NO_CONTAINERS);
+  const size = containerSizeText(containers);
   const [originPort, setOriginPort] = useState('');
   const [destPort, setDestPort] = useState('');
   const [commodity, setCommodity] = useState('');
@@ -148,9 +260,10 @@ export default function SendRequestPage() {
 
   // Ad-hoc recipients typed in by hand — agents not in the DB list. Merged with
   // the checkbox-selected agents at preview/send time. Keyed by lowercased email.
-  const [manualAgents, setManualAgents] = useState<{ agent_name: string; email: string }[]>([]);
+  const [manualAgents, setManualAgents] = useState<ManualRecipient[]>([]);
   const [manualEmailInput, setManualEmailInput] = useState('');
   const [manualNameInput, setManualNameInput] = useState('');
+  const [manualNote, setManualNote] = useState<ManualNote | null>(null);
 
   // Starter template built from the form, used when composing manually.
   function manualStarter() {
@@ -219,6 +332,9 @@ export default function SendRequestPage() {
         if (res.ok) {
           const data = await res.json();
           const s = data.shipment || {};
+          // Size / Container is not taken from the email, deliberately, even if a
+          // later extraction learns to guess one: a wrong box quotes the customer
+          // for freight they never asked for, and the operator picks it below.
           setOriginPort(s.origin || '');
           setDestPort(s.destination || '');
           setCommodity(s.commodity || '');
@@ -239,52 +355,50 @@ export default function SendRequestPage() {
     });
   }
 
-  // Basic RFC-ish email shape check — enough to catch typos, not to be a parser.
-  const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-
   function addManualEmail() {
-    // Accept one or many at once — split on newline / comma / semicolon / space so
-    // Enter-per-email, paste-a-list, and "a@x.com, b@y.com" all work.
-    const tokens = manualEmailInput.split(/[\s,;]+/).map(t => t.trim()).filter(Boolean);
+    const tokens = tokenizeEmails(manualEmailInput);
     if (tokens.length === 0) return;
 
-    const invalid: string[] = [];
-    const added: { agent_name: string; email: string }[] = [];
-    setManualAgents(prev => {
-      const seen = new Set([
-        ...prev.map(m => m.email.toLowerCase()),
-        ...agents.map(a => a.email.toLowerCase()),
-      ]);
-      for (const email of tokens) {
-        const lower = email.toLowerCase();
-        if (!EMAIL_RE.test(email)) { invalid.push(email); continue; }
-        if (seen.has(lower)) continue;      // dedup against agents + already-added
-        seen.add(lower);
-        // Optional name applies only when a single address is entered.
-        const name = (tokens.length === 1 && manualNameInput.trim())
-          ? manualNameInput.trim()
-          : email.split('@')[0];
-        added.push({ agent_name: name, email });
-      }
-      return [...prev, ...added];
-    });
+    // Classify first, then apply. This used to run *inside* the setManualAgents
+    // updater, which broke it twice over: the tallies were read back before React
+    // had run the updater, so no message ever reached the user; and the updater
+    // pushed into arrays declared outside itself, so its development double-invoke
+    // added every address twice, producing duplicate chips on one duplicate key.
+    const split = splitManualTokens(tokens, agents, manualAgents, manualNameInput);
+
+    if (split.added.length > 0) {
+      // Pure updater — re-filters against `prev`, so running it twice is a no-op.
+      setManualAgents(prev => mergeManualRecipients(prev, split.added));
+    }
+    // An address already in the agents table is what the checkbox list is for, so
+    // select it. Skipping the token silently — the old behaviour — is why typing a
+    // known agent's address looked like the Add button doing nothing at all, and it
+    // got steadily more likely as the table grew past a hundred rows.
+    if (split.onRoster.length > 0) {
+      setSelected(prev => new Set([...prev, ...split.onRoster.map(a => a.id)]));
+    }
 
     // Keep any invalid tokens in the box so the user can fix them; clear the rest.
-    setManualEmailInput(invalid.join(', '));
-    if (added.length > 0) setManualNameInput('');
-    setErrorMsg(invalid.length > 0 ? `Not a valid email: ${invalid.join(', ')}` : '');
+    setManualEmailInput(split.invalid.join(', '));
+    if (split.added.length > 0 || split.onRoster.length > 0) setManualNameInput('');
+    setManualNote(describeSplit(split));
+    setErrorMsg('');
   }
 
   function removeManualEmail(email: string) {
     setManualAgents(prev => prev.filter(m => m.email !== email));
   }
 
-  // Recipients = checkbox-selected DB agents + hand-entered emails.
+  // Recipients = checkbox-selected DB agents + hand-entered emails, one per address.
+  // The dedup is not decoration. These are two independent states that can name the
+  // same person, the count below is what the send button promises, and this list is
+  // what gets posted — so any address appearing twice here is a second enquiry to a
+  // vendor under a second reference, sent without anything on screen showing it.
   const selectedAgents = agents.filter(a => selected.has(a.id));
-  const recipients = [
+  const recipients = dedupeByEmail([
     ...selectedAgents.map(a => ({ agent_name: a.agent_name, email: a.email })),
     ...manualAgents,
-  ];
+  ]);
   const totalRecipients = recipients.length;
 
   async function handlePreview() {
@@ -478,10 +592,7 @@ export default function SendRequestPage() {
                 <span style={labelStyle}>Receiving Port (Destination) *</span>
                 <input style={inputStyle} value={destPort} onChange={e => setDestPort(e.target.value)} placeholder="e.g. Tema" />
               </div>
-              <div>
-                <span style={labelStyle}>Size / Container</span>
-                <input style={inputStyle} value={size} onChange={e => setSize(e.target.value)} placeholder="e.g. 20 x 40' HC" />
-              </div>
+              <ContainerMultiSelect selection={containers} onChange={setContainers} />
               <div>
                 <span style={labelStyle}>Commodity</span>
                 <input style={inputStyle} value={commodity} onChange={e => setCommodity(e.target.value)} placeholder="e.g. general cargo" />
@@ -526,7 +637,7 @@ export default function SendRequestPage() {
                 <input
                   style={{ ...inputStyle, flex: 2 }}
                   value={manualEmailInput}
-                  onChange={e => setManualEmailInput(e.target.value)}
+                  onChange={e => { setManualEmailInput(e.target.value); setManualNote(null); }}
                   onKeyDown={e => {
                     if (e.key === 'Enter') { e.preventDefault(); addManualEmail(); }
                   }}
@@ -542,6 +653,12 @@ export default function SendRequestPage() {
                   }}
                 >+ Add</button>
               </div>
+              {manualNote && (
+                <div style={{
+                  marginTop: 8, fontSize: 11, lineHeight: 1.5,
+                  color: manualNote.tone === 'error' ? '#f87171' : '#fbbf24',
+                }}>{manualNote.text}</div>
+              )}
               {manualAgents.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                   {manualAgents.map(m => (

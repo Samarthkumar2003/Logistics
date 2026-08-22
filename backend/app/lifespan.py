@@ -34,6 +34,7 @@ from backend.core.config import settings
 from backend.core.db import check_connectivity, get_db
 from backend.core.logging_context import carry_context, job_context
 from backend.services.metrics_service import snapshot_metrics
+from backend.services.retry_service import sweep_stuck_sends
 
 logger = logging.getLogger(__name__)
 
@@ -113,6 +114,12 @@ def _metrics_snapshot() -> None:
     snapshot_metrics()
 
 
+def _stuck_sends() -> None:
+    stats = sweep_stuck_sends()
+    if stats.get("scanned"):
+        logger.info("Stuck-send sweep: %s", stats)
+
+
 def _gap_heal() -> None:
     # Self-healing: audit → auto-backfill each gap day within guardrails →
     # re-audit → email an alert for anything still short.
@@ -131,6 +138,7 @@ _retry_pending_job = _job("retry_pending", _retry_pending)
 _attachment_worker_job = _job("attachment_worker", _attachment_worker)
 _metrics_snapshot_job = _job("metrics_snapshot", _metrics_snapshot)
 _gap_audit_job = _job("gap_heal", _gap_heal)
+_stuck_sends_job = _job("stuck_sends", _stuck_sends)
 
 
 def run_scan_in_background() -> None:
@@ -144,6 +152,16 @@ def run_scan_in_background() -> None:
     only way to match a complaint to a scan.
     """
     threading.Thread(target=carry_context(_scan_job), daemon=True).start()
+
+
+def run_ingest_in_background() -> None:
+    """Used by POST /ingest/run-now, the manual equivalent of the 5-minute sweep.
+
+    Same reasoning as the scan: a sweep can outlast any sensible HTTP timeout, so
+    the request returns 202 and the caller polls. `carry_context` keeps the
+    triggering request's id on the sweep's log lines.
+    """
+    threading.Thread(target=carry_context(_ingest_job), daemon=True).start()
 
 
 @asynccontextmanager
@@ -175,6 +193,13 @@ async def lifespan(_app: FastAPI):
         # queryable by eye for years.
         scheduler.add_job(_metrics_snapshot_job, "interval", hours=1,
                           id="metrics_snapshot", replace_existing=True)
+        # Recovers RFQ jobs a crash left stuck at `sending`: reconciles each
+        # against the Sent folder, resends the proven-unsent, flags the rest for
+        # a human. 15 min because a stuck send is rare and never urgent to the
+        # minute — and the interval must sit comfortably above the
+        # STALE_SENDING_MINUTES floor so a live-but-slow send is never swept.
+        scheduler.add_job(_stuck_sends_job, "interval", minutes=15,
+                          id="stuck_sends", replace_existing=True)
         scheduler.start()
         logger.info("Scheduler started — scanning every 5 minutes")
     else:

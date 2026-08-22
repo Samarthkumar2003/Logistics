@@ -81,6 +81,17 @@ class Settings:
     # --- Runtime -------------------------------------------------------------
     run_scheduler: bool
     scan_batch: int
+    # A job sits at `sending` only between reserving its row and recording the
+    # send outcome — seconds, normally. Past this many minutes it is treated as
+    # abandoned by a crashed process and swept: reconciled against the Sent
+    # folder, then advanced or (provably-unsent) retried once. Read by both the
+    # metrics gauge and the retry sweep, so they never disagree on "stuck".
+    stale_sending_minutes: int
+    # When true, the sweep may re-send an RFQ it has PROVEN never left (absent
+    # from the Sent folder). Set false to make the sweep reconcile-only —
+    # advancing delivered rows and flagging the rest send_failed for a human,
+    # never sending anything unattended.
+    auto_retry_stuck_sends: bool
     log_level: str
     log_json: bool
     # Where the rotating log file goes. Empty = PROJECT_ROOT/logs. Set it to a
@@ -130,6 +141,8 @@ def get_settings() -> Settings:
         report_recipient=_env("REPORT_RECIPIENT"),
         run_scheduler=_flag("RUN_SCHEDULER", True),
         scan_batch=_int("SCAN_BATCH", 50),
+        stale_sending_minutes=_int("STALE_SENDING_MINUTES", 15),
+        auto_retry_stuck_sends=_flag("AUTO_RETRY_STUCK_SENDS", True),
         log_level=_env("LOG_LEVEL", "INFO").upper(),
         log_json=_flag("LOG_JSON", False),
         log_dir=_env("LOG_DIR"),

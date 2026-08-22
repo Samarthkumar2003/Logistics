@@ -15,12 +15,13 @@ Every count is a cheap COUNT with a WHERE — no scans, no joins.
 """
 
 import logging
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any, Callable
 
 from backend.automation.automation import MAX_PROCESS_ATTEMPTS, get_status
 from backend.core.config import settings
 from backend.core.db import get_db
+from backend.domain.models import STATUS_SENDING
 
 logger = logging.getLogger(__name__)
 
@@ -31,7 +32,12 @@ UNAVAILABLE = -1
 # `send_failed` is counted here so a broken sender shows up as a rising number
 # rather than only in the logs. It is deliberately absent from the snapshot row
 # below, which would need a new `metrics_snapshots` column to store it.
-JOB_STATUSES = ("rfqs_sent", "quotes_received", "approved", "send_failed")
+#
+# `sending` is a normal transient state — the send path writes the row before
+# handing the mail to the provider — so a small non-zero count during a send is
+# expected. What matters is the `sending_stuck` count below.
+JOB_STATUSES = ("rfqs_sent", "quotes_received", "approved", "send_failed",
+                STATUS_SENDING)
 
 
 def _count(db, table: str, build: Callable) -> int:
@@ -67,6 +73,15 @@ def collect_metrics() -> dict[str, Any]:
         status: _count(db, "rfq_jobs", lambda q, s=status: q.eq("status", s))
         for status in JOB_STATUSES
     }
+    # Reserved a reference, never recorded an outcome. The retry sweep works
+    # these off (reconcile against Sent, then resend the proven-unsent); a count
+    # that stays high means the sweep is failing to clear them and needs a human.
+    stale_before = (datetime.now(timezone.utc)
+                    - timedelta(minutes=settings.stale_sending_minutes)).isoformat()
+    jobs["sending_stuck"] = _count(
+        db, "rfq_jobs",
+        lambda q: q.eq("status", STATUS_SENDING).lt("created_at", stale_before),
+    )
 
     last_run: dict = {}
     try:

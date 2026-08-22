@@ -23,7 +23,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from backend.app.errors import register_handlers
 from backend.app.lifespan import lifespan
-from backend.app.routes import automation, inbox, jobs, ops, rfq
+from backend.app.routes import automation, inbox, ingest, jobs, ops, rfq
 from backend.core.config import settings
 from backend.core.logging_config import configure_logging, default_log_file
 from backend.core.logging_context import clean_incoming_id, request_context
@@ -83,7 +83,7 @@ def create_app() -> FastAPI:
 
     register_handlers(app)
 
-    for module in (ops, inbox, jobs, rfq, automation):
+    for module in (ops, inbox, ingest, jobs, rfq, automation):
         app.include_router(module.router)
 
     logger.info(

@@ -19,7 +19,7 @@ from backend.agents.rfq_agent import DraftEmail, generate_rfq_drafts
 from backend.connectors.email_sender import send_rfq_email, send_rfq_emails_batch
 from backend.core.logging_context import carry_context
 from backend.core.rfq_reference import inject_reference
-from backend.domain.models import RfqJob
+from backend.domain.models import STATUS_SENDING, RfqJob
 from backend.repositories import agent_repo, email_repo, job_repo
 
 logger = logging.getLogger(__name__)
@@ -48,8 +48,9 @@ def new_reference() -> str:
 
     8 hex characters, not 4: the suffix is scoped to one day, and 4 gave only
     65,536 values — a ~16% chance per day at ~150 RFQs of colliding with a
-    reference already issued. Since the column is unique the insert would fail
-    after the mail was already sent, stranding the RFQ with no job row.
+    reference already issued. The column is unique, so a collision fails the
+    insert; the send now reserves the row first, which turns that from a sent RFQ
+    stranded with no job row into an aborted send the operator can simply retry.
     """
     return f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8]}"
 
@@ -158,14 +159,67 @@ def _attach_send_status(
         entry["send_status"] = result.get("status", "unknown")
 
 
-def _record_job(
-    entry: dict[str, Any],
+def _reserve_jobs(
+    sendable: list[dict[str, Any]],
     shipment: dict[str, Any],
     customer: dict[str, str],
     customer_email_id: str,
     thread_id: str,
-) -> str:
-    """Persist one RFQ as a job row. Returns the operator-facing status.
+) -> None:
+    """Phase one: commit a job row per draft *before* any mail goes out.
+
+    Every reference about to reach a vendor gets its row first, at
+    `STATUS_SENDING` — a record of intent, not a claim of delivery. Writing
+    afterwards left a window in which a reference existed in the wild with
+    nothing to attach a reply to: an auto-responder that replies in under a
+    second, a crash mid-batch, or a reference collision against the unique index
+    all produced an RFQ whose reply could never be filed.
+
+    Raises RfqError if the reservation fails, which aborts before the send. That
+    is the safe direction to fail: an un-sent RFQ can be re-sent, whereas a sent
+    one with no row is a quote that silently never arrives.
+
+    The drafted subject and body go in too, so a send abandoned mid-flight can be
+    resent verbatim instead of re-drafted into different words. Pre-redirect
+    text: the sender applies EMAIL_REDIRECT, so a retry picks up whatever redirect
+    is configured then rather than replaying a stale test address.
+    """
+    try:
+        job_repo.insert_many([
+            RfqJob(
+                reference=e["reference"],
+                status=STATUS_SENDING,
+                agents_contacted=[e["agent_name"]],
+                draft_subject=e["draft"].subject,
+                draft_body=e["draft"].body,
+                # The same resolution the sender uses below, so the stored
+                # recipient is the one actually addressed.
+                draft_to=e["draft"].vendor_email or e["email"],
+                customer_email_id=customer_email_id or None,
+                customer_thread_id=thread_id or None,
+                customer_sender=customer.get("sender", ""),
+                customer_subject=customer.get("subject", ""),
+                customer_body=customer.get("body", ""),
+                origin=shipment["origin"],
+                destination=shipment["destination"],
+                mode=shipment.get("mode", ""),
+                commodity=shipment.get("commodity", ""),
+                size=shipment.get("size", ""),
+                weight_kg=shipment.get("weight_kg"),
+            )
+            for e in sendable
+        ])
+    except Exception as exc:
+        logger.exception("Reserving %d job row(s) failed, nothing sent: %s",
+                         len(sendable), exc)
+        raise RfqError(
+            f"Could not record the RFQ before sending, so nothing was sent: {exc}"
+        ) from exc
+
+
+def _record_outcome(entry: dict[str, Any]) -> str:
+    """Phase two: move a reserved row to its delivery outcome. Returns the
+    operator-facing status.
 
     The stored status is what the sender actually reported, not the fact that a
     draft was produced. Hardcoding `rfqs_sent` meant a dead SMTP login filled the
@@ -173,43 +227,65 @@ def _record_job(
     contacted — and because attribution is by reference alone, no reply would
     ever arrive to contradict the record. It reads as an unresponsive vendor.
 
-    The row is written even when the send failed, because a failure can be
-    ambiguous: a timeout may have delivered. Keeping the row keeps a reply
-    attributable, where dropping it would strand the reply.
+    `send_failed` rows are kept, not deleted, because a failure can be ambiguous:
+    a timeout may have delivered. Keeping the row keeps a reply attributable,
+    where dropping it would strand the reply.
+
+    The update is guarded on the row still being `sending`, so a reply that has
+    already landed and advanced the job to `quotes_received` is not overwritten —
+    a real quote outranks our record of how the send went.
     """
+    reference = entry["reference"]
     send_status = entry.get("send_status", "unknown")
     delivered = send_status == SENT_STATUS
+    final = "rfqs_sent" if delivered else "send_failed"
 
     try:
-        job_repo.insert(RfqJob(
-            reference=entry["reference"],
-            status="rfqs_sent" if delivered else "send_failed",
-            agents_contacted=[entry["agent_name"]],
-            customer_email_id=customer_email_id or None,
-            customer_thread_id=thread_id or None,
-            customer_sender=customer.get("sender", ""),
-            customer_subject=customer.get("subject", ""),
-            customer_body=customer.get("body", ""),
-            origin=shipment["origin"],
-            destination=shipment["destination"],
-            mode=shipment.get("mode", ""),
-            commodity=shipment.get("commodity", ""),
-            size=shipment.get("size", ""),
-            weight_kg=shipment.get("weight_kg"),
-        ))
+        moved = job_repo.set_status_if(reference, final, STATUS_SENDING)
     except Exception as exc:
-        # The mail may already be gone; losing the row means losing the ability
-        # to match the reply. Loud, and surfaced to the operator.
-        logger.exception("RFQ %s (%s) failed to persist the job: %s",
-                     entry["reference"], send_status, exc)
-        return f"{send_status} but job persist failed: {exc}"
+        # The row exists and holds the reference, so a reply is still
+        # attributable; only the status is stale. Loud, and surfaced.
+        logger.exception("RFQ %s (%s) failed to update its job status: %s",
+                         reference, send_status, exc)
+        return f"{send_status} but job status update failed: {exc}"
 
+    if not moved:
+        # Left `sending` by someone else — in practice a reply that beat us here.
+        logger.info("RFQ %s left %s before its %s update; leaving it alone",
+                    reference, STATUS_SENDING, final)
     if delivered:
-        logger.info("RFQ %s sent to %s", entry["reference"], entry["agent_name"])
+        logger.info("RFQ %s sent to %s", reference, entry["agent_name"])
     else:
-        logger.error("RFQ %s to %s not confirmed sent (%s) — recorded as send_failed",
-                     entry["reference"], entry["agent_name"], send_status)
+        logger.error("RFQ %s to %s not confirmed sent (%s) — recorded as %s",
+                     reference, entry["agent_name"], send_status, final)
     return send_status
+
+
+def _dedupe_recipients(agents: list[SelectedAgent]) -> list[SelectedAgent]:
+    """One address, one RFQ. Keeps the first spelling of each.
+
+    The recipient list is whatever the browser posted, and one address twice means
+    a vendor gets the same enquiry twice under two references — unrecallable, and it
+    reads to them as either a mistake or a duplicate booking attempt. It has already
+    happened: a state updater in the send form appended each hand-typed address
+    twice, and since the copies shared a render key the page showed one recipient
+    while the payload carried two. That is fixed in the form, but a browser tab left
+    open keeps posting the old bundle, so the guard that counts is this one.
+    """
+    seen: set[str] = set()
+    unique: list[SelectedAgent] = []
+    for agent in agents:
+        key = (agent.email or "").strip().lower()
+        if not key:
+            logger.warning("Dropping recipient %r with no email address", agent.agent_name)
+            continue
+        if key in seen:
+            logger.warning("Dropping duplicate recipient %s (%s) — already sending to it once",
+                           agent.email, agent.agent_name)
+            continue
+        seen.add(key)
+        unique.append(agent)
+    return unique
 
 
 def send_rfqs(
@@ -220,6 +296,8 @@ def send_rfqs(
     edited_body: str = "",
 ) -> dict[str, Any]:
     """Draft, send, and record one RFQ per agent."""
+    # Before the empty check, so a list of nothing but blanks is refused, not sent.
+    agents = _dedupe_recipients(agents)
     if not agents:
         raise RfqError("Select at least one agent")
     if not shipment.get("origin") or not shipment.get("destination"):
@@ -252,6 +330,10 @@ def send_rfqs(
         }
         for e in sendable
     ]
+    # Reserve every row before the first mail leaves. Raises on failure, which
+    # aborts the send — see _reserve_jobs.
+    _reserve_jobs(sendable, shipment, customer, customer_email_id, thread_id)
+
     try:
         results = send_rfq_emails_batch(to_send)
     except Exception as exc:
@@ -262,10 +344,8 @@ def send_rfqs(
     jobs = []
     for e in entries:
         # Drafting failed: nothing was addressed and nothing was sent, so there
-        # is no reference in anyone's hands and no row to write.
-        status = e["error"] or _record_job(
-            e, shipment, customer, customer_email_id, thread_id
-        )
+        # is no reference in anyone's hands and no row was reserved.
+        status = e["error"] or _record_outcome(e)
         jobs.append({
             "reference": e["reference"], "agent_name": e["agent_name"],
             "email": e["email"], "status": status,
@@ -289,7 +369,7 @@ def approve(reference: str) -> dict[str, Any]:
     marked the job awarded, told the operator it was awarded, and left the agent
     who won it never informed. `send_rfq_email` returns `{"status": "failed"}`
     rather than raising, so the ordinary failure did not even reach the handler.
-    This is the same defect `_record_job` above was fixed for, one function
+    This is the same defect `_record_outcome` above was fixed for, one function
     later, on the path that commits the desk to a vendor.
 
     A failure raises instead of recording a distinct status, for two reasons.

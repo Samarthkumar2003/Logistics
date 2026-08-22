@@ -43,7 +43,9 @@ interface RequestData {
   jobs: Job[];
   replies: Reply[];
   agents_contacted: string[];
-  counts: { agents: number; replies: number };
+  // `agents` is how many were contacted, `agents_replied` how many came back,
+  // `replies` how many messages arrived — the last is larger on any follow-up.
+  counts: { agents: number; replies: number; agents_replied: number };
 }
 
 function fmt(iso?: string): string {
@@ -229,6 +231,10 @@ export default function CustomerRequestPage() {
           {/* Summary */}
           <div style={{ display: 'flex', gap: 24, margin: '4px 4px 18px', fontSize: 13 }}>
             <span><strong style={{ color: '#a78bfa' }}>{data.counts.agents}</strong> agents contacted</span>
+            {/* Agents first, messages second. An agent who sends a rate and then a
+                correction is one response, so "2 replies" alone overstated how
+                many quotes there are to compare. */}
+            <span><strong style={{ color: '#34d399' }}>{data.counts.agents_replied}</strong> agents replied</span>
             <span><strong style={{ color: '#34d399' }}>{data.counts.replies}</strong> replies received</span>
             <span><strong style={{ color: '#fbbf24' }}>{awaiting.length}</strong> awaiting reply</span>
           </div>

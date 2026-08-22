@@ -13,11 +13,27 @@ router = APIRouter(tags=["inbox"])
 
 
 @router.get("/fetch-inbox")
-def fetch_inbox(limit: int = 20, offset: int = 0, search: str = ""):
+def fetch_inbox(limit: int = 20, offset: int = 0, search: str = "", label: str = ""):
     """A page of the inbox from Supabase — no Gmail call, so ordering and
-    pagination are stable."""
+    pagination are stable.
+
+    `label` narrows the page to one classification, so a caller after customer
+    requests gets a page of customer requests and a total of how many exist.
+    Unfiltered is the whole inbox, as before.
+    """
+    if label and label not in inbox_service.LABELS:
+        # 422 rather than an empty page: an unknown label is a caller bug, and
+        # "no customer requests" is the wrong thing to tell an operator about a
+        # typo in a query string.
+        raise AppException(
+            status_code=422,
+            detail=f"Unknown label {label!r}. Expected one of: "
+                   f"{', '.join(inbox_service.LABELS)}",
+        )
     try:
-        return inbox_service.get_inbox_page(limit=limit, offset=offset, search=search)
+        return inbox_service.get_inbox_page(
+            limit=limit, offset=offset, search=search, label=label
+        )
     except Exception as e:
         logger.exception("Failed to fetch inbox: %s", e)
         raise AppException(status_code=500, detail=f"Failed to fetch inbox: {e}")

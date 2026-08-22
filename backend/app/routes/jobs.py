@@ -16,24 +16,28 @@ router = APIRouter(tags=["jobs"])
 def list_jobs():
     """Recent RFQ jobs, newest first. One row is one agent.
 
-    `reply_count` lets the dashboard show who has come back without a request
-    per card — the difference between "we asked 8 agents" and "3 answered" is
-    the number a freight desk actually watches.
+    Two reply numbers, because they answer different questions. `agents_replied`
+    is how many agents came back — the difference between "we asked 8 agents" and
+    "3 answered" is the number a freight desk watches. `reply_count` is how many
+    messages arrived, which is larger whenever an agent follows up with a
+    correction, and is not a count of responses.
     """
     try:
         jobs = job_repo.list_recent(limit=20)
-        replies = email_repo.count_replies_by_reference(
+        replies = email_repo.reply_stats_by_reference(
             [j.reference for j in jobs if j.reference]
         )
     except Exception as e:
         logger.exception("Failed to list jobs: %s", e)
         raise AppException(status_code=500, detail=f"Failed to list jobs: {e}")
 
+    _none = email_repo.ReplyStats(messages=0, agents=0)
     return [
         {
             "reference": j.reference,
             "status": j.status,
-            "reply_count": replies.get(j.reference, 0),
+            "reply_count": replies.get(j.reference, _none).messages,
+            "agents_replied": replies.get(j.reference, _none).agents,
             "agents_contacted": j.agents_contacted,
             "customer_email_id": j.customer_email_id,
             "customer_email_sender": j.customer_sender,

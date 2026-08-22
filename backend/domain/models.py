@@ -21,11 +21,26 @@ LABEL_CUSTOMER_REQUIREMENT = "customer_requirement"
 LABEL_RATE_CARD = "quotation_rate_card"
 LABEL_GENERAL = "general"
 
+# The row exists but the mail has not been handed to the provider yet. Written
+# before the send so no reference can reach a vendor without a job row already
+# committed for it — the insert used to happen afterwards, so an instant
+# auto-reply, a crash, or a unique-key collision left an RFQ in the wild with
+# nothing to attach a reply to. It is not a claim that anything was sent; a row
+# still in this state minutes later means the send died mid-flight.
+STATUS_SENDING = "sending"
+
 # Job statuses that can still receive a reply. `send_failed` is included because
 # a send failure can be ambiguous — a timeout may have delivered — so a reply is
 # proof the RFQ arrived after all, and should advance the job rather than be
 # filed against a job frozen as failed.
-OPEN_JOB_STATUSES = ("rfqs_sent", "quotes_received", "send_failed")
+#
+# `sending` is included because a reply can beat the post-send status update: the
+# vendor's auto-responder answers in under a second while this process is still
+# working through the rest of the batch. Excluding it would make
+# `mark_quotes_received` silently refuse, leaving the reply linked to a job
+# frozen at `sending` — which is the very race this two-phase write exists to
+# close.
+OPEN_JOB_STATUSES = ("rfqs_sent", "quotes_received", "send_failed", STATUS_SENDING)
 
 
 def _s(row: dict, key: str, default: str = "") -> str:
@@ -93,6 +108,17 @@ class RfqJob:
     size: str = ""
     weight_kg: Optional[float] = None
     created_at: Optional[str] = None
+    # The mail we drafted, stored when the row is reserved. A crash between
+    # reserving and sending leaves the row at `sending` with the drafted text
+    # otherwise lost to the dead process, and the retry sweep needs it to resend
+    # the same words rather than newly invented ones. Pre-redirect, so a retry
+    # applies whatever EMAIL_REDIRECT is set at retry time.
+    draft_subject: str = ""
+    draft_body: str = ""
+    # The address the RFQ was addressed to. Kept because `agents_contacted` holds
+    # a name, and a name shared by several offices cannot be resolved back to one
+    # address without guessing a branch.
+    draft_to: str = ""
 
     @classmethod
     def from_row(cls, row: dict) -> "RfqJob":
@@ -112,6 +138,9 @@ class RfqJob:
             size=_s(row, "shipment_size"),
             weight_kg=row.get("shipment_weight_kg"),
             created_at=row.get("created_at"),
+            draft_subject=_s(row, "draft_subject"),
+            draft_body=_s(row, "draft_body"),
+            draft_to=_s(row, "draft_to"),
         )
 
     @property

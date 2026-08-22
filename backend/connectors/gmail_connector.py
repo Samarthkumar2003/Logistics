@@ -19,6 +19,8 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
+from email.mime.multipart import MIMEMultipart
+from email.mime.text import MIMEText
 
 from google.auth.exceptions import RefreshError
 from google.oauth2 import service_account
@@ -111,6 +113,39 @@ def _gmail_get(path: str, params: dict | None = None) -> dict:
         raise GmailReauthRequired(REAUTH_HINT) from e
     resp.raise_for_status()
     return resp.json()
+
+
+def _gmail_post(path: str, payload: dict) -> dict:
+    """POST request to Gmail API, raises on non-2xx.
+
+    Same reauth contract as _gmail_get: a dead refresh token is a human problem,
+    not a retryable one.
+    """
+    session = _get_session()
+    try:
+        resp = session.post(f"{GMAIL_BASE}/{path}", json=payload, timeout=30)
+    except RefreshError as e:
+        logger.error(REAUTH_HINT)
+        raise GmailReauthRequired(REAUTH_HINT) from e
+    resp.raise_for_status()
+    return resp.json()
+
+
+def send_message(to_addr: str, subject: str, body: str) -> str:
+    """Send a plain-text message as the authenticated mailbox. Returns the message id.
+
+    No From header is set on purpose: Gmail stamps it with the token owner, i.e.
+    GMAIL_MAILBOX. That is the whole point of this path — SMTP sends as
+    EMAIL_ACCOUNT, a different identity from the mailbox the ingest reads, so
+    vendor replies landed where nothing was watching. Uses the gmail.send scope
+    already granted on the same refresh token as the read path.
+    """
+    msg = MIMEMultipart()
+    msg["To"] = to_addr
+    msg["Subject"] = subject
+    msg.attach(MIMEText(body, "plain"))
+    raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
+    return _gmail_post("messages/send", {"raw": raw}).get("id", "")
 
 
 def _decode_header_value(raw: str) -> str:
@@ -240,17 +275,29 @@ def fetch_full_message(msg_id: str) -> dict:
 def _collect_attachments(payload: dict) -> list[dict]:
     """Walk the MIME tree and return metadata for every real attachment part
     (anything with a filename + an attachmentId). Bytes are fetched lazily via
-    fetch_attachment(); this only returns {filename, mime_type, attachment_id, size}."""
+    fetch_attachment(); this only returns
+    {filename, mime_type, attachment_id, size_bytes, content_id}.
+
+    `content_id` is what separates a document someone attached on purpose from an
+    image embedded in the message body. Measured across the queue: every
+    deliberately attached file carries `Content-Disposition: attachment` and **no**
+    Content-ID, while every body-embedded image carries one. It costs nothing to
+    read — the headers arrive in the same `format=full` response — and 94% of the
+    parts we were downloading were embedded signature furniture.
+    """
     found: list[dict] = []
     filename = payload.get("filename") or ""
     body = payload.get("body", {})
     att_id = body.get("attachmentId")
     if filename and att_id:
+        headers = {h.get("name", "").lower(): h.get("value", "")
+                   for h in payload.get("headers", []) or []}
         found.append({
             "filename": filename,
             "mime_type": payload.get("mimeType", ""),
             "attachment_id": att_id,
             "size_bytes": body.get("size"),
+            "content_id": headers.get("content-id", ""),
         })
     for part in payload.get("parts", []) or []:
         found.extend(_collect_attachments(part))
@@ -317,16 +364,62 @@ def iter_message_id_pages(after_epoch_s: int | None = None, page_size: int = 500
             break
 
 
-def count_inbox_messages(after_epoch_s: int | None = None,
-                         before_epoch_s: int | None = None) -> int:
-    """Count INBOX messages in a time window (ids only, full pagination).
-    Used by the sync-gap audit to compare Gmail's truth against the DB."""
-    parts = []
-    if after_epoch_s is not None:
-        parts.append(f"after:{after_epoch_s}")
-    if before_epoch_s is not None:
-        parts.append(f"before:{before_epoch_s}")
-    query = " ".join(parts) or None
+def sent_contains(phrase: str, after_epoch_s: int, before_epoch_s: int) -> bool:
+    """Is there a message in SENT matching `phrase` within this window?
+
+    A point lookup, deliberately unlike everything else in this module. The
+    retry sweep asks this per stuck RFQ to find out whether the mail actually
+    left, so the answer is one boolean and the cost must not scale with mailbox
+    size:
+
+      * `labelIds: SENT` — never INBOX, so this cannot perturb the scan queue.
+      * `maxResults: 1` — a hit or nothing; the id itself is not wanted.
+      * no pagination. `iter_message_id_pages` is the function that enumerated
+        25,500 ids when its `after:` filter went missing; a sweep must never
+        borrow that behaviour.
+      * `after:`/`before:` are required, not optional, for the same reason. The
+        caller knows within seconds when the mail would have been sent, so an
+        unbounded search is never the right question.
+
+    Raises on transport or auth failure rather than returning False: "no evidence
+    of a send" and "could not look" lead to opposite decisions, and a resend is
+    not something to do on a failed lookup.
+    """
+    result = _gmail_get("messages", params={
+        "labelIds": "SENT",
+        "q": f'"{phrase}" after:{after_epoch_s} before:{before_epoch_s}',
+        "maxResults": 1,
+        "fields": "messages/id",
+    })
+    return bool(result.get("messages"))
+
+
+def count_inbox_messages(after_epoch_s: int, before_epoch_s: int) -> int:
+    """Count INBOX messages in the window [after, before) — ids only, but FULL
+    pagination. Used by the sync-gap audit to compare Gmail's truth to the DB.
+
+    Both bounds are REQUIRED, and None raises rather than widening the search.
+    They used to default to None, where None meant "omit that side of the filter":
+    calling this with no arguments built no `q` at all and counted the entire
+    mailbox, 500 ids per request, with no ceiling of any kind.
+
+    That is the exact shape of the incident this codebase already paid for — a
+    lower bound that went missing turned a routine sweep into a 25,500-id
+    enumeration. It would be worse here than there: `fetch_messages_since` at
+    least stops at MAX_INCREMENTAL_FETCH, whereas a counter that only sums page
+    lengths has nothing to stop it. At 195k messages that is ~390 sequential
+    requests to produce a number nobody needed to be exact.
+
+    Both callers (the gap audit and the heal loop) always know their day window,
+    so an unbounded count is never the question being asked. Failing loudly is
+    what keeps it that way.
+    """
+    if after_epoch_s is None or before_epoch_s is None:
+        raise ValueError(
+            "count_inbox_messages requires both after_epoch_s and before_epoch_s — "
+            "an unbounded count pages the entire mailbox with no ceiling"
+        )
+    query = f"after:{after_epoch_s} before:{before_epoch_s}"
     return sum(len(page) for page in iter_message_id_pages(query=query))
 
 

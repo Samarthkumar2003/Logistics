@@ -64,6 +64,9 @@ interface AutomationStatus {
   enabled: boolean; schedule: string; next_run: string | null;
   processed_total: number; last_run: AutomationLastRun | null;
 }
+interface IngestStatus {
+  running: boolean;
+}
 interface ProcessEmailResult {
   reference: string;
   shipment: ShipmentDetails;
@@ -336,6 +339,7 @@ export default function Office() {
   const [totalEmails, setTotalEmails] = useState(0);
   const [automationStatus, setAutomationStatus] = useState<AutomationStatus | null>(null);
   const [automationRunning, setAutomationRunning] = useState(false);
+  const [ingestRunning, setIngestRunning] = useState(false);
 
   const PAGE_SIZE = 20;
   // Persists how deep the inbox was scrolled so a browser refresh restores the
@@ -389,6 +393,51 @@ export default function Office() {
       setErrorMsg(err instanceof Error ? err.message : 'Automation run failed');
     } finally {
       setAutomationRunning(false);
+    }
+  }
+
+  /** Poll until the sweep finishes, capped so a stuck run can't hang the button. */
+  async function waitForIngest(maxWaitMs = 60000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const res = await fetch(`${API_BASE}/ingest/status`);
+        if (!res.ok) return;
+        const body: IngestStatus = await res.json();
+        if (!body.running) return;
+      } catch {
+        return;  // status unreachable — stop waiting; the reload below still runs
+      }
+    }
+  }
+
+  async function refreshInbox() {
+    // "Refresh" has to mean "go and get new mail". The inbox endpoints read
+    // Supabase only, so on its own this button could never surface a message the
+    // 5-minute scheduler had not already pulled — it re-rendered the same rows.
+    setIngestRunning(true);
+    try {
+      const res = await fetch(`${API_BASE}/ingest/run-now`, { method: 'POST' });
+      // 409 = a sweep is already in flight. For this button that is success, not
+      // an error: new mail is on its way, so wait on it like our own run.
+      if (!res.ok && res.status !== 409) {
+        let detail = `Server error ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
+        throw new Error(detail);
+      }
+      // Show what is already stored first, so the list is never blank while the
+      // sweep runs, then again once it has committed its rows.
+      await loadInbox(true, undefined, undefined, true);
+      await waitForIngest();
+      await loadInbox(true, undefined, undefined, true);
+    } catch (err) {
+      // Both, or the message renders nowhere: errorMsg is only displayed under
+      // status 'error'.
+      setErrorMsg(err instanceof Error ? err.message : 'Refresh failed');
+      setStatus('error');
+    } finally {
+      setIngestRunning(false);
     }
   }
 
@@ -548,7 +597,8 @@ export default function Office() {
   function getStatusBadgeColor(jobStatus: string): string {
     switch (jobStatus) {
       case 'rfqs_sent': return '#3b82f6';
-      case 'awaiting_quotes': return '#fbbf24';
+      // Row written before the mail leaves; in flight, not yet delivered.
+      case 'sending': return '#fbbf24';
       case 'quotes_received': return '#22c55e';
       case 'approved': return '#6b7280';
       // Not grey: the RFQ never left, so this job is not waiting on an agent.
@@ -648,8 +698,11 @@ export default function Office() {
         </div>
 
         <div className="sidebar-footer">
-          <button onClick={status === 'inbox' ? () => loadInbox(true, undefined, undefined, true) : handleBackToInbox}>
-            {status === 'inbox' ? 'Refresh Inbox' : 'Back to Inbox'}
+          <button onClick={status === 'inbox' ? refreshInbox : handleBackToInbox}
+            disabled={status === 'inbox' && ingestRunning}>
+            {status === 'inbox'
+              ? (ingestRunning ? 'Fetching mail...' : 'Refresh Inbox')
+              : 'Back to Inbox'}
           </button>
           <Link href="/dashboard" style={{
             display: 'block', marginTop: 8, padding: '10px',

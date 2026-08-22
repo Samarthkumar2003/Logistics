@@ -11,6 +11,10 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // tests/*.check.ts run straight through `node --experimental-strip-types`,
+    // which resolves the real file and so needs the explicit .ts extension. Safe
+    // here because noEmit is on: nothing is rewritten on the way out.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [

@@ -156,6 +156,17 @@ Bytes go to a Supabase Storage bucket (`ATTACHMENT_BUCKET`, default
 `rate-card-attachments`) keyed by UUID; the table holds metadata and the storage
 path. `GET /email-attachments/{id}` returns 5-minute signed URLs.
 
+`processing_status` is plain text with no CHECK constraint, and carries four
+values: `pending` (queued, bytes not fetched yet), `stored` (in the bucket),
+`failed` (5 attempts exhausted), and `skipped` — an embedded image under 20 kB
+that ingest decided is body furniture rather than a document, recorded so the
+email's attachment list stays honest but never downloaded. See
+[architecture](01-architecture.md#a-ingest--connectorsemail_storepy) for the tier
+rules. `skipped` rows have an empty `storage_path` and no bucket object, so
+`GET /email-attachments/{id}` excludes them: an empty path already meant "not
+downloaded yet, no URL", and a `skipped` row would have sat in that state forever
+as an attachment the operator cannot open.
+
 Nothing parses attachment *contents*, and nothing needs to: the operator opens
 the PDF or spreadsheet themselves from the request page.
 `scripts/measure_attachment_quotes.py` still measures how often rate cards
