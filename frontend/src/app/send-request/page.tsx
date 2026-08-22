@@ -7,8 +7,9 @@ import {
   splitManualTokens, tokenizeEmails,
 } from './manualRecipients';
 import {
-  CONTAINER_OPTIONS, ContainerSelection, NO_CONTAINERS, containerSizeText,
-  containerSummary, hasContainers, setManualText, toggleContainer, toggleManual,
+  CONTAINER_OPTIONS, ContainerSelection, MAX_QUANTITY, MIN_QUANTITY, NO_CONTAINERS,
+  containerSizeText, containerSummary, hasContainers, quantityOf, setManualText,
+  setQuantity, toggleContainer, toggleManual,
 } from './containerSize';
 
 const API_BASE = 'http://localhost:8001';
@@ -160,20 +161,44 @@ function ContainerMultiSelect({ selection, onChange }: {
           position: 'absolute', zIndex: 10, top: '100%', left: 0, right: 0, marginTop: 4,
           background: '#0d1117', border: '1px solid #3b82f6', borderRadius: 6, padding: 4,
         }}>
-          {CONTAINER_OPTIONS.map(o => (
-            <label
-              key={o}
-              style={{ ...row, background: selection.picked.includes(o) ? '#1e3a5f' : 'transparent' }}
-            >
-              <input
-                type="checkbox"
-                checked={selection.picked.includes(o)}
-                onChange={() => onChange(toggleContainer(selection, o))}
-                style={{ accentColor: '#3b82f6' }}
-              />
-              <span>{o}</span>
-            </label>
-          ))}
+          {CONTAINER_OPTIONS.map(o => {
+            const on = selection.picked.includes(o);
+            return (
+              // The count sits outside the <label> on purpose: inside it, every
+              // click that lands on the spinner would also toggle the tick.
+              <div
+                key={o}
+                style={{ ...row, background: on ? '#1e3a5f' : 'transparent', cursor: 'default' }}
+              >
+                <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, cursor: 'pointer' }}>
+                  <input
+                    type="checkbox"
+                    checked={on}
+                    onChange={() => onChange(toggleContainer(selection, o))}
+                    style={{ accentColor: '#3b82f6' }}
+                  />
+                  <span>{o}</span>
+                </label>
+                {on && (
+                  <>
+                    <span style={{ fontSize: 10, color: '#64748b' }}>QTY</span>
+                    <input
+                      type="number"
+                      min={MIN_QUANTITY}
+                      max={MAX_QUANTITY}
+                      value={quantityOf(selection, o)}
+                      onChange={e => onChange(setQuantity(selection, o, e.target.value))}
+                      // Typed and pasted values walk past min/max, so the value is
+                      // clamped again on the way out of the field.
+                      onBlur={e => onChange(setQuantity(selection, o, e.target.value))}
+                      aria-label={`Quantity of ${o}`}
+                      style={{ ...inputStyle, width: 62, padding: '4px 6px', textAlign: 'center' }}
+                    />
+                  </>
+                )}
+              </div>
+            );
+          })}
           <label style={{
             ...row, background: selection.manualOn ? '#1e3a5f' : 'transparent',
             borderTop: '1px solid #1e293b', borderRadius: 0, marginTop: 2,
