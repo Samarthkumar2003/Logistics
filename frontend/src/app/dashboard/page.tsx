@@ -2,6 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
+import { hasMore, needsClick, remaining, shouldAutoLoad } from './inboxPaging';
 import { countAgents, groupByThread } from './replyThreads';
 import './dashboard.css';
 
@@ -699,6 +700,34 @@ function SummaryBar({ emails }: { emails: Email[] }) {
   );
 }
 
+/* ─── Scroll-driven paging ─────────────────────────────────────── */
+/**
+ * A one-pixel marker at the end of a list. Reaching it is the request for more.
+ *
+ * `rootMargin` starts the fetch before the last row is actually on screen, so
+ * the rows are usually there by the time the reader gets to them. The observer is
+ * rebuilt whenever `paused` changes: a fetch that finishes while the marker is
+ * still in view produces no new intersection event, and a fresh observer fires
+ * immediately on an element already inside the viewport — which is what keeps a
+ * filtered tab pulling pages until it has something to show.
+ */
+function LoadMoreSentinel({ onReach, paused }: { onReach: () => void; paused: boolean }) {
+  const ref = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const node = ref.current;
+    if (!node || paused) return;
+    const io = new IntersectionObserver(
+      entries => { if (entries.some(e => e.isIntersecting)) onReach(); },
+      { rootMargin: '400px' },
+    );
+    io.observe(node);
+    return () => io.disconnect();
+  }, [onReach, paused]);
+
+  return <div ref={ref} style={{ height: 1 }} aria-hidden />;
+}
+
 /* ─── Main Page ───────────────────────────────────────────────── */
 export default function Dashboard() {
   const [theme, toggleTheme] = useTheme();
@@ -712,6 +741,15 @@ export default function Dashboard() {
   // the ref gives it the current depth without re-creating the interval.
   const emailOffsetRef = useRef(0);
   const [loadingMore, setLoadingMore] = useState(false);
+  // The observer fires again the moment a fetch finishes while the end of the
+  // list is still on screen, so two loads can be in flight for the same offset
+  // unless the guard is readable synchronously. State is not.
+  const loadingMoreRef = useRef(false);
+  // Pages pulled by scrolling since the last deliberate click. Bounded: the
+  // Requests and Rate Cards tabs filter the inbox client-side, so a stretch of
+  // mail with no match leaves the end of the list on screen and would otherwise
+  // walk the whole inbox — tens of thousands of rows — on one flick of the wheel.
+  const [autoPages, setAutoPages] = useState(0);
   const [jobs, setJobs] = useState<RFQJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [inboxError, setInboxError] = useState('');
@@ -724,6 +762,10 @@ export default function Dashboard() {
   const [togglingAutomation, setTogglingAutomation] = useState(false);
 
   const PAGE = 20;
+  // How many pages scrolling may pull before it asks. 12 pages is 240 emails —
+  // enough to fill any screen with matches on a normal inbox, few enough that a
+  // tab with no matches stops and says so instead of paging forever.
+  const AUTO_PAGE_LIMIT = 12;
 
   async function toggleAutomation() {
     if (automationEnabled === null) return;
@@ -786,6 +828,13 @@ export default function Dashboard() {
           return dedupe([...newOnes, ...updated]);
         });
         setEmailTotal(d.total ?? 0);
+        // The first page is now on screen, so paging starts after it. Without
+        // this the first scroll-load re-fetched offset 0 and appended twenty rows
+        // dedupe immediately discarded, which read as "scrolling does nothing".
+        if (emailOffsetRef.current < PAGE) {
+          emailOffsetRef.current = PAGE;
+          setEmailOffset(PAGE);
+        }
       } else {
         const d = await ir.json().catch(() => ({}));
         setInboxError(d.detail ?? 'Failed to load inbox');
@@ -797,19 +846,44 @@ export default function Dashboard() {
     }
   }, []);
 
-  const loadMoreEmails = useCallback(async () => {
+  /** The next page of inbox rows. `auto` marks a load the scroll asked for, so
+   *  the cap counts only those and a click always gets its page. */
+  const loadMoreEmails = useCallback(async (auto = false) => {
+    // Reads the ref, not the state: the observer can fire twice before React has
+    // re-rendered, and two fetches at one offset means duplicated work for rows
+    // dedupe then throws away.
+    if (loadingMoreRef.current) return;
+    const offset = emailOffsetRef.current;
+    if (emailTotal > 0 && offset >= emailTotal) return;
+
+    loadingMoreRef.current = true;
     setLoadingMore(true);
+    setInboxError('');
     try {
-      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=${emailOffset}`);
-      if (ir.ok) {
-        const d = await ir.json();
-        setEmails(prev => dedupe([...prev, ...(d.emails ?? [])]));
-        setEmailOffset(prev => { const next = prev + PAGE; emailOffsetRef.current = next; return next; });
-      }
+      const ir = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE}&offset=${offset}`);
+      const d = await ir.json();
+      if (!ir.ok) throw new Error(d?.detail ?? `Server error ${ir.status}`);
+      setEmails(prev => dedupe([...prev, ...(d.emails ?? [])]));
+      // Total moves as ingest commits new mail; a stale one would stop paging
+      // early or keep asking for rows that are already all here.
+      if (typeof d.total === 'number') setEmailTotal(d.total);
+      const next = offset + PAGE;
+      emailOffsetRef.current = next;
+      setEmailOffset(next);
+      if (auto) setAutoPages(n => n + 1);
+    } catch (err: unknown) {
+      // Left on screen with a retry: scrolling must not silently stop paging and
+      // leave the list looking complete.
+      setInboxError(err instanceof Error ? err.message : 'Failed to load more emails');
     } finally {
+      loadingMoreRef.current = false;
       setLoadingMore(false);
     }
-  }, [emailOffset]);
+  }, [emailTotal]);
+
+  // Stable identity: the sentinel rebuilds its observer whenever this changes,
+  // and a new function on every render would tear the observer down mid-scroll.
+  const loadMoreOnScroll = useCallback(() => { loadMoreEmails(true); }, [loadMoreEmails]);
 
   useEffect(() => {
     fetchData();
@@ -829,8 +903,28 @@ export default function Dashboard() {
   const agentsReplied   = sentJobs.reduce((n, j) => n + (j.agents_replied ?? 0), 0);
   const agentsAwaiting  = Math.max(0, agentsContacted - agentsReplied);
 
-  function renderEmails(list: Email[], emptyMsg: string, showLoadMore = false) {
-    if (list.length === 0) return <div className="empty-state">{emptyMsg}</div>;
+  /** A paging list of emails. `paged` lists keep pulling inbox pages as the
+   *  reader reaches the end; `filtered` says the rows on screen are a subset of
+   *  what was scanned, so the footer reports both numbers. */
+  function renderEmails(
+    list: Email[], emptyMsg: string,
+    { paged = false, filtered = false }: { paged?: boolean; filtered?: boolean } = {},
+  ) {
+    const paging = {
+      offset: emailOffset, total: emailTotal, loading: loadingMore,
+      autoPages, cap: AUTO_PAGE_LIMIT, error: inboxError,
+    };
+    const more = hasMore(paging);
+    // Nothing has arrived yet. "No customer requests" would be a claim about an
+    // inbox that has not been read.
+    if (paged && emails.length === 0 && inboxLoading) {
+      return <div className="empty-state">⏳ Loading emails from inbox…</div>;
+    }
+    // An empty filtered tab still needs the sentinel: the matches may be further
+    // down the inbox, and the reader has nothing to scroll past to ask for them.
+    if (list.length === 0 && !(paged && more)) {
+      return <div className="empty-state">{emptyMsg}</div>;
+    }
     return (
       <>
         {list.map(e => (
@@ -843,18 +937,35 @@ export default function Dashboard() {
             note={e.reason}
           />
         ))}
-        {showLoadMore && emailOffset < emailTotal && (
-          <button
-            onClick={loadMoreEmails}
-            disabled={loadingMore}
-            style={{
-              width: '100%', marginTop: 12, padding: '10px 0',
-              background: 'transparent', border: '1px solid var(--input-border)',
-              borderRadius: 8, color: 'var(--muted-soft)', cursor: 'pointer', fontSize: 13,
-            }}
-          >
-            {loadingMore ? 'Loading…' : `Load more (${emailTotal - emailOffset} remaining)`}
-          </button>
+        {list.length === 0 && <div className="empty-state">{emptyMsg}</div>}
+
+        {paged && (
+          <div style={{ marginTop: 12, textAlign: 'center', fontSize: 12, color: 'var(--faint)' }}>
+            {filtered
+              ? `${list.length} shown · searched ${emails.length} of ${emailTotal} emails`
+              : `${list.length} of ${emailTotal} emails`}
+            {inboxError && (
+              <div style={{ color: 'var(--red)', marginTop: 6 }}>⚠️ {inboxError}</div>
+            )}
+            {more && loadingMore && <div style={{ marginTop: 6 }}>Loading more…</div>}
+            {/* Past the cap, or after a failure, scrolling stops asking and the
+                reader does — an automatic retry loop against a failing endpoint
+                is the one thing worse than a button. */}
+            {needsClick(paging) && (
+              <button
+                onClick={() => { setAutoPages(0); loadMoreEmails(); }}
+                style={{
+                  marginTop: 8, padding: '8px 16px', background: 'transparent',
+                  border: '1px solid var(--input-border)', borderRadius: 8,
+                  color: 'var(--muted-soft)', cursor: 'pointer', fontSize: 13,
+                }}
+              >
+                {inboxError ? 'Retry' : `Keep loading (${remaining(paging)} remaining)`}
+              </button>
+            )}
+            {!more && emailTotal > 0 && <div style={{ marginTop: 6 }}>End of inbox</div>}
+            <LoadMoreSentinel onReach={loadMoreOnScroll} paused={!shouldAutoLoad(paging)} />
+          </div>
         )}
       </>
     );
@@ -967,7 +1078,7 @@ export default function Dashboard() {
                     ? <div className="empty-state">⏳ Loading emails from inbox…</div>
                     : inboxError && emails.length === 0
                       ? <div className="empty-state" style={{color:'var(--red)'}}>⚠️ {inboxError}</div>
-                      : <div className="email-list">{renderEmails(emails, 'No emails in inbox.', true)}</div>
+                      : <div className="email-list">{renderEmails(emails, 'No emails in inbox.', { paged: true })}</div>
                   }
                 </div>
               )}
@@ -985,7 +1096,14 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <div className="email-list">
-                    {renderEmails(requests, 'No customer requests found in the current inbox batch.')}
+                    {/* Paged and filtered: customer requests are a label on the
+                        inbox, so reaching the end of this list pulls further
+                        inbox pages and shows whichever of them are requests. */}
+                    {renderEmails(
+                      requests,
+                      'No customer requests in the emails searched so far.',
+                      { paged: true, filtered: true },
+                    )}
                   </div>
                 </div>
               )}
@@ -1002,7 +1120,11 @@ export default function Dashboard() {
                     </div>
                   </div>
                   <div className="email-list">
-                    {renderEmails(rateCards, 'No rate cards found yet. They appear here once agents reply to your RFQs.')}
+                    {renderEmails(
+                      rateCards,
+                      'No rate cards in the emails searched so far. They appear here once agents reply to your RFQs.',
+                      { paged: true, filtered: true },
+                    )}
                   </div>
                 </div>
               )}
