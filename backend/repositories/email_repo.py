@@ -26,8 +26,16 @@ _LIST_COLUMNS = (
 )
 
 
-def list_inbox(limit: int, offset: int, search: str = "") -> tuple[list[Email], int]:
-    """A page of the inbox, newest first, with the total for pagination."""
+def list_inbox(limit: int, offset: int, search: str = "",
+               label: str = "") -> tuple[list[Email], int]:
+    """A page of the inbox, newest first, with the total for pagination.
+
+    `label` filters in the database instead of the browser. It has to: customer
+    requests are ~4% of stored mail, so a page of twenty inbox rows held about one
+    of them and the dashboard's Customer Requests tab was showing whatever
+    happened to be in the rows already fetched. With the filter, a page of fifteen
+    is fifteen requests and `count` is how many exist, not how many arrived.
+    """
     query = (
         get_db().table("emails")
         .select(_LIST_COLUMNS, count="exact")
@@ -35,8 +43,37 @@ def list_inbox(limit: int, offset: int, search: str = "") -> tuple[list[Email], 
     )
     if search:
         query = query.ilike("subject", f"%{search}%")
+    if label == "pending":
+        # `pending` is not a stored classification: it is what the view shows for
+        # an email whose classification never completed. See
+        # inbox_service._effective_label.
+        query = query.eq("classification_status", "pending")
+    elif label:
+        query = query.eq("classification", label)
     result = query.range(offset, offset + limit - 1).execute()
     return [Email.from_row(r) for r in (result.data or [])], (result.count or 0)
+
+
+def count_displayed_label(label: str, search: str = "") -> int:
+    """How many emails the inbox would *display* under this label.
+
+    The label a row shows is the cached one when there is one (see
+    `inbox_service._effective_label`), so the cache is the table to count — the
+    stored `emails.classification` overstates customer requests by the relabels
+    that only ever reached the cache. Two cases can't be counted there and fall
+    back to the stored column: a subject search, because the cache holds no
+    subject, and `pending`, which is a status rather than a cached label.
+    """
+    if label and label != "pending" and not search:
+        try:
+            return (
+                get_db().table("email_classifications").select("email_id", count="exact")
+                .eq("label", label).limit(1).execute().count or 0
+            )
+        except Exception as e:
+            logger.warning("Cached label count failed for %s: %s", label, e)
+    _, total = list_inbox(limit=1, offset=0, search=search, label=label)
+    return total
 
 
 def get_body(provider_msg_id: str) -> Optional[str]:
