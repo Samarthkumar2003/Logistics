@@ -187,5 +187,15 @@ def get_customer_request(customer_email_id: str) -> Optional[dict[str, Any]]:
         ],
         "replies": replies,
         "agents_contacted": sorted({a for j in jobs for a in j.agents_contacted}),
-        "counts": {"agents": len(jobs), "replies": len(replies)},
+        "counts": {
+            "agents": len(jobs),
+            "replies": len(replies),
+            # Distinct mailboxes that answered, not messages. Two replies from one
+            # agent is one response; counting messages here would say the enquiry
+            # has two quotes to compare when it has one.
+            "agents_replied": len({
+                addr for r in replies
+                if (addr := email_repo.sender_address(r["sender"]))
+            }),
+        },
     }

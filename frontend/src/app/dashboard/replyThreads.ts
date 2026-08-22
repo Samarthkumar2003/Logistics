@@ -17,6 +17,37 @@ export interface ThreadMessage {
 }
 
 /**
+ * The bare address out of a `From` header, lowercased — identity for counting
+ * who replied.
+ *
+ * `Dhaval Shah <ops@carrier.example>` and `ops@carrier.example` are one agent. A
+ * display name that changes between replies (signature edits, a phone client)
+ * must not read as a second respondent. Mirrors `email_repo.sender_address`.
+ */
+export function senderAddress(raw: string): string {
+  const angled = raw?.match(/<([^>]+)>/);
+  return (angled ? angled[1] : raw ?? '').trim().toLowerCase();
+}
+
+/**
+ * How many distinct agents are represented in these replies.
+ *
+ * Not `replies.length`. An agent who sends a rate and then a correction is one
+ * agent who came back, and two messages counted as two responses say the desk
+ * has two quotes to compare when it has one.
+ */
+export function countAgents(replies: { sender: string }[]): number {
+  const seen = new Set<string>();
+  for (const r of replies) {
+    const addr = senderAddress(r.sender);
+    // A message with no parseable sender is still a message, but there is no
+    // identity to count, so it is not an agent.
+    if (addr) seen.add(addr);
+  }
+  return seen.size;
+}
+
+/**
  * Replies split into threads, preserving the order they arrived in.
  *
  * The API returns newest first, so each group and the groups themselves come out

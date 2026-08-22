@@ -15,7 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { groupByThread } from '../src/app/dashboard/replyThreads.ts';
+import { countAgents, groupByThread, senderAddress } from '../src/app/dashboard/replyThreads.ts';
 
 const msg = (id: string, thread_id: string) => ({ id, thread_id });
 
@@ -54,6 +54,36 @@ const msg = (id: string, thread_id: string) => ({ id, thread_id });
 {
   assert.deepEqual(groupByThread([]), []);
   assert.deepEqual(groupByThread([msg('m1', 't1')]).map(g => g.length), [1]);
+}
+
+// 6. Agent identity comes from the address, never the display name.
+{
+  assert.equal(senderAddress('Dhaval Shah <ops@carrier.example>'), 'ops@carrier.example');
+  assert.equal(senderAddress('OPS@Carrier.Example'), 'ops@carrier.example');
+  assert.equal(senderAddress('"Shah, Dhaval" <ops@carrier.example>'), 'ops@carrier.example');
+  assert.equal(senderAddress(''), '');
+}
+
+// 7. THE PILL'S NUMBER: two messages from one mailbox are one agent. This is the
+// count a desk reads as "how many carriers answered", so a follow-up must not
+// inflate it — the card said "replied (2)" on an RFQ sent to a single agent.
+{
+  assert.equal(countAgents([
+    { sender: 'Samarth Bhutani <bhutani.samarth@gmail.com>' },
+    { sender: 'Samarth Bhutani <bhutani.samarth@gmail.com>' },
+  ]), 1);
+  assert.equal(countAgents([
+    { sender: 'Ops <ops@one.example>' },
+    { sender: 'ops@ONE.example' },
+  ]), 1, 'same mailbox, different display name and case');
+  assert.equal(countAgents([{ sender: 'a@one.example' }, { sender: 'b@two.example' }]), 2);
+}
+
+// 8. A message with no parseable sender is not an agent — there is nobody to
+// chase — but it must not throw either.
+{
+  assert.equal(countAgents([{ sender: '' }, { sender: 'a@one.example' }]), 1);
+  assert.equal(countAgents([]), 0);
 }
 
 console.log('replyThreads.check.ts: all checks passed');

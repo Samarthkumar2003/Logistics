@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
-import { groupByThread } from './replyThreads';
+import { countAgents, groupByThread } from './replyThreads';
 import './dashboard.css';
 
 const API_BASE = 'http://localhost:8001';
@@ -43,9 +43,11 @@ interface RFQJob {
   agents_contacted: string[];
   created_at: string;
   customer_email_id: string | null;
-  // How many agent replies are linked to this RFQ. One job is one agent, so
-  // >0 means that agent came back.
+  // Two different numbers. `agents_replied` is how many agents came back — the
+  // one a desk acts on. `reply_count` is how many messages arrived, and is
+  // larger whenever an agent follows up with a correction.
   reply_count: number;
+  agents_replied: number;
 }
 
 interface Reply {
@@ -495,9 +497,11 @@ function ShipmentCard({ job }: { job: RFQJob }) {
   const [replies, setReplies] = useState<Reply[]>([]);
   const [loadingR, setLoadingR] = useState(false);
   const [replyError, setReplyError] = useState('');
-  // The count the pill shows. Starts from /jobs, then tracks whatever the panel
-  // actually holds, so opening the panel can never disagree with the badge.
+  // The counts the pill shows: agents who answered, and messages they sent. Both
+  // start from /jobs, then track whatever the panel actually holds, so opening
+  // the panel can never disagree with the badge.
   const [replyCount, setReplyCount] = useState(job.reply_count ?? 0);
+  const [agentsReplied, setAgentsReplied] = useState(job.agents_replied ?? 0);
   const [approving, setApproving] = useState(false);
   const [approveResult, setApproveResult] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState(job.status);
@@ -523,6 +527,7 @@ function ShipmentCard({ job }: { job: RFQJob }) {
       const list: Reply[] = Array.isArray(d) ? d : [];
       setReplies(list);
       setReplyCount(list.length);
+      setAgentsReplied(countAgents(list));
     } catch (err: unknown) {
       setReplyError(err instanceof Error ? err.message : 'Failed to load replies');
     } finally {
@@ -599,10 +604,20 @@ function ShipmentCard({ job }: { job: RFQJob }) {
             fontSize: 11, fontWeight: 600, marginLeft: 4,
             color: replyCount > 0 ? 'var(--green-soft)' : 'var(--amber)',
           }}>
+            {/* Agents, not messages. `(2)` on a card whose RFQ went to one agent
+                read as two carriers answering; it was that agent writing twice. */}
             {replyCount > 0
-              ? `✓ replied${replyCount > 1 ? ` (${replyCount})` : ''}`
+              ? `✓ ${agentsReplied || 1} agent${(agentsReplied || 1) > 1 ? 's' : ''} replied`
               : '⏳ awaiting reply'}
           </span>
+          {replyCount > agentsReplied && agentsReplied > 0 && (
+            <span
+              title="The agent wrote more than once — the panel shows the latest on top"
+              style={{ fontSize: 11, color: 'var(--faint)' }}
+            >
+              · {replyCount} messages
+            </span>
+          )}
         </div>
       )}
 
@@ -807,6 +822,12 @@ export default function Dashboard() {
   // Shipments & RFQs shows only jobs we actually sent an RFQ for — i.e. at least
   // one agent was contacted. Excludes any job row that never reached a send.
   const sentJobs  = jobs.filter(j => (j.agents_contacted?.length ?? 0) > 0);
+  // Summary for the Shipments pane. One job is one agent, so an agent who has
+  // answered is a job with at least one distinct replying sender — counting
+  // messages here would report a follow-up as another agent responding.
+  const agentsContacted = sentJobs.reduce((n, j) => n + (j.agents_contacted?.length ?? 0), 0);
+  const agentsReplied   = sentJobs.reduce((n, j) => n + (j.agents_replied ?? 0), 0);
+  const agentsAwaiting  = Math.max(0, agentsContacted - agentsReplied);
 
   function renderEmails(list: Email[], emptyMsg: string, showLoadMore = false) {
     if (list.length === 0) return <div className="empty-state">{emptyMsg}</div>;
@@ -1029,6 +1050,22 @@ export default function Dashboard() {
                       })}
                     </div>
                   </div>
+                  {sentJobs.length > 0 && (
+                    /* The desk's own question: of everyone we asked, how many
+                       came back. Agents, not messages — a follow-up is not a
+                       second response. */
+                    <div style={{ fontSize: 12, color: 'var(--muted-soft)', marginBottom: 10 }}>
+                      <strong style={{ color: 'var(--green-soft)' }}>{agentsReplied}</strong>
+                      {' of '}
+                      <strong>{agentsContacted}</strong>
+                      {' agents replied'}
+                      {agentsAwaiting > 0 && (
+                        <span style={{ color: 'var(--amber)' }}>
+                          {' · '}{agentsAwaiting} still awaiting
+                        </span>
+                      )}
+                    </div>
+                  )}
                   {sentJobs.length === 0
                     ? <div className="empty-state">No RFQs sent yet. Process a customer email and send an RFQ to get started.</div>
                     : <div className="shipments-grid">

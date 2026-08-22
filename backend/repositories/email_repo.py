@@ -10,6 +10,8 @@ id spaces so corrections applied to one never reached the other.
 """
 
 import logging
+from dataclasses import dataclass
+from email.utils import parseaddr
 from typing import Optional
 
 from backend.core.config import settings
@@ -149,21 +151,48 @@ def pending_scan_ids(provider_msg_ids: list[str]) -> set[str]:
     return pending
 
 
-def count_replies_by_reference(references: list[str]) -> dict[str, int]:
-    """How many agent replies are linked to each of these RFQs.
+def sender_address(raw: str) -> str:
+    """The bare address out of a `From` header, lowercased.
 
-    One query for the whole set rather than one per job — the dashboard asks
-    this for every job on screen. References with no reply are simply absent
-    from the result; callers default to 0.
+    Identity for counting *who* replied. `Dhaval Shah <ops@carrier.example>` and
+    `ops@carrier.example` are one agent; a display name that changes between
+    replies — signature edits, phone clients, a colleague's alias on the same
+    mailbox — must not read as a second respondent.
+    """
+    _, addr = parseaddr(raw or "")
+    return (addr or raw or "").strip().lower()
+
+
+@dataclass(frozen=True)
+class ReplyStats:
+    """Reply tallies for one RFQ.
+
+    Messages and agents are different numbers, and the dashboard needs both. An
+    agent who sends a rate then a correction is *one* agent who came back, so a
+    message count in the "who has replied" slot overstates the responses: two
+    stacked messages read as two carriers competing when there is only one quote.
+    """
+
+    messages: int
+    agents: int
+
+
+def reply_stats_by_reference(references: list[str]) -> dict[str, ReplyStats]:
+    """Messages and distinct replying agents per RFQ reference.
+
+    One query for the whole set rather than one per job — the dashboard asks this
+    for every job on screen. References with no reply are simply absent from the
+    result; callers default to zero.
     """
     if not references:
         return {}
-    counts: dict[str, int] = {}
+    messages: dict[str, int] = {}
+    agents: dict[str, set[str]] = {}
     for i in range(0, len(references), 100):  # stay under PostgREST IN limits
         chunk = references[i:i + 100]
         try:
             rows = (
-                get_db().table("emails").select("rfq_reference")
+                get_db().table("emails").select("rfq_reference, sender")
                 .in_("rfq_reference", chunk).execute().data or []
             )
         except Exception as e:
@@ -171,9 +200,18 @@ def count_replies_by_reference(references: list[str]) -> dict[str, int]:
             continue
         for r in rows:
             ref = r.get("rfq_reference")
-            if ref:
-                counts[ref] = counts.get(ref, 0) + 1
-    return counts
+            if not ref:
+                continue
+            messages[ref] = messages.get(ref, 0) + 1
+            addr = sender_address(r.get("sender") or "")
+            # A reply with no parseable sender still counts as a message. It is
+            # not counted as an agent, because there is no identity to count.
+            if addr:
+                agents.setdefault(ref, set()).add(addr)
+    return {
+        ref: ReplyStats(messages=n, agents=len(agents.get(ref, ())))
+        for ref, n in messages.items()
+    }
 
 
 def set_rfq_reference(provider_msg_id: str, reference: str) -> None:
