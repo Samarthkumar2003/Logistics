@@ -54,6 +54,11 @@ interface Reply {
   body: string;
   received_at: string;
   has_attachments: boolean;
+  // The Gmail thread this message belongs to, and whether it cited the RFQ
+  // reference itself. A follow-up that dropped the token is still shown — the
+  // thread places it — but it is labelled rather than passed off as attributed.
+  thread_id: string;
+  linked: boolean;
 }
 
 type Tab = 'inbox' | 'requests' | 'ratecards' | 'unlinked' | 'shipments';
@@ -402,8 +407,10 @@ function ShipmentCard({ job }: { job: RFQJob }) {
   const [open, setOpen] = useState(false);
   const [replies, setReplies] = useState<Reply[]>([]);
   const [loadingR, setLoadingR] = useState(false);
-  const [fetched, setFetched] = useState(false);
   const [replyError, setReplyError] = useState('');
+  // The count the pill shows. Starts from /jobs, then tracks whatever the panel
+  // actually holds, so opening the panel can never disagree with the badge.
+  const [replyCount, setReplyCount] = useState(job.reply_count ?? 0);
   const [approving, setApproving] = useState(false);
   const [approveResult, setApproveResult] = useState<string | null>(null);
   const [jobStatus, setJobStatus] = useState(job.status);
@@ -411,8 +418,14 @@ function ShipmentCard({ job }: { job: RFQJob }) {
   const agentName = job.agents_contacted?.[0] ?? 'this agent';
 
   async function loadReplies() {
-    if (fetched) { setOpen(o => !o); return; }
+    if (open) { setOpen(false); return; }
     setOpen(true);
+    // Always refetch on open, never serve the first load again. Replies arrive
+    // while the dashboard sits on screen — ingest every 5 min, then the scan —
+    // so a cached panel showed the state of the thread at whatever moment it was
+    // first expanded and gave no hint that a newer message existed. Collapse and
+    // re-expand is the refresh gesture; keeping the old rows visible until the
+    // new ones land means it never blanks out.
     setLoadingR(true);
     setReplyError('');
     try {
@@ -420,8 +433,9 @@ function ShipmentCard({ job }: { job: RFQJob }) {
       // A 500 returns {detail}, not an array — guard before trusting the shape.
       const d = await r.json();
       if (!r.ok) throw new Error(d?.detail ?? `Server error ${r.status}`);
-      setReplies(Array.isArray(d) ? d : []);
-      setFetched(true);
+      const list: Reply[] = Array.isArray(d) ? d : [];
+      setReplies(list);
+      setReplyCount(list.length);
     } catch (err: unknown) {
       setReplyError(err instanceof Error ? err.message : 'Failed to load replies');
     } finally {
@@ -496,10 +510,10 @@ function ShipmentCard({ job }: { job: RFQJob }) {
           ))}
           <span style={{
             fontSize: 11, fontWeight: 600, marginLeft: 4,
-            color: (job.reply_count ?? 0) > 0 ? 'var(--green-soft)' : 'var(--amber)',
+            color: replyCount > 0 ? 'var(--green-soft)' : 'var(--amber)',
           }}>
-            {(job.reply_count ?? 0) > 0
-              ? `✓ replied${job.reply_count > 1 ? ` (${job.reply_count})` : ''}`
+            {replyCount > 0
+              ? `✓ replied${replyCount > 1 ? ` (${replyCount})` : ''}`
               : '⏳ awaiting reply'}
           </span>
         </div>
@@ -531,9 +545,17 @@ function ShipmentCard({ job }: { job: RFQJob }) {
               the RFQ reference in the subject.
             </div>
           )}
-          {!loadingR && replies.length > 0 && (
+          {replies.length > 0 && (
             <div className="q-list">
-              {replies.map(r => (
+              {/* The API returns newest first, so the head of the list is the
+                  agent's latest word — say so, because a second message is
+                  usually a correction to the first. */}
+              <div style={{ fontSize: 11, color: 'var(--faint)', marginBottom: 6 }}>
+                {replies.length === 1
+                  ? '1 message in this thread'
+                  : `${replies.length} messages in this thread, newest first`}
+              </div>
+              {replies.map((r, i) => (
                 <div key={r.id} className="q-card">
                   <div className="q-top">
                     <span className="q-agent">{r.subject || '(no subject)'}</span>
@@ -543,6 +565,25 @@ function ShipmentCard({ job }: { job: RFQJob }) {
                   </div>
                   <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
                     {r.sender}{r.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
+                    {i === 0 && replies.length > 1 && (
+                      <span style={{
+                        marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10,
+                        fontWeight: 700, color: 'var(--green-soft)',
+                        border: '1px solid var(--green-soft)',
+                      }}>LATEST</span>
+                    )}
+                    {!r.linked && (
+                      // Shown for context, not attribution: same Gmail thread, but
+                      // this message did not carry the RFQ reference itself.
+                      <span
+                        title="Same thread as a linked reply, but this message did not quote the RFQ reference"
+                        style={{
+                          marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10,
+                          fontWeight: 700, color: 'var(--amber)',
+                          border: '1px solid var(--amber)',
+                        }}
+                      >THREAD ONLY</span>
+                    )}
                   </div>
                   <pre style={{
                     fontSize: 12, color: 'var(--muted-soft)', whiteSpace: 'pre-wrap',

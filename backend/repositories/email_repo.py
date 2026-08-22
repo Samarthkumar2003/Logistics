@@ -63,16 +63,45 @@ def get_by_id(provider_msg_id: str) -> Optional[Email]:
     return Email.from_row(rows[0]) if rows else None
 
 
+_REPLY_COLUMNS = ("provider_msg_id, rfq_reference, sender, subject, body, "
+                  "received_at, has_attachments, thread_id, classification")
+
+
 def list_replies_for(references: list[str]) -> list[Email]:
-    """Agent replies linked to any of these RFQ references, oldest first."""
+    """Agent replies linked to any of these RFQ references, NEWEST first.
+
+    Newest first because an agent who replies twice has revised something, and
+    the revision is the message the desk needs to read. Oldest-first buried it
+    under the version it supersedes.
+    """
     if not references:
         return []
     rows = (
         get_db().table("emails")
-        .select("provider_msg_id, rfq_reference, sender, subject, body, "
-                "received_at, has_attachments")
+        .select(_REPLY_COLUMNS)
         .in_("rfq_reference", references)
-        .order("received_at").execute().data or []
+        .order("received_at", desc=True).execute().data or []
+    )
+    return [Email.from_row(r) for r in rows]
+
+
+def list_thread_messages(thread_ids: list[str], limit: int = 50) -> list[Email]:
+    """Every stored message in these Gmail threads, newest first.
+
+    Only INBOX mail is ingested, so this is what the agents sent us — our own
+    outgoing RFQ is not in the table. Bounded, because a thread that turns into
+    an operational back-and-forth can run long and the reply panel only ever
+    shows the recent end of it.
+    """
+    thread_ids = [t for t in dict.fromkeys(thread_ids) if t]
+    if not thread_ids:
+        return []
+    rows = (
+        get_db().table("emails")
+        .select(_REPLY_COLUMNS)
+        .in_("thread_id", thread_ids)
+        .order("received_at", desc=True)
+        .limit(limit).execute().data or []
     )
     return [Email.from_row(r) for r in rows]
 

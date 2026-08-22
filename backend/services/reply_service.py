@@ -53,7 +53,7 @@ def link_reply(email: Email) -> bool:
     return True
 
 
-def _as_dict(e: Email, agent_name: str = "") -> dict[str, Any]:
+def _as_dict(e: Email, agent_name: str = "", linked: bool = True) -> dict[str, Any]:
     return {
         "id": e.id,
         "rfq_reference": e.rfq_reference,
@@ -63,11 +63,41 @@ def _as_dict(e: Email, agent_name: str = "") -> dict[str, Any]:
         "body": e.body,
         "received_at": e.received_at,
         "has_attachments": e.has_attachments,
+        "thread_id": e.thread_id,
+        # False for a message that sits in a linked reply's thread but carries no
+        # reference of its own. It is shown for context; it is not attribution.
+        "linked": linked,
     }
 
 
 def list_for_reference(reference: str) -> list[dict[str, Any]]:
-    return [_as_dict(e) for e in email_repo.list_replies_for([reference])]
+    """Everything the agent has sent on this RFQ, newest first — the linked
+    replies plus the rest of their thread.
+
+    Attribution is still reference-only: nothing here writes `rfq_reference`, and
+    a message is marked `linked: false` unless it cited the reference itself. But
+    a *reading* panel that only shows linked messages loses the follow-up. Agents
+    reply twice — a correction, an omitted surcharge, a revised validity — and the
+    second message routinely drops the token, because "Re:" chains get retyped and
+    some clients rewrite the subject. The thread id comes from Gmail and is not a
+    guess, so widening the view to the thread costs nothing and is the difference
+    between reading the agent's latest word and reading their first one.
+    """
+    linked = email_repo.list_replies_for([reference])
+    if not linked:
+        return []
+
+    linked_ids = {e.id for e in linked}
+    siblings = [
+        e for e in email_repo.list_thread_messages([e.thread_id for e in linked])
+        # A sibling already linked to a *different* RFQ belongs on that RFQ's
+        # panel, not this one. Same thread is context; it is not a claim.
+        if e.id not in linked_ids and (e.rfq_reference or reference) == reference
+    ]
+
+    combined = [_as_dict(e) for e in linked] + [_as_dict(e, linked=False) for e in siblings]
+    combined.sort(key=lambda r: r.get("received_at") or "", reverse=True)
+    return combined
 
 
 def _unlinked_reason(cited: Optional[str], job_exists: bool, queued: bool) -> str:
