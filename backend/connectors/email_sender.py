@@ -11,10 +11,12 @@ Sends RFQ emails. EMAIL_PROVIDER picks the path:
       ingests and the RFQ thread dead-ends.
 """
 
+import base64
 import os
 import ssl
 import smtplib
 import logging
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from typing import Optional
@@ -49,13 +51,13 @@ def _apply_redirect(to_addr: str, subject: str) -> tuple[str, str]:
     return EMAIL_REDIRECT, f"[TEST → {to_addr}] {subject}"
 
 
-def _send_via_gmail_api(to_addr: str, subject: str, body: str) -> dict:
+def _send_via_gmail_api(to_addr: str, subject: str, body: str, attachments: Optional[list[dict]] = None) -> dict:
     """Send as GMAIL_MAILBOX over the Gmail API. Same status dict as SMTP."""
     from backend.connectors.gmail_connector import send_message
 
     actual_to, actual_subject = _apply_redirect(to_addr, subject)
     try:
-        msg_id = send_message(to_addr=actual_to, subject=actual_subject, body=body)
+        msg_id = send_message(to_addr=actual_to, subject=actual_subject, body=body, attachments=attachments)
         logger.info("Email sent via Gmail API as %s to %s (id=%s)",
                     GMAIL_MAILBOX or "authenticated mailbox", actual_to, msg_id)
         return {"status": "sent", "to": to_addr}
@@ -65,7 +67,7 @@ def _send_via_gmail_api(to_addr: str, subject: str, body: str) -> dict:
         return {"status": "failed", "to": to_addr, "error": error_msg}
 
 
-def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
+def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[list[dict]] = None) -> dict:
     """Send a single RFQ email and return a status dict.
 
     Parameters
@@ -76,6 +78,8 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         Email subject line.
     body : str
         Plain-text email body.
+    attachments : list[dict], optional
+        Each dict: {"filename": str, "content_type": str, "data_base64": str}.
 
     Returns
     -------
@@ -85,10 +89,10 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
     """
     if EMAIL_PROVIDER == "outlook":
         from backend.connectors.outlook_sender import send_rfq_email as _outlook_send
-        return _outlook_send(to_addr=to_addr, subject=subject, body=body)
+        return _outlook_send(to_addr=to_addr, subject=subject, body=body, attachments=attachments)
 
     if EMAIL_PROVIDER in GMAIL_API_PROVIDERS:
-        return _send_via_gmail_api(to_addr=to_addr, subject=subject, body=body)
+        return _send_via_gmail_api(to_addr=to_addr, subject=subject, body=body, attachments=attachments)
 
     if not EMAIL_ACCOUNT or not EMAIL_PASSWORD:
         error_msg = "EMAIL_ACCOUNT or EMAIL_PASSWORD not set in environment"
@@ -102,6 +106,13 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
     msg["To"] = actual_to
     msg["Subject"] = actual_subject
     msg.attach(MIMEText(body, "plain"))
+    for att in (attachments or []):
+        try:
+            part = MIMEApplication(base64.b64decode(att["data_base64"]), Name=att.get("filename", "attachment"))
+            part["Content-Disposition"] = f'attachment; filename="{att.get("filename", "attachment")}"'
+            msg.attach(part)
+        except Exception:
+            logger.exception("Skipping malformed attachment %r", att.get("filename"))
 
     try:
         context = ssl.create_default_context()
@@ -205,8 +216,9 @@ def send_rfq_emails_batch(drafts: list[dict]) -> list[dict]:
 
         subject = draft.get("subject", "")
         body = draft.get("body", "")
+        attachments = draft.get("attachments") or None
 
-        result = send_rfq_email(to_addr=vendor_email, subject=subject, body=body)
+        result = send_rfq_email(to_addr=vendor_email, subject=subject, body=body, attachments=attachments)
         result["vendor_name"] = vendor_name
         results.append(result)
 

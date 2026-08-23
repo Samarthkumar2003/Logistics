@@ -19,6 +19,7 @@ import logging
 import os
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
+from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 
@@ -131,7 +132,7 @@ def _gmail_post(path: str, payload: dict) -> dict:
     return resp.json()
 
 
-def send_message(to_addr: str, subject: str, body: str) -> str:
+def send_message(to_addr: str, subject: str, body: str, attachments: list[dict] | None = None) -> str:
     """Send a plain-text message as the authenticated mailbox. Returns the message id.
 
     No From header is set on purpose: Gmail stamps it with the token owner, i.e.
@@ -139,11 +140,20 @@ def send_message(to_addr: str, subject: str, body: str) -> str:
     EMAIL_ACCOUNT, a different identity from the mailbox the ingest reads, so
     vendor replies landed where nothing was watching. Uses the gmail.send scope
     already granted on the same refresh token as the read path.
+
+    attachments : each dict {"filename": str, "content_type": str, "data_base64": str}.
     """
     msg = MIMEMultipart()
     msg["To"] = to_addr
     msg["Subject"] = subject
     msg.attach(MIMEText(body, "plain"))
+    for att in (attachments or []):
+        try:
+            part = MIMEApplication(base64.b64decode(att["data_base64"]), Name=att.get("filename", "attachment"))
+            part["Content-Disposition"] = f'attachment; filename="{att.get("filename", "attachment")}"'
+            msg.attach(part)
+        except Exception:
+            logger.exception("Skipping malformed attachment %r", att.get("filename"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
     return _gmail_post("messages/send", {"raw": raw}).get("id", "")
 

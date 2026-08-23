@@ -294,6 +294,7 @@ def send_rfqs(
     customer: dict[str, str],
     edited_subject: str = "",
     edited_body: str = "",
+    attachments: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
     """Draft, send, and record one RFQ per agent."""
     # Before the empty check, so a list of nothing but blanks is refused, not sent.
@@ -327,6 +328,9 @@ def send_rfqs(
             "vendor_email": e["draft"].vendor_email or e["email"],
             "subject": e["draft"].subject,
             "body": e["draft"].body,
+            # Same files to every agent — one enquiry, one set of supporting
+            # documents, not chosen per recipient.
+            "attachments": attachments or [],
         }
         for e in sendable
     ]

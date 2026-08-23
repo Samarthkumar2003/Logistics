@@ -30,6 +30,14 @@ class SelectedAgent(BaseModel):
     email: str
 
 
+class AttachmentInput(BaseModel):
+    filename: str
+    content_type: str = "application/octet-stream"
+    # Raw file bytes, base64-encoded — same encoding the browser's FileReader
+    # produces, so the frontend needs no extra transform.
+    data_base64: str
+
+
 class PreviewRFQRequest(BaseModel):
     origin_port: str
     destination_port: str
@@ -58,6 +66,8 @@ class SendRFQRequest(BaseModel):
     # sent THIS text verbatim; only the reference in the subject differs.
     edited_subject: Optional[str] = None
     edited_body: Optional[str] = None
+    # Same files go to every selected agent.
+    attachments: List[AttachmentInput] = []
 
 
 def _shipment(payload) -> dict:
@@ -111,10 +121,26 @@ def preview_rfq(payload: PreviewRFQRequest):
         raise AppException(status_code=500, detail=f"Draft generation failed: {e}")
 
 
+# Gmail's messages.send accepts a base64 JSON body up to ~35MB; Graph's plain
+# sendMail (no upload session) caps attachments around 3MB each / a few MB
+# total. Capping here keeps the failure a clear 413 instead of a provider
+# rejection an agent never sees explained.
+MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024
+
+
 @router.post("/send-rfq")
 def send_rfq(payload: SendRFQRequest):
     """Send one RFQ per selected agent, each with its own reference."""
     agents = [rfq_service.SelectedAgent(a.agent_name, a.email) for a in payload.agents]
+
+    total_bytes = sum(len(a.data_base64) for a in payload.attachments) * 3 // 4
+    if total_bytes > MAX_ATTACHMENT_TOTAL_BYTES:
+        raise AppException(
+            status_code=413,
+            detail=f"Attachments total {total_bytes // 1024}KB, over the "
+                   f"{MAX_ATTACHMENT_TOTAL_BYTES // 1024 // 1024}MB limit",
+        )
+
     try:
         return rfq_service.send_rfqs(
             shipment=_shipment(payload),
@@ -127,6 +153,7 @@ def send_rfq(payload: SendRFQRequest):
             },
             edited_subject=(payload.edited_subject or "").strip(),
             edited_body=(payload.edited_body or "").strip(),
+            attachments=[a.model_dump() for a in payload.attachments],
         )
     except rfq_service.RfqError as e:
         raise AppException(status_code=422, detail=str(e))

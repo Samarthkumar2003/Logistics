@@ -53,6 +53,36 @@ interface SendRFQResponse {
   total_sent: number;
 }
 
+interface PendingAttachment {
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  data_base64: string;
+}
+
+// Matches backend MAX_ATTACHMENT_TOTAL_BYTES (backend/app/routes/rfq.py) —
+// kept in sync by eye since the limit is enforced server-side regardless.
+const MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024;
+
+function fileToBase64(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => {
+      // "data:<mime>;base64,<data>" — only the payload after the comma.
+      const result = reader.result as string;
+      resolve(result.slice(result.indexOf(',') + 1));
+    };
+    reader.onerror = () => reject(reader.error ?? new Error('Failed to read file'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
 
 const CATEGORIES = [
   { key: 'CHA', label: 'CHA (Origin / Customs)' },
@@ -265,6 +295,37 @@ export default function SendRequestPage() {
   const [manualNameInput, setManualNameInput] = useState('');
   const [manualNote, setManualNote] = useState<ManualNote | null>(null);
 
+  // Files attached to the RFQ — same set goes to every selected agent.
+  const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
+  const [attachmentError, setAttachmentError] = useState('');
+  const attachmentsTotalBytes = attachments.reduce((n, a) => n + a.size_bytes, 0);
+
+  async function addAttachments(files: FileList | null) {
+    if (!files || files.length === 0) return;
+    setAttachmentError('');
+    const incoming = Array.from(files);
+    const incomingBytes = incoming.reduce((n, f) => n + f.size, 0);
+    if (attachmentsTotalBytes + incomingBytes > MAX_ATTACHMENT_TOTAL_BYTES) {
+      setAttachmentError(`Attachments would total ${formatBytes(attachmentsTotalBytes + incomingBytes)} — limit is ${formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)}`);
+      return;
+    }
+    try {
+      const encoded = await Promise.all(incoming.map(async f => ({
+        filename: f.name,
+        content_type: f.type || 'application/octet-stream',
+        size_bytes: f.size,
+        data_base64: await fileToBase64(f),
+      })));
+      setAttachments(prev => [...prev, ...encoded]);
+    } catch {
+      setAttachmentError('Failed to read one or more files');
+    }
+  }
+
+  function removeAttachment(filename: string) {
+    setAttachments(prev => prev.filter(a => a.filename !== filename));
+  }
+
   // Starter template built from the form, used when composing manually.
   function manualStarter() {
     const modeLabel = mode.replace('_', ' ');
@@ -472,6 +533,7 @@ export default function SendRequestPage() {
           // Send the edited draft verbatim when one has been previewed/edited.
           // Omitted otherwise, so the backend falls back to per-agent generation.
           ...(preview ? { edited_subject: editedSubject, edited_body: editedBody } : {}),
+          attachments: attachments.map(({ filename, content_type, data_base64 }) => ({ filename, content_type, data_base64 })),
         }),
       });
       if (!res.ok) {
@@ -672,6 +734,49 @@ export default function SendRequestPage() {
                         type="button"
                         onClick={() => removeManualEmail(m.email)}
                         aria-label={`Remove ${m.email}`}
+                        style={{
+                          background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer',
+                          fontSize: 14, lineHeight: 1, padding: '0 2px',
+                        }}
+                      >×</button>
+                    </span>
+                  ))}
+                </div>
+              )}
+            </div>
+
+            {/* Attachments — same files go to every selected agent */}
+            <div style={{ marginBottom: 24 }}>
+              <span style={labelStyle}>Attachments (optional)</span>
+              <label style={{
+                display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
+                padding: '14px', border: '1px dashed #334155', borderRadius: 6,
+                cursor: 'pointer', color: '#64748b', fontSize: 12,
+              }}>
+                📎 Click to attach PDF, photos, CSV, etc. — {formatBytes(attachmentsTotalBytes)} of {formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)} used
+                <input
+                  type="file"
+                  multiple
+                  onChange={e => { addAttachments(e.target.files); e.target.value = ''; }}
+                  style={{ display: 'none' }}
+                />
+              </label>
+              {attachmentError && (
+                <div style={{ marginTop: 8, fontSize: 11, color: '#f87171' }}>{attachmentError}</div>
+              )}
+              {attachments.length > 0 && (
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+                  {attachments.map(a => (
+                    <span key={a.filename} style={{
+                      display: 'inline-flex', alignItems: 'center', gap: 6,
+                      background: '#1e293b', border: '1px solid #334155', borderRadius: 14,
+                      padding: '4px 6px 4px 10px', fontSize: 11, color: '#e2e8f0',
+                    }}>
+                      📄 {a.filename} <span style={{ color: '#64748b' }}>· {formatBytes(a.size_bytes)}</span>
+                      <button
+                        type="button"
+                        onClick={() => removeAttachment(a.filename)}
+                        aria-label={`Remove ${a.filename}`}
                         style={{
                           background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer',
                           fontSize: 14, lineHeight: 1, padding: '0 2px',

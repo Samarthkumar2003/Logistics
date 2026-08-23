@@ -36,7 +36,7 @@ def _mailbox() -> str:
     return OUTLOOK_MAILBOX
 
 
-def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
+def send_rfq_email(to_addr: str, subject: str, body: str, attachments: list[dict] | None = None) -> dict:
     """Send a single email via Graph API sendMail endpoint.
 
     Parameters
@@ -47,6 +47,8 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
         Email subject line.
     body : str
         Plain-text email body.
+    attachments : list[dict], optional
+        Each dict: {"filename": str, "content_type": str, "data_base64": str}.
 
     Returns
     -------
@@ -70,6 +72,15 @@ def send_rfq_email(to_addr: str, subject: str, body: str) -> dict:
             },
             "toRecipients": [
                 {"emailAddress": {"address": to_addr}}
+            ],
+            "attachments": [
+                {
+                    "@odata.type": "#microsoft.graph.fileAttachment",
+                    "name": att.get("filename", "attachment"),
+                    "contentType": att.get("content_type") or "application/octet-stream",
+                    "contentBytes": att.get("data_base64", ""),
+                }
+                for att in (attachments or [])
             ],
         },
         "saveToSentItems": True,
@@ -139,8 +150,9 @@ def send_rfq_emails_batch(drafts: list[dict]) -> list[dict]:
 
         subject = draft.get("subject", "")
         body = draft.get("body", "")
+        attachments = draft.get("attachments") or None
 
-        result = send_rfq_email(to_addr=vendor_email, subject=subject, body=body)
+        result = send_rfq_email(to_addr=vendor_email, subject=subject, body=body, attachments=attachments)
         result["vendor_name"] = vendor_name
         results.append(result)
 
