@@ -196,6 +196,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
 }) {
   const [correcting, setCorrecting] = useState(false);
   const [correctedLabel, setCorrectedLabel] = useState<string | null>(null);
+  const [approved, setApproved] = useState(false);
   const [correctionError, setCorrectionError] = useState('');
   const [saving, setSaving] = useState(false);
   const [fullBody, setFullBody] = useState<string | null>(null);
@@ -204,7 +205,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
   const [attachments, setAttachments] = useState<{ id: string; file_name: string; mime_type: string; size_bytes: number | null; url: string }[]>([]);
   const [loadingAtts, setLoadingAtts] = useState(false);
 
-  async function submitCorrection(newLabel: string) {
+  async function submitFeedback(newLabel: string, isApprove: boolean) {
     setSaving(true);
     setCorrectionError('');
     try {
@@ -231,13 +232,22 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
       }
       // Only claim success once the server agreed. This used to be
       // unconditional, so a rejected correction still rendered "✓ Corrected".
-      setCorrectedLabel(newLabel);
+      if (isApprove) setApproved(true);
+      else setCorrectedLabel(newLabel);
     } catch (err: unknown) {
-      setCorrectionError(err instanceof Error ? err.message : 'Correction failed');
+      setCorrectionError(err instanceof Error ? err.message : 'Feedback failed');
     } finally {
       setSaving(false);
       setCorrecting(false);
     }
+  }
+
+  function submitCorrection(newLabel: string) {
+    return submitFeedback(newLabel, false);
+  }
+
+  function approveLabel() {
+    return submitFeedback(email.label ?? 'unknown', true);
   }
 
   async function handleToggle() {
@@ -310,6 +320,8 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
             </span>
           ) : correctedLabel ? (
             <span style={{ fontSize: 11, color: 'var(--green-soft)' }}>✓ Corrected</span>
+          ) : approved ? (
+            <span style={{ fontSize: 11, color: 'var(--green-soft)' }}>✓ Approved</span>
           ) : correcting ? (
             <select
               autoFocus
@@ -325,12 +337,24 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
               <option value="general">📋 General</option>
             </select>
           ) : (
-            <button
-              style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--input-border)', background: 'transparent', color: 'var(--muted-soft)', cursor: 'pointer', whiteSpace: 'nowrap' }}
-              onClick={e => { e.stopPropagation(); setCorrecting(true); }}
-            >
-              Correct label
-            </button>
+            <>
+              <button
+                disabled={saving}
+                title="Confirm this label is correct"
+                style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--green-soft)', background: 'transparent', color: 'var(--green-soft)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                onClick={e => { e.stopPropagation(); approveLabel(); }}
+              >
+                ✓ Approve
+              </button>
+              <button
+                disabled={saving}
+                title="Mark this label wrong and pick the right one"
+                style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--red)', background: 'transparent', color: 'var(--red)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                onClick={e => { e.stopPropagation(); setCorrecting(true); }}
+              >
+                ✗ Disapprove
+              </button>
+            </>
           )}
         </div>
       </div>
