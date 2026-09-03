@@ -1,0 +1,36 @@
+# Secrets — these must be injected at runtime, never baked into an image layer.
+# An image layer is readable by anyone who can pull the image, and deleting a
+# file in a later layer does not remove it from the earlier one.
+.env
+.env.*
+!.env.example
+service_account.json
+*.pem
+*.key
+
+# Not needed at runtime
+frontend/
+Documentation/
+sql/
+tests/
+whatsapp_exports/
+.github/
+.claude/
+*.md
+!README.md
+pytest.ini
+run_backend.sh
+requirements.txt
+
+# Local state and caches
+.git/
+.gitignore
+venv/
+.venv*/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+logs/
+automation_state.json
+build.log

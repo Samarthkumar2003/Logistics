@@ -36,14 +36,17 @@
 - Frontend: all API calls via `API_BASE`, inline styles only
 - Python: type hints on all functions, `logging` not `print`
 
-## Email Classifier Status
+## Email Classifier
+Three rules short-circuit (internal domain / job-ref subject / rate-card cover
+note); everything else is one LLM call via `llm_provider`. No training corpus,
+no local models. Swap the model with `LLM_PROVIDER=openai|gemini` in `.env`.
+
 ```bash
-curl http://localhost:8001/classifier-status
+# labels for the current inbox page
+curl "http://localhost:8001/fetch-inbox?limit=20" | python -m json.tool
 ```
-- Tier 1 (rules): always active
-- Tier 2 (fine-tuned): run `python build_training_data.py` + `python train_classifier.py`
-- Tier 3 (KNN): run `setup_classifier.sql` in Supabase first
-- Tier 4 (few-shot): always active
+A label of `pending` means the LLM call failed and the 15-minute retry job will
+re-run it — it is not a verdict.
 
 ## Useful Paths
 - Commands: `~/.claude/commands/`

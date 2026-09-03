@@ -22,11 +22,9 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write service_account.json
-        env:
-          SA_JSON: ${{ secrets.SERVICE_ACCOUNT_JSON }}
-        run: python -c "import os; open('service_account.json','w').write(os.environ['SA_JSON'])"
-
+      # No mailbox credentials: the report reads the emails table, which the
+      # ingest job has already populated and labelled. Nothing here touches
+      # Gmail, so there is no service account and no domain-wide delegation.
       - name: Run daily report
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
@@ -36,7 +34,5 @@ jobs:
           EMAIL_PASSWORD: ${{ secrets.EMAIL_PASSWORD }}
           SMTP_SERVER: smtp.gmail.com
           SMTP_PORT: "587"
-          EMAIL_PROVIDER: gmail_workspace
-          GMAIL_MAILBOX: ${{ secrets.GMAIL_MAILBOX }}
           REPORT_RECIPIENT: ${{ secrets.REPORT_RECIPIENT }}
-        run: python daily_report.py
+        run: python -m backend.app.daily_report

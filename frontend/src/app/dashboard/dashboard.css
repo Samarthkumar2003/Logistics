@@ -2,19 +2,9 @@
 
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-:root {
-  --bg:      #0a0f1e;
-  --surface: #111827;
-  --border:  rgba(255,255,255,0.08);
-  --text:    #e2e8f0;
-  --muted:   #64748b;
-  --dim:     #374151;
-  --blue:    #3b82f6;
-  --green:   #22c55e;
-  --yellow:  #f59e0b;
-  --purple:  #a78bfa;
-  --red:     #f87171;
-}
+/* Theme tokens (--bg, --text, --blue, …) live in ../theme.css, which the root
+   layout imports so /send-request and /request/[id] get them too. They are
+   scoped to `body:has(.themed)`, and .dash-app carries that class. */
 
 /* ── Reset globals.css body constraints for dashboard ── */
 body:has(.dash-app) {
@@ -42,7 +32,7 @@ body:has(.dash-app) {
 .sidebar {
   width: 240px;
   flex-shrink: 0;
-  background: #0d1424;
+  background: var(--surface-2);
   border-right: 1px solid var(--border);
   display: flex;
   flex-direction: column;
@@ -85,12 +75,12 @@ body:has(.dash-app) {
   text-align: left;
   transition: all 0.15s;
 }
-.nav-item:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+.nav-item:hover { background: var(--overlay-2); color: var(--text); }
 
 .nav-active {
-  background: rgba(59,130,246,0.12) !important;
+  background: var(--blue-tint) !important;
   color: var(--text) !important;
-  border: 1px solid rgba(59,130,246,0.2);
+  border: 1px solid var(--blue-line);
 }
 
 .nav-icon  { font-size: 1.1rem; flex-shrink: 0; }
@@ -100,14 +90,14 @@ body:has(.dash-app) {
   font-weight: 700;
   padding: 2px 8px;
   border-radius: 20px;
-  background: rgba(255,255,255,0.07);
+  background: var(--overlay-2);
   color: var(--muted);
   min-width: 24px;
   text-align: center;
 }
 .nav-active .nav-badge {
-  background: rgba(59,130,246,0.3);
-  color: #93c5fd;
+  background: var(--blue-fill);
+  color: var(--nav-badge-text);
 }
 
 .sidebar-footer {
@@ -120,19 +110,30 @@ body:has(.dash-app) {
 .refresh-time { font-size: 0.7rem; color: var(--muted); text-align: center; }
 .btn-refresh {
   padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
-  background: rgba(255,255,255,0.06); color: var(--text);
+  background: var(--overlay-2); color: var(--text);
   border: 1px solid var(--border); cursor: pointer; transition: all 0.15s;
   font-family: 'Inter', sans-serif;
 }
-.btn-refresh:hover:not(:disabled) { background: rgba(255,255,255,0.1); }
+.btn-refresh:hover:not(:disabled) { background: var(--overlay-3); }
 .btn-refresh:disabled { opacity: 0.5; cursor: not-allowed; }
 .btn-office {
   padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
-  background: rgba(59,130,246,0.12); color: #93c5fd;
-  border: 1px solid rgba(59,130,246,0.25); text-decoration: none;
+  background: var(--blue-tint); color: var(--blue-text);
+  border: 1px solid var(--blue-line); text-decoration: none;
   transition: all 0.15s; text-align: center; display: block;
 }
-.btn-office:hover { background: rgba(59,130,246,0.22); }
+.btn-office:hover { background: var(--blue-tint-2); }
+
+/* ── Theme toggle ───────────────────────────────────── */
+.btn-theme {
+  display: flex; align-items: center; justify-content: center; gap: 8px;
+  padding: 8px 16px; border-radius: 8px; font-size: 0.8rem; font-weight: 600;
+  background: var(--overlay-1); color: var(--muted);
+  border: 1px solid var(--border); cursor: pointer; transition: all 0.15s;
+  font-family: 'Inter', sans-serif;
+}
+.btn-theme:hover { background: var(--overlay-3); color: var(--text); }
+.btn-theme .theme-icon { font-size: 0.95rem; line-height: 1; }
 
 /* ── Main Area ──────────────────────────────────────── */
 .main-area {
@@ -149,7 +150,7 @@ body:has(.dash-app) {
 }
 .big-spinner {
   width: 48px; height: 48px;
-  border: 3px solid rgba(59,130,246,0.2); border-top-color: var(--blue);
+  border: 3px solid var(--blue-tint-2); border-top-color: var(--blue);
   border-radius: 50%; animation: spin 0.9s linear infinite;
 }
 @keyframes spin { to { transform: rotate(360deg); } }
@@ -200,8 +201,8 @@ body:has(.dash-app) {
 
 /* ── Error Banner ───────────────────────────────────── */
 .err-banner {
-  background: rgba(248,113,113,0.12); color: var(--red);
-  border: 1px solid rgba(248,113,113,0.25);
+  background: var(--red-tint); color: var(--red);
+  border: 1px solid var(--red-line);
   padding: 5px 10px; border-radius: 8px; font-size: 0.75rem;
   text-align: center;
 }
@@ -212,9 +213,10 @@ body:has(.dash-app) {
   padding: 3px 10px; border-radius: 20px;
   font-size: 0.72rem; font-weight: 600; white-space: nowrap;
 }
-.pill-blue   { background: rgba(59,130,246,0.14);  color: #93c5fd; border: 1px solid rgba(59,130,246,0.25); }
-.pill-green  { background: rgba(34,197,94,0.12);   color: #86efac; border: 1px solid rgba(34,197,94,0.2); }
-.pill-gray   { background: rgba(255,255,255,0.06); color: var(--muted); border: 1px solid var(--border); }
+.pill-blue   { background: var(--blue-tint);   color: var(--blue-text);  border: 1px solid var(--blue-line); }
+.pill-green  { background: var(--green-tint);  color: var(--green-text); border: 1px solid var(--green-line); }
+.pill-gray   { background: var(--overlay-2);   color: var(--muted);      border: 1px solid var(--border); }
+.pill-amber  { background: var(--amber-tint);  color: var(--amber-text); border: 1px solid var(--amber-line); }
 
 /* ── Email List ─────────────────────────────────────── */
 .email-list { display: flex; flex-direction: column; gap: 10px; }
@@ -227,15 +229,15 @@ body:has(.dash-app) {
   cursor: pointer;
   transition: border-color 0.15s, background 0.15s;
 }
-.ecard:hover { border-color: rgba(255,255,255,0.16); background: #151f2e; }
-.ecard-open  { border-color: rgba(59,130,246,0.3); background: #111d30; }
+.ecard:hover { border-color: var(--border-strong); background: var(--surface-hover); }
+.ecard-open  { border-color: var(--blue-line); background: var(--surface-active); }
 
 .ecard-top {
   display: flex; align-items: center; gap: 12px; margin-bottom: 10px;
 }
 .ecard-avatar {
   width: 40px; height: 40px; border-radius: 50%;
-  background: rgba(99,102,241,0.2); color: #a5b4fc;
+  background: var(--indigo-tint-2); color: var(--indigo-text);
   font-size: 1rem; font-weight: 700;
   display: flex; align-items: center; justify-content: center;
   flex-shrink: 0;
@@ -246,16 +248,16 @@ body:has(.dash-app) {
 .ecard-right  { flex-shrink: 0; }
 
 .ecard-subject {
-  font-size: 0.9rem; font-weight: 500; color: #cbd5e1;
+  font-size: 0.9rem; font-weight: 500; color: var(--text-soft);
   padding-left: 52px;
 }
 
 .ecard-body { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
 .ecard-pre {
   font-family: 'Inter', sans-serif;
-  font-size: 0.82rem; color: #94a3b8;
+  font-size: 0.82rem; color: var(--muted-soft);
   white-space: pre-wrap; line-height: 1.65;
-  background: rgba(0,0,0,0.25); border-radius: 10px;
+  background: var(--sunken); border-radius: 10px;
   padding: 14px 16px;
 }
 
@@ -275,14 +277,14 @@ body:has(.dash-app) {
   display: flex; flex-direction: column; gap: 10px;
   transition: box-shadow 0.15s;
 }
-.scard:hover { box-shadow: 0 4px 24px rgba(0,0,0,0.3); }
+.scard:hover { box-shadow: 0 4px 24px var(--shadow); }
 
 .scard-hdr {
   display: flex; align-items: center; justify-content: space-between; gap: 10px;
 }
 .scard-ref {
   font-size: 0.72rem; font-family: monospace;
-  color: #818cf8; background: rgba(99,102,241,0.1);
+  color: var(--indigo); background: var(--indigo-tint);
   padding: 2px 8px; border-radius: 6px;
 }
 .scard-status-pill {
@@ -300,7 +302,7 @@ body:has(.dash-app) {
 .scard-chips { display: flex; flex-wrap: wrap; gap: 6px; }
 .chip {
   font-size: 0.73rem; padding: 4px 10px; border-radius: 8px;
-  background: rgba(255,255,255,0.06); color: #94a3b8;
+  background: var(--overlay-2); color: var(--muted-soft);
   border: 1px solid var(--border);
 }
 
@@ -314,8 +316,8 @@ body:has(.dash-app) {
 .scard-agents { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; }
 .agent-pill {
   font-size: 0.72rem; padding: 3px 10px; border-radius: 20px;
-  background: rgba(167,139,250,0.1); color: var(--purple);
-  border: 1px solid rgba(167,139,250,0.2);
+  background: var(--purple-tint); color: var(--purple);
+  border: 1px solid var(--purple-line);
 }
 
 .scard-status-desc { font-size: 0.77rem; color: var(--dim); }
@@ -325,25 +327,25 @@ body:has(.dash-app) {
   margin-top: 4px;
   width: 100%; padding: 9px;
   border-radius: 10px; border: 1px solid var(--border);
-  background: rgba(255,255,255,0.04); color: #64748b;
+  background: var(--overlay-1); color: var(--muted);
   font-size: 0.8rem; font-weight: 600; cursor: pointer;
   font-family: 'Inter', sans-serif;
   transition: all 0.15s;
 }
-.scard-quotes-btn:hover { background: rgba(59,130,246,0.1); color: #93c5fd; border-color: rgba(59,130,246,0.25); }
+.scard-quotes-btn:hover { background: var(--blue-tint); color: var(--blue-text); border-color: var(--blue-line); }
 
 /* ── Quotes panel ───────────────────────────────────── */
 .scard-quotes { margin-top: 4px; }
 .q-loading { font-size: 0.8rem; color: var(--muted); padding: 12px; text-align: center; }
-.q-empty   { font-size: 0.8rem; color: var(--dim); padding: 16px; text-align: center; font-style: italic; background: rgba(0,0,0,0.15); border-radius: 10px; }
+.q-empty   { font-size: 0.8rem; color: var(--dim); padding: 16px; text-align: center; font-style: italic; background: var(--sunken-soft); border-radius: 10px; }
 .q-list { display: flex; flex-direction: column; gap: 8px; }
 
 .q-card {
-  background: rgba(0,0,0,0.2);
+  background: var(--sunken-soft);
   border: 1px solid var(--border);
   border-radius: 12px; padding: 14px 16px;
 }
-.q-selected { border-color: rgba(34,197,94,0.3); background: rgba(34,197,94,0.05); }
+.q-selected { border-color: var(--green-line-2); background: var(--green-tint-soft); }
 
 .q-top { display: flex; align-items: center; justify-content: space-between; margin-bottom: 6px; }
 .q-agent  { font-size: 0.85rem; font-weight: 700; }
@@ -355,7 +357,7 @@ body:has(.dash-app) {
 }
 .q-label-tag {
   font-size: 0.68rem; font-weight: 600; padding: 2px 8px; border-radius: 6px;
-  background: rgba(255,255,255,0.08); color: var(--muted);
+  background: var(--overlay-2); color: var(--muted);
 }
 
 .q-meta {
@@ -386,4 +388,5 @@ body:has(.dash-app) {
   .nav-badge { display: none; }
   .sum-val { font-size: 1.4rem; }
   .sum-item { padding: 10px 14px; }
+  .btn-theme .theme-label { display: none; }
 }

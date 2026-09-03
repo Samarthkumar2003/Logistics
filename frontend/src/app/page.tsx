@@ -2,8 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-
-const API_BASE = 'http://localhost:8001';
+import { apiFetch } from '@/lib/api';
 
 const DESKS = {
   intake:  { left: 90,  top: 265 },
@@ -20,7 +19,32 @@ const COLORS: Record<string, { hair: string; shirt: string; pants: string; skin:
 };
 
 
-interface InboxEmail { id: string; sender: string; subject: string; body: string; label?: string; label_confidence?: number; label_method?: string; }
+interface InboxEmail { id: string; sender: string; subject: string; body: string; label?: string; label_confidence?: number; label_method?: string; received_at?: string; }
+
+function formatReceived(iso?: string): string {
+  if (!iso) return '';
+  const d = new Date(iso);
+  if (isNaN(d.getTime())) return '';
+  return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
+}
+
+/* Label badge styling, keyed by label.
+ *
+ * `pending` matters: it means the classifier never managed to label the email,
+ * not that the email is unremarkable. It used to fall through to the `general`
+ * branch of a chain of ternaries here, which is exactly the mislabel the
+ * pending state exists to prevent — an unclassified enquiry that looks like a
+ * confident "general" is an RFQ nobody sends and nobody notices. */
+const LABEL_STYLE: Record<string, { bg: string; fg: string; border: string; text: string }> = {
+  customer_requirement: { bg: '#1e3a5f', fg: '#60a5fa', border: '#3b82f6', text: '📦 Customer Req' },
+  quotation_rate_card:  { bg: '#1a3a1a', fg: '#4ade80', border: '#22c55e', text: '💰 Rate Card' },
+  pending:              { bg: '#3a2a0a', fg: '#fbbf24', border: '#f59e0b', text: '⏳ Pending' },
+  general:              { bg: '#2a1a3a', fg: '#a78bfa', border: '#7c3aed', text: '📋 General' },
+};
+
+function labelStyle(label?: string) {
+  return LABEL_STYLE[label ?? ''] ?? LABEL_STYLE.general;
+}
 interface ShipmentDetails { origin: string; destination: string; weight_kg: number; commodity: string; mode: string; }
 interface HistoryMatch { commodity: string; agent_used: string; rate_paid: number; transit_time_days: number; similarity: number; }
 interface DraftEmail { vendor_name: string; subject: string; body: string; vendor_email?: string; }
@@ -33,11 +57,14 @@ interface AutomationLastRun {
   run_at: string; emails_scanned: number; new_emails: number;
   customer_requirements: number; quotation_rate_cards: number;
   general: number; errors: number; duration_seconds: number;
-  customer_emails: { id: string; subject: string; sender: string; confidence: number; method: string }[];
+  customer_emails?: { id: string; subject: string; sender: string; confidence: number; method: string }[];
 }
 interface AutomationStatus {
   enabled: boolean; schedule: string; next_run: string | null;
   processed_total: number; last_run: AutomationLastRun | null;
+}
+interface IngestStatus {
+  running: boolean;
 }
 interface ProcessEmailResult {
   reference: string;
@@ -57,21 +84,6 @@ interface RFQJob {
   created_at: string;
 }
 
-interface Quotation {
-  id: number;
-  agent_name: string;
-  agent_email: string;
-  rate: number;
-  currency: string;
-  transit_time_days: number;
-  validity: string;
-  terms: string;
-  ai_assessment: string;
-  predicted_low: number;
-  predicted_high: number;
-  received_at: string;
-  is_selected: boolean;
-}
 
 
 interface StepData {
@@ -320,26 +332,47 @@ export default function Office() {
   const [processResult, setProcessResult] = useState<ProcessEmailResult | null>(null);
   const [jobs, setJobs] = useState<RFQJob[]>([]);
   const [selectedJob, setSelectedJob] = useState<RFQJob | null>(null);
-  const [quotations, setQuotations] = useState<Quotation[]>([]);
-  const [selectedAgent, setSelectedAgent] = useState<string>('');
   const [searchQuery, setSearchQuery] = useState('');
   const [hasMore, setHasMore] = useState(false);
   const [loadingMore, setLoadingMore] = useState(false);
   const [totalEmails, setTotalEmails] = useState(0);
   const [automationStatus, setAutomationStatus] = useState<AutomationStatus | null>(null);
   const [automationRunning, setAutomationRunning] = useState(false);
+  const [ingestRunning, setIngestRunning] = useState(false);
 
   const PAGE_SIZE = 20;
+  // Must match the `le=` ceiling on GET /fetch-inbox (backend/app/routes/inbox.py).
+  // A restore deeper than this asks for a page the server now refuses with a 422,
+  // which would blank the view on refresh; clamped, the user gets the newest 200
+  // back with has_more set and pages on from there.
+  const MAX_RESTORE = 200;
+  // Persists how deep the inbox was scrolled so a browser refresh restores the
+  // same emails (offset would otherwise reset to 0 and drop loaded pages).
+  const INBOX_DEPTH_KEY = 'inboxLoadedCount';
+  const INBOX_SEARCH_KEY = 'inboxSearch';
+
+  // Mirror of inbox for stale-closure-free reads inside async loadInbox appends
+  const inboxRef = useRef<InboxEmail[]>([]);
+  useEffect(() => { inboxRef.current = inbox; }, [inbox]);
 
   // Auto-fetch inbox + automation status on load
   useEffect(() => {
-    loadInbox();
+    let savedCount = 0;
+    let savedSearch = '';
+    try {
+      savedCount = parseInt(sessionStorage.getItem(INBOX_DEPTH_KEY) || '0', 10) || 0;
+      savedSearch = sessionStorage.getItem(INBOX_SEARCH_KEY) || '';
+    } catch { /* sessionStorage unavailable — fall back to first page */ }
+    console.debug('[inbox] mount restore — savedCount', savedCount, 'savedSearch', JSON.stringify(savedSearch), '→ restore?', savedCount > PAGE_SIZE);
+    if (savedSearch) setSearchQuery(savedSearch);
+    // Restore previous depth in one request; otherwise load the first page.
+    loadInbox(true, savedSearch || undefined, savedCount > PAGE_SIZE ? savedCount : undefined);
     fetchAutomationStatus();
   }, []);
 
   async function fetchAutomationStatus() {
     try {
-      const res = await fetch(`${API_BASE}/automation/status`);
+      const res = await apiFetch(`/automation/status`);
       if (res.ok) setAutomationStatus(await res.json());
     } catch { /* non-critical */ }
   }
@@ -347,10 +380,19 @@ export default function Office() {
   async function runAutomationNow() {
     setAutomationRunning(true);
     try {
-      const res = await fetch(`${API_BASE}/automation/run-now`, { method: 'POST' });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
+      // 202 = the scan was started in the background; 409 = one is already
+      // running. Neither returns results, so poll the status endpoint instead
+      // of treating the response body as a finished run.
+      const res = await apiFetch(`/automation/run-now`, { method: 'POST' });
+      if (!res.ok) {
+        let detail = `Server error ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
+        throw new Error(detail);
+      }
+      // Give the scan a moment to record its first results, then refresh.
+      await new Promise(r => setTimeout(r, 3000));
       await fetchAutomationStatus();
-      loadInbox(true);
+      loadInbox(true, undefined, undefined, true);  // preserve scrolled depth
     } catch (err) {
       setErrorMsg(err instanceof Error ? err.message : 'Automation run failed');
     } finally {
@@ -358,9 +400,54 @@ export default function Office() {
     }
   }
 
+  /** Poll until the sweep finishes, capped so a stuck run can't hang the button. */
+  async function waitForIngest(maxWaitMs = 60000) {
+    const deadline = Date.now() + maxWaitMs;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 2000));
+      try {
+        const res = await apiFetch(`/ingest/status`);
+        if (!res.ok) return;
+        const body: IngestStatus = await res.json();
+        if (!body.running) return;
+      } catch {
+        return;  // status unreachable — stop waiting; the reload below still runs
+      }
+    }
+  }
+
+  async function refreshInbox() {
+    // "Refresh" has to mean "go and get new mail". The inbox endpoints read
+    // Supabase only, so on its own this button could never surface a message the
+    // 5-minute scheduler had not already pulled — it re-rendered the same rows.
+    setIngestRunning(true);
+    try {
+      const res = await apiFetch(`/ingest/run-now`, { method: 'POST' });
+      // 409 = a sweep is already in flight. For this button that is success, not
+      // an error: new mail is on its way, so wait on it like our own run.
+      if (!res.ok && res.status !== 409) {
+        let detail = `Server error ${res.status}`;
+        try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
+        throw new Error(detail);
+      }
+      // Show what is already stored first, so the list is never blank while the
+      // sweep runs, then again once it has committed its rows.
+      await loadInbox(true, undefined, undefined, true);
+      await waitForIngest();
+      await loadInbox(true, undefined, undefined, true);
+    } catch (err) {
+      // Both, or the message renders nowhere: errorMsg is only displayed under
+      // status 'error'.
+      setErrorMsg(err instanceof Error ? err.message : 'Refresh failed');
+      setStatus('error');
+    } finally {
+      setIngestRunning(false);
+    }
+  }
+
   async function toggleAutomation(enabled: boolean) {
     try {
-      await fetch(`${API_BASE}/automation/toggle`, {
+      await apiFetch(`/automation/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
@@ -369,28 +456,51 @@ export default function Office() {
     } catch { /* non-critical */ }
   }
 
-  async function loadInbox(reset = true, overrideSearch?: string) {
-    if (reset) {
+  async function loadInbox(reset = true, overrideSearch?: string, restoreCount?: number, preserveDepth = false) {
+    // preserveDepth: a refresh/poll that should re-fetch the SAME depth the user
+    // already scrolled to, not snap back to page 1. We derive the depth from the
+    // current list and skip the empty-list wipe so the view doesn't flash.
+    const effectiveRestore =
+      preserveDepth && inboxRef.current.length > PAGE_SIZE
+        ? inboxRef.current.length
+        : restoreCount;
+    if (reset && !preserveDepth) {
       setStatus('fetching');
       setErrorMsg('');
       setInbox([]);
     }
     try {
+      // On a reset we either restore the previous scroll depth (one big request)
+      // or load a single page. On "load more" we page from the current length.
+      const restoreDepth =
+        effectiveRestore && effectiveRestore > PAGE_SIZE
+          ? Math.min(effectiveRestore, MAX_RESTORE)
+          : PAGE_SIZE;
+      const limit = reset ? restoreDepth : PAGE_SIZE;
       const offset = reset ? 0 : inbox.length;
       const search = overrideSearch !== undefined ? overrideSearch : searchQuery;
       const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
-      const res = await fetch(`${API_BASE}/fetch-inbox?limit=${PAGE_SIZE}&offset=${offset}${searchParam}`);
+      const res = await apiFetch(`/fetch-inbox?limit=${limit}&offset=${offset}${searchParam}`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data = await res.json();
       const newEmails: InboxEmail[] = data.emails || [];
-      if (reset) {
-        setInbox(newEmails);
-      } else {
-        setInbox(prev => [...prev, ...newEmails]);
-      }
+      // Dedup by Message-ID across pages: each backend fetch dedups itself, but
+      // IMAP ordering can shift between offset calls so the same id may appear
+      // on two pages. Map keeps first occurrence, drops repeats.
+      // Use the freshest list (inboxRef) to avoid a stale-closure race on append.
+      const combined = reset ? newEmails : [...inboxRef.current, ...newEmails];
+      const merged = Array.from(new Map(combined.map(e => [e.id, e])).values());
+      setInbox(merged);
       setTotalEmails(data.total || 0);
       setHasMore(data.has_more || false);
       setStatus('inbox');
+      // Persist depth + search OUTSIDE the state updater (updaters must be pure;
+      // Strict Mode double-invokes them). This is the saved scroll depth.
+      try {
+        sessionStorage.setItem(INBOX_DEPTH_KEY, String(merged.length));
+        sessionStorage.setItem(INBOX_SEARCH_KEY, search || '');
+        console.debug('[inbox] saved depth', merged.length, 'search', JSON.stringify(search || ''));
+      } catch { /* sessionStorage unavailable — refresh will reset to page 1 */ }
     } catch (err: unknown) {
       setErrorMsg(err instanceof Error ? err.message : 'Failed to fetch inbox');
       setStatus('error');
@@ -409,48 +519,27 @@ export default function Office() {
     loadInbox(true);
   }
 
-  async function handleSelectEmail(email: InboxEmail) {
-    setSelectedEmail(email);
-    setStatus('processing');
-    setLogs([]);
-    setProcessResult(null);
-
-    try {
-      const res = await fetch(`${API_BASE}/process-email`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sender: email.sender, subject: email.subject, body: email.body }),
-      });
-      if (!res.ok) {
-        const err = await res.json();
-        throw new Error(err.detail || `Server error ${res.status}`);
-      }
-      const result = await res.json();
-
-      // Store the process-email result for the "sent" view
-      const peResult: ProcessEmailResult = {
-        reference: result.reference,
-        shipment: result.shipment,
-        agents_contacted: result.agents_contacted || [],
-        send_results: result.send_results || [],
-      };
-      setProcessResult(peResult);
-
-      // Build a ProcessResult for the animation flow
-      const animResult: ProcessResult = {
-        job_id: result.reference || result.job_id || '',
-        shipment: result.shipment,
-        history_matches: result.history_matches || [],
-        drafts: result.drafts || [],
-      };
-      setApiResult(animResult);
-      setStep(0);
-      setStatus('running');
-      runFlow(animResult, email);
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Processing failed');
-      setStatus('error');
+  async function openSendRequest(email: InboxEmail) {
+    // Load full body on demand (inbox list ships body: '')
+    let body = email.body;
+    if (!body) {
+      try {
+        const res = await apiFetch(`/email-body/${email.id}`);
+        if (res.ok) body = (await res.json()).body || '';
+      } catch { /* proceed with empty body — form stays blank */ }
     }
+    try {
+      sessionStorage.setItem('sendRequestEmail', JSON.stringify({
+        id: email.id, sender: email.sender, subject: email.subject, body,
+      }));
+    } catch { /* sessionStorage unavailable — form opens blank */ }
+    window.location.assign('/send-request');
+  }
+
+  async function handleSelectEmail(email: InboxEmail) {
+    // Always route to the gated Send Request flow — never auto-process/auto-send.
+    // (The old /process-email auto-send path has been removed.)
+    return openSendRequest(email);
   }
 
   function runFlow(result: ProcessResult, email: InboxEmail) {
@@ -472,7 +561,7 @@ export default function Office() {
 
   async function loadJobs() {
     try {
-      const res = await fetch(`${API_BASE}/jobs`);
+      const res = await apiFetch(`/jobs`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data: RFQJob[] = await res.json();
       setJobs(data);
@@ -485,11 +574,8 @@ export default function Office() {
 
   async function loadJobDetail(job: RFQJob) {
     setSelectedJob(job);
-    setQuotations([]);
-
-    setSelectedAgent('');
     try {
-      const res = await fetch(`${API_BASE}/jobs/${job.reference}`);
+      const res = await apiFetch(`/jobs/${job.reference}`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const detail: RFQJob = await res.json();
       setSelectedJob(detail);
@@ -500,38 +586,6 @@ export default function Office() {
     }
   }
 
-  async function checkQuotations() {
-    if (!selectedJob) return;
-    try {
-      const res = await fetch(`${API_BASE}/jobs/${selectedJob.reference}/check-quotations`, {
-        method: 'POST',
-      });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      const data = await res.json();
-      setQuotations(data.quotations || []);
-
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Failed to check quotations');
-    }
-  }
-
-  async function handleApproveQuotation() {
-    if (!selectedJob || !selectedAgent) return;
-    try {
-      const res = await fetch(`${API_BASE}/jobs/${selectedJob.reference}/approve`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ selected_agent: selectedAgent }),
-      });
-      if (!res.ok) throw new Error(`Server error ${res.status}`);
-      await res.json();
-      // Refresh job detail after approval
-      loadJobDetail(selectedJob);
-    } catch (err: unknown) {
-      setErrorMsg(err instanceof Error ? err.message : 'Approval failed');
-    }
-  }
-
   function handleBackToInbox() {
     setSelectedEmail(null);
     setApiResult(null);
@@ -539,36 +593,25 @@ export default function Office() {
     setLogs([]);
     setProcessResult(null);
     setSelectedJob(null);
-    setQuotations([]);
-
-    setSelectedAgent('');
     setSearchQuery('');
     loadInbox(true);
   }
 
   function handleBackToJobs() {
     setSelectedJob(null);
-    setQuotations([]);
-
-    setSelectedAgent('');
     loadJobs();
   }
 
   function getStatusBadgeColor(jobStatus: string): string {
     switch (jobStatus) {
       case 'rfqs_sent': return '#3b82f6';
-      case 'awaiting_quotes': return '#fbbf24';
+      // Row written before the mail leaves; in flight, not yet delivered.
+      case 'sending': return '#fbbf24';
       case 'quotes_received': return '#22c55e';
       case 'approved': return '#6b7280';
-      default: return '#6b7280';
-    }
-  }
-
-  function getAssessmentColor(assessment: string): string {
-    switch (assessment) {
-      case 'within_range': return '#22c55e';
-      case 'above_expected': return '#f59e0b';
-      case 'below_expected': return '#3b82f6';
+      // Not grey: the RFQ never left, so this job is not waiting on an agent.
+      // Sharing 'approved' grey made a failed send read as a finished one.
+      case 'send_failed': return '#dc2626';
       default: return '#6b7280';
     }
   }
@@ -638,16 +681,16 @@ export default function Office() {
                 <span style={{ color: '#4ade80' }}>💰 {automationStatus.last_run.quotation_rate_cards}</span>
                 <span style={{ color: '#94a3b8' }}>✉ {automationStatus.last_run.new_emails} new</span>
               </div>
-              {automationStatus.last_run.customer_emails.length > 0 && (
+              {(automationStatus.last_run.customer_emails?.length ?? 0) > 0 && (
                 <div style={{ marginTop: 6 }}>
                   <div style={{ color: '#93c5fd', fontSize: 10, marginBottom: 3 }}>Detected customer emails:</div>
-                  {automationStatus.last_run.customer_emails.slice(0, 3).map((e, i) => (
+                  {automationStatus.last_run.customer_emails!.slice(0, 3).map((e, i) => (
                     <div key={i} style={{ color: '#475569', fontSize: 10, marginBottom: 2, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       · {e.subject || e.sender}
                     </div>
                   ))}
-                  {automationStatus.last_run.customer_emails.length > 3 && (
-                    <div style={{ color: '#475569', fontSize: 10 }}>+{automationStatus.last_run.customer_emails.length - 3} more</div>
+                  {automationStatus.last_run.customer_emails!.length > 3 && (
+                    <div style={{ color: '#475569', fontSize: 10 }}>+{automationStatus.last_run.customer_emails!.length - 3} more</div>
                   )}
                 </div>
               )}
@@ -663,8 +706,11 @@ export default function Office() {
         </div>
 
         <div className="sidebar-footer">
-          <button onClick={status === 'inbox' ? () => loadInbox() : handleBackToInbox}>
-            {status === 'inbox' ? 'Refresh Inbox' : 'Back to Inbox'}
+          <button onClick={status === 'inbox' ? refreshInbox : handleBackToInbox}
+            disabled={status === 'inbox' && ingestRunning}>
+            {status === 'inbox'
+              ? (ingestRunning ? 'Fetching mail...' : 'Refresh Inbox')
+              : 'Back to Inbox'}
           </button>
           <Link href="/dashboard" style={{
             display: 'block', marginTop: 8, padding: '10px',
@@ -741,20 +787,19 @@ export default function Office() {
                   <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
                     <span style={{
                       fontSize: 10, fontWeight: 700, padding: '2px 7px', borderRadius: 10,
-                      background: email.label === 'customer_requirement' ? '#1e3a5f'
-                        : email.label === 'quotation_rate_card' ? '#1a3a1a' : '#2a1a3a',
-                      color: email.label === 'customer_requirement' ? '#60a5fa'
-                        : email.label === 'quotation_rate_card' ? '#4ade80' : '#a78bfa',
-                      border: `1px solid ${email.label === 'customer_requirement' ? '#3b82f6'
-                        : email.label === 'quotation_rate_card' ? '#22c55e' : '#7c3aed'}`,
+                      background: labelStyle(email.label).bg,
+                      color: labelStyle(email.label).fg,
+                      border: `1px solid ${labelStyle(email.label).border}`,
                       textTransform: 'uppercase', letterSpacing: '0.05em',
                     }}>
-                      {email.label === 'customer_requirement' ? '📦 Customer Req'
-                        : email.label === 'quotation_rate_card' ? '💰 Rate Card'
-                        : '📋 General'}
+                      {labelStyle(email.label).text}
                     </span>
                     <span style={{ fontSize: 9, color: '#475569' }}>
-                      {email.label_confidence ? `${Math.round(email.label_confidence * 100)}%` : ''} {email.label_method ? `via ${email.label_method}` : ''}
+                      {/* No confidence or method for pending — there was no
+                          successful call to attribute one to. */}
+                      {email.label === 'pending'
+                        ? 'retrying shortly'
+                        : `${email.label_confidence ? `${Math.round(email.label_confidence * 100)}%` : ''} ${email.label_method ? `via ${email.label_method}` : ''}`}
                     </span>
                     {/* Correction dropdown */}
                     <select
@@ -763,10 +808,11 @@ export default function Office() {
                       onChange={async (e) => {
                         const corrected = e.target.value;
                         if (!corrected) return;
-                        await fetch(`${API_BASE}/feedback`, {
+                        await apiFetch(`/feedback`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({
+                            email_id: email.id,
                             email_subject: email.subject,
                             email_body: email.body,
                             email_sender: email.sender,
@@ -785,14 +831,34 @@ export default function Office() {
                       <option value="general">General</option>
                     </select>
                   </div>
-                  <div style={{ cursor: 'pointer' }} onClick={() => handleSelectEmail(email)}>
-                    <div className="detail-label" style={{ fontSize: 11 }}>{email.sender}</div>
+                  <div style={{ cursor: 'pointer' }} onClick={() => email.label === 'customer_requirement' ? openSendRequest(email) : handleSelectEmail(email)}>
+                    <div style={{ display: 'flex', alignItems: 'baseline', gap: 8 }}>
+                      <div className="detail-label" style={{ fontSize: 11, flex: 1, minWidth: 0 }}>{email.sender}</div>
+                      {email.received_at && (
+                        <span style={{ fontSize: 10, color: '#475569', whiteSpace: 'nowrap' }}>
+                          🕐 {formatReceived(email.received_at)}
+                        </span>
+                      )}
+                    </div>
                     <div style={{ color: '#e2e8f0', fontSize: 13, margin: '4px 0' }}>{email.subject}</div>
                     <div style={{ color: '#64748b', fontSize: 11 }}>{email.body.substring(0, 80)}...</div>
-                    <div style={{ marginTop: 8 }}>
-                      <button className="approve-btn" style={{ fontSize: 11, padding: '4px 10px', marginTop: 0 }}>
-                        Process this email
-                      </button>
+                    <div style={{ marginTop: 8, display: 'flex', gap: 8 }}>
+                      {email.label === 'customer_requirement' ? (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); e.preventDefault(); openSendRequest(email); }}
+                          style={{
+                            fontSize: 11, padding: '4px 10px', fontWeight: 600,
+                            background: '#3b82f6', color: 'white', border: '1px solid #3b82f6',
+                            borderRadius: 5, cursor: 'pointer', marginTop: 0,
+                          }}
+                        >
+                          ✉️ Send RFQs
+                        </button>
+                      ) : (
+                        <button className="approve-btn" style={{ fontSize: 11, padding: '4px 10px', marginTop: 0 }}>
+                          Process this email
+                        </button>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -963,67 +1029,14 @@ export default function Office() {
                 </div>
               </div>
 
-              {/* Check Quotations Button */}
-              <button className="approve-btn" onClick={checkQuotations}>
-                Check for Quotations
-              </button>
-
-              {/* Quotations Table */}
-              {quotations.length > 0 && (
-                <div style={{ marginTop: 14 }}>
-                  <div className="detail-label">Quotations ({quotations.length})</div>
-                  <table className="detail-table">
-                    <thead>
-                      <tr>
-                        <th></th>
-                        <th>Agent</th>
-                        <th>Rate</th>
-                        <th>Transit</th>
-                        <th>Validity</th>
-                        <th>Assessment</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {quotations.map((q) => (
-                        <tr key={q.id}>
-                          <td>
-                            <input
-                              type="radio"
-                              name="select-quotation"
-                              checked={selectedAgent === q.agent_name}
-                              onChange={() => setSelectedAgent(q.agent_name)}
-                              style={{ accentColor: '#3b82f6', cursor: 'pointer' }}
-                            />
-                          </td>
-                          <td>{q.agent_name}</td>
-                          <td>{q.currency} {q.rate.toFixed(2)}</td>
-                          <td>{q.transit_time_days}d</td>
-                          <td>{q.validity}</td>
-                          <td>
-                            <span style={{
-                              background: getAssessmentColor(q.ai_assessment),
-                              color: 'white', padding: '2px 6px', borderRadius: 10,
-                              fontSize: '0.6rem', fontWeight: 600,
-                            }}>
-                              {q.ai_assessment.replace(/_/g, ' ')}
-                            </span>
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-
-                  {/* Approve Selected */}
-                  <button
-                    className="approve-btn"
-                    onClick={handleApproveQuotation}
-                    style={{ opacity: selectedAgent ? 1 : 0.5, cursor: selectedAgent ? 'pointer' : 'not-allowed' }}
-                    disabled={!selectedAgent}
-                  >
-                    Approve Selected
-                  </button>
-                </div>
-              )}
+              {/* Agent replies live in the dashboard — this legacy view shows
+                  the job summary only. Rates are no longer parsed, so there is
+                  no table to render here. */}
+              <Link href="/dashboard" className="approve-btn" style={{
+                display: 'block', textAlign: 'center', textDecoration: 'none',
+              }}>
+                View replies in dashboard →
+              </Link>
 
               {errorMsg && status === 'job_detail' && (
                 <div style={{ color: '#ef4444', fontSize: 12, marginTop: 8 }}>{errorMsg}</div>

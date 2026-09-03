@@ -32,6 +32,9 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+# ...opting in for the template, which holds no secret and is the only place the
+# NEXT_PUBLIC_API_BASE build-time rule is written down.
+!.env.example
 
 # vercel
 .vercel

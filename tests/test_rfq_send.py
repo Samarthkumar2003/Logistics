@@ -1,0 +1,396 @@
+"""
+What `send_rfqs` writes down, versus what actually happened.
+
+This is the only path by which mail reaches a vendor, and the job row it writes
+is the operator's whole record of it. A row saying `rfqs_sent` for mail that
+never left is the worst failure the desk can have: attribution is by RFQ
+reference alone, so no reply will ever arrive to contradict it, and the job sits
+looking like an agent who did not bother to answer.
+"""
+
+import pytest
+
+from backend.domain.models import OPEN_JOB_STATUSES, STATUS_SENDING
+from backend.services import rfq_service
+from backend.services.rfq_service import SelectedAgent
+
+SHIPMENT = {"origin": "Nhava Sheva", "destination": "Hamburg", "mode": "sea"}
+CUSTOMER = {"email_id": "", "sender": "shipper@example.com", "subject": "Rates?"}
+
+
+@pytest.fixture
+def sent_jobs(monkeypatch):
+    """A stand-in `rfq_jobs` table, as the two-phase write sees it.
+
+    The send reserves rows at `sending` and then advances each one, so a plain
+    capture list is not enough — the fake has to honour the status guard, or the
+    tests could not tell an honest update from one that clobbered a reply.
+    Assertions read the final `.status` of each row, which is what the dashboard
+    would show.
+    """
+    captured = []
+
+    def _insert_many(jobs):
+        captured.extend(jobs)
+
+    def _set_status_if(reference, status, expected):
+        for job in captured:
+            if job.reference == reference and job.status == expected:
+                job.status = status
+                return True
+        return False
+
+    monkeypatch.setattr(rfq_service.job_repo, "insert_many", _insert_many)
+    monkeypatch.setattr(rfq_service.job_repo, "set_status_if", _set_status_if)
+    monkeypatch.setattr(rfq_service.agent_repo, "ensure_agents", lambda _a: None)
+    monkeypatch.setattr(rfq_service.email_repo, "get_thread_id", lambda _e: "")
+    return captured
+
+
+@pytest.fixture
+def drafts_succeed(monkeypatch):
+    """Drafting always works, and echoes the agent name back as vendor_name."""
+    class _Draft:
+        def __init__(self, name):
+            self.vendor_name = name
+            self.vendor_email = f"{name}@example.com".replace(" ", "")
+            self.subject = "RFQ"
+            self.body = "body"
+
+    class _Result:
+        def __init__(self, names):
+            self.drafts = [_Draft(n) for n in names]
+
+    monkeypatch.setattr(
+        rfq_service, "generate_rfq_drafts",
+        lambda shipment_data, agents, reference: _Result([a["agent_name"] for a in agents]),
+    )
+
+
+@pytest.fixture
+def sender(monkeypatch):
+    """Install a batch sender returning the given per-draft statuses, in order."""
+    def _install(statuses):
+        def _batch(drafts):
+            return [{"vendor_name": d["vendor_name"], "status": s}
+                    for d, s in zip(drafts, statuses)]
+        monkeypatch.setattr(rfq_service, "send_rfq_emails_batch", _batch)
+    return _install
+
+
+def _agents(*names):
+    return [SelectedAgent(n, f"{n}@example.com".replace(" ", "")) for n in names]
+
+
+def _send(agents):
+    return rfq_service.send_rfqs(SHIPMENT, agents, CUSTOMER)
+
+
+# ---------------------------------------------------------------------------
+# The regression: a failed send must not be recorded as a sent RFQ
+# ---------------------------------------------------------------------------
+
+@pytest.mark.parametrize("failure", ["failed", "skipped", "batch_error: auth denied"])
+def test_a_send_that_did_not_succeed_is_not_recorded_as_sent(
+    drafts_succeed, sender, sent_jobs, failure,
+):
+    sender([failure])
+    result = _send(_agents("Alpha"))
+
+    assert [j.status for j in sent_jobs] == ["send_failed"]
+    assert result["total_sent"] == 0
+    assert result["jobs"][0]["status"] == failure
+
+
+def test_a_successful_send_is_recorded_as_sent(drafts_succeed, sender, sent_jobs):
+    sender(["sent"])
+    result = _send(_agents("Alpha"))
+
+    assert [j.status for j in sent_jobs] == ["rfqs_sent"]
+    assert result["total_sent"] == 1
+
+
+def test_a_mixed_batch_records_each_agent_on_its_own_outcome(
+    drafts_succeed, sender, sent_jobs,
+):
+    """The case a name-keyed lookup got wrong: one agent's outcome must never be
+    applied to another's job."""
+    sender(["sent", "failed", "sent"])
+    result = _send(_agents("Alpha", "Beta", "Gamma"))
+
+    by_agent = {j.agents_contacted[0]: j.status for j in sent_jobs}
+    assert by_agent == {"Alpha": "rfqs_sent", "Beta": "send_failed", "Gamma": "rfqs_sent"}
+    assert result["total_sent"] == 2
+
+
+def test_total_sent_counts_confirmed_sends_not_drafts(drafts_succeed, sender, sent_jobs):
+    """The UI renders this as "N RFQs sent"."""
+    sender(["failed", "failed", "sent"])
+    assert _send(_agents("Alpha", "Beta", "Gamma"))["total_sent"] == 1
+
+
+# ---------------------------------------------------------------------------
+# Correlation must not rely on the model-supplied vendor_name
+# ---------------------------------------------------------------------------
+
+def test_outcomes_correlate_by_position_when_the_model_renames_the_vendor(
+    monkeypatch, sender, sent_jobs,
+):
+    """`DraftEmail.vendor_name` comes from the LLM, so it need not equal the
+    agent we picked. Correlating on it silently yielded "unknown"."""
+    class _Draft:
+        def __init__(self, name):
+            self.vendor_name = f"{name} Logistics Pvt Ltd"   # model embellished it
+            self.vendor_email = "x@example.com"
+            self.subject = "RFQ"
+            self.body = "body"
+
+    class _Result:
+        def __init__(self, names):
+            self.drafts = [_Draft(n) for n in names]
+
+    monkeypatch.setattr(
+        rfq_service, "generate_rfq_drafts",
+        lambda shipment_data, agents, reference: _Result([a["agent_name"] for a in agents]),
+    )
+    sender(["sent", "failed"])
+    _send(_agents("Alpha", "Beta"))
+
+    by_agent = {j.agents_contacted[0]: j.status for j in sent_jobs}
+    assert by_agent == {"Alpha": "rfqs_sent", "Beta": "send_failed"}
+
+
+def test_two_offices_sharing_one_agent_name_get_separate_outcomes(
+    drafts_succeed, sender, sent_jobs,
+):
+    """Multi-office agents share a name (BUGS.md P2-1). A name-keyed dict kept
+    only the last outcome and applied it to both."""
+    sender(["sent", "failed"])
+    agents = [SelectedAgent("Emu Lines", "mumbai@emu.example"),
+              SelectedAgent("Emu Lines", "chennai@emu.example")]
+    _send(agents)
+
+    assert sorted(j.status for j in sent_jobs) == ["rfqs_sent", "send_failed"]
+
+
+def test_an_uncorrelatable_result_count_is_not_treated_as_success(
+    drafts_succeed, monkeypatch, sent_jobs,
+):
+    """If the sender returns the wrong number of results, positions mean nothing
+    and nothing may be claimed as sent."""
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch",
+                        lambda drafts: [{"status": "sent"}])
+    result = _send(_agents("Alpha", "Beta"))
+
+    assert [j.status for j in sent_jobs] == ["send_failed", "send_failed"]
+    assert result["total_sent"] == 0
+
+
+def test_the_batch_call_raising_records_no_sends(drafts_succeed, monkeypatch, sent_jobs):
+    def _boom(_drafts):
+        raise RuntimeError("smtp unreachable")
+
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch", _boom)
+    result = _send(_agents("Alpha", "Beta"))
+
+    assert [j.status for j in sent_jobs] == ["send_failed", "send_failed"]
+    assert result["total_sent"] == 0
+    assert "smtp unreachable" in result["jobs"][0]["status"]
+
+
+# ---------------------------------------------------------------------------
+# Rows still get written on failure, and drafting failures write none
+# ---------------------------------------------------------------------------
+
+def test_a_failed_send_still_writes_a_row_so_an_ambiguous_delivery_stays_linkable(
+    drafts_succeed, sender, sent_jobs,
+):
+    """A timeout may have delivered. Dropping the row would strand the reply."""
+    sender(["failed"])
+    result = _send(_agents("Alpha"))
+
+    assert len(sent_jobs) == 1
+    assert sent_jobs[0].reference == result["jobs"][0]["reference"]
+
+
+def test_send_failed_can_still_receive_a_reply():
+    """`link_reply` advances a job only when its status is open, so a reply
+    arriving after an ambiguous failure must not be locked out."""
+    assert "send_failed" in OPEN_JOB_STATUSES
+
+
+def test_a_drafting_failure_writes_no_row(monkeypatch, sender, sent_jobs):
+    """Nothing was addressed and no reference reached anyone, so there is
+    nothing for a reply to attach to."""
+    def _boom(shipment_data, agents, reference):
+        raise RuntimeError("model refused")
+
+    monkeypatch.setattr(rfq_service, "generate_rfq_drafts", _boom)
+    sender([])
+    result = _send(_agents("Alpha"))
+
+    assert sent_jobs == []
+    assert result["total_sent"] == 0
+    assert "draft failed" in result["jobs"][0]["status"]
+
+
+# ---------------------------------------------------------------------------
+# Phase one: the row exists before the mail does
+# ---------------------------------------------------------------------------
+
+def test_every_row_is_committed_before_the_first_mail_leaves(
+    drafts_succeed, monkeypatch, sent_jobs,
+):
+    """The reason the write moved ahead of the send: a vendor auto-responder can
+    reply before this process gets back to the database, and a reply whose
+    reference has no job row cannot be filed against anything."""
+    seen_at_send = {}
+
+    def _batch(drafts):
+        seen_at_send["rows"] = [(j.reference, j.status) for j in sent_jobs]
+        return [{"status": "sent"} for _ in drafts]
+
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch", _batch)
+    result = _send(_agents("Alpha", "Beta"))
+
+    references = {j["reference"] for j in result["jobs"]}
+    assert {r for r, _ in seen_at_send["rows"]} == references
+    # Reserved, not claimed as delivered — that only happens after the sender
+    # reports back.
+    assert {s for _, s in seen_at_send["rows"]} == {STATUS_SENDING}
+
+
+def test_a_reservation_failure_aborts_before_anything_is_sent(
+    drafts_succeed, monkeypatch,
+):
+    """Failing this direction is the safe one: an un-sent RFQ can be re-sent,
+    whereas a sent RFQ with no row is a quote that silently never arrives."""
+    monkeypatch.setattr(rfq_service.agent_repo, "ensure_agents", lambda _a: None)
+    monkeypatch.setattr(rfq_service.email_repo, "get_thread_id", lambda _e: "")
+
+    def _boom(_jobs):
+        raise RuntimeError("supabase down")
+
+    sent = []
+    monkeypatch.setattr(rfq_service.job_repo, "insert_many", _boom)
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch",
+                        lambda drafts: sent.extend(drafts) or [])
+
+    with pytest.raises(rfq_service.RfqError) as excinfo:
+        _send(_agents("Alpha"))
+
+    assert "nothing was sent" in str(excinfo.value)
+    assert sent == []
+
+
+# ---------------------------------------------------------------------------
+# Phase two: recording the outcome, and losing the race gracefully
+# ---------------------------------------------------------------------------
+
+def test_a_status_update_failure_is_surfaced_and_not_reported_as_a_clean_send(
+    drafts_succeed, sender, sent_jobs, monkeypatch,
+):
+    """The row and its reference survive, so a reply is still attributable — but
+    the operator must not be told the send was clean."""
+    def _boom(_reference, _status, _expected):
+        raise RuntimeError("supabase down")
+
+    monkeypatch.setattr(rfq_service.job_repo, "set_status_if", _boom)
+    sender(["sent"])
+    result = _send(_agents("Alpha"))
+
+    assert "job status update failed" in result["jobs"][0]["status"]
+
+
+def test_a_reply_that_beat_the_update_is_not_overwritten(
+    drafts_succeed, sender, sent_jobs, monkeypatch,
+):
+    """An auto-responder can answer in under a second, linking and advancing the
+    job while this process is still working through the batch. A blind update
+    would bury a quote that had already arrived under `rfqs_sent`."""
+    def _batch(drafts):
+        for job in sent_jobs:          # the reply lands mid-send
+            job.status = "quotes_received"
+        return [{"status": "sent"} for _ in drafts]
+
+    monkeypatch.setattr(rfq_service, "send_rfq_emails_batch", _batch)
+    result = _send(_agents("Alpha"))
+
+    assert [j.status for j in sent_jobs] == ["quotes_received"]
+    # The send itself still succeeded, and is reported as such.
+    assert result["total_sent"] == 1
+
+
+def test_a_reply_can_land_while_a_job_is_still_sending():
+    """`mark_quotes_received` refuses statuses outside OPEN_JOB_STATUSES, so
+    excluding `sending` would drop exactly the fast reply this design exists to
+    catch."""
+    assert STATUS_SENDING in OPEN_JOB_STATUSES
+
+
+# ---------------------------------------------------------------------------
+# One address, one RFQ
+# ---------------------------------------------------------------------------
+# Reported from the desk: adding one agent by hand showed "Send RFQ to 2 agents"
+# and sent that vendor two RFQs. The cause was in the send form, but the form is
+# not where this can be enforced — a browser tab open since before the fix keeps
+# posting the duplicated payload, and the recipient list is client input either
+# way. A vendor receiving one enquiry twice under two references cannot be undone.
+
+def test_the_same_address_twice_sends_one_rfq(drafts_succeed, sender, sent_jobs):
+    sender(["sent"])
+    result = _send([SelectedAgent("Dhaval", "dhaval@acme.com"),
+                    SelectedAgent("Dhaval", "dhaval@acme.com")])
+
+    assert len(sent_jobs) == 1, "a duplicated recipient must not reserve a second job row"
+    assert result["total_sent"] == 1
+
+
+def test_duplicate_recipients_are_matched_regardless_of_case_or_padding(
+    drafts_succeed, sender, sent_jobs,
+):
+    """The two sources are a database column and a text box, so the same address
+    arrives spelled differently. Mail routing ignores the difference; so must this."""
+    sender(["sent"])
+    result = _send([SelectedAgent("Dhaval", "Dhaval@Acme.com"),
+                    SelectedAgent("dhaval", " dhaval@acme.com ")])
+
+    assert len(sent_jobs) == 1
+    assert result["total_sent"] == 1
+
+
+def test_the_first_spelling_of_a_duplicated_recipient_is_the_one_used(
+    drafts_succeed, sender, sent_jobs,
+):
+    """Dropping the later copy keeps the checkbox-selected agent's real name, which
+    is what the job row records and what the operator sees on the dashboard."""
+    sender(["sent"])
+    _send([SelectedAgent("Maersk Line", "quotes@maersk.com"),
+           SelectedAgent("quotes", "quotes@maersk.com")])
+
+    assert [j.agents_contacted for j in sent_jobs] == [["Maersk Line"]]
+
+
+def test_distinct_recipients_are_all_kept(drafts_succeed, sender, sent_jobs):
+    """The dedup must not become a cap: this desk really does send to a dozen."""
+    sender(["sent"] * 3)
+    result = _send(_agents("Alpha", "Beta", "Gamma"))
+
+    assert len(sent_jobs) == 3
+    assert result["total_sent"] == 3
+
+
+def test_a_recipient_with_no_address_is_dropped(drafts_succeed, sender, sent_jobs):
+    sender(["sent"])
+    _send([SelectedAgent("Alpha", "alpha@example.com"), SelectedAgent("No Email", "  ")])
+
+    assert [j.agents_contacted for j in sent_jobs] == [["Alpha"]]
+
+
+def test_a_list_of_nothing_but_blanks_is_refused_rather_than_sent(sent_jobs):
+    """Dedup runs before the empty check on purpose — otherwise a payload of
+    unaddressed recipients passes the guard and drafts mail with nowhere to go."""
+    with pytest.raises(rfq_service.RfqError, match="at least one agent"):
+        _send([SelectedAgent("No Email", ""), SelectedAgent("Also None", "   ")])
+
+    assert sent_jobs == []
