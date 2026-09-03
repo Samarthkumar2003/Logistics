@@ -121,3 +121,99 @@ def test_a_store_failure_is_a_500_and_never_reaches_the_provider(monkeypatch):
     with pytest.raises(AppException) as err:
         get_email_body("msg-6")
     assert err.value.status_code == 500
+
+
+# ---------------------------------------------------------------------------
+# Pagination bounds — BUGS.md P2-7
+#
+# `limit` went straight into `.range(offset, offset + limit - 1)`, so
+# `?limit=1000000` was a full-table read, and the unlinked route selects bodies.
+# These have to run over HTTP: `Query(le=...)` is enforced by FastAPI's
+# validation layer, so calling the route function directly bypasses it entirely.
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def bounded_client(monkeypatch):
+    """A client whose routes record the limit they were handed instead of
+    querying Supabase, so a 200 proves the value that got through."""
+    from fastapi.testclient import TestClient
+
+    from backend.app.api import create_app
+    from backend.services import inbox_service, reply_service
+
+    seen: dict[str, int] = {}
+
+    def _page(*, limit, offset, search="", label=""):
+        seen["limit"], seen["offset"] = limit, offset
+        return {"emails": [], "total": 0, "has_more": False}
+
+    def _unlinked(*, limit, offset):
+        seen["limit"], seen["offset"] = limit, offset
+        return {"rate_cards": []}
+
+    monkeypatch.setattr(inbox_service, "get_inbox_page", _page)
+    monkeypatch.setattr(reply_service, "list_unlinked", _unlinked)
+    # No `with`: entering TestClient runs the lifespan, which starts the
+    # scheduler and opens sockets.
+    return TestClient(create_app(), raise_server_exceptions=False), seen
+
+
+def test_a_million_row_limit_is_refused(bounded_client):
+    """The defect itself. Reverting the Query() ceiling makes this a 200."""
+    client, _ = bounded_client
+    assert client.get("/fetch-inbox?limit=1000000").status_code == 422
+
+
+@pytest.mark.parametrize("limit,expected", [(1, 200), (200, 200), (201, 422), (0, 422), (-5, 422)])
+def test_the_inbox_limit_ceiling_is_exactly_200(bounded_client, limit, expected):
+    client, _ = bounded_client
+    assert client.get(f"/fetch-inbox?limit={limit}").status_code == expected
+
+
+def test_a_negative_offset_is_refused(bounded_client):
+    """`.range(-1, 18)` is not a page of anything."""
+    client, _ = bounded_client
+    assert client.get("/fetch-inbox?offset=-1").status_code == 422
+
+
+def test_the_inbox_default_page_is_unchanged(bounded_client):
+    """The ceiling must not move the default — 20 is what the frontend expects."""
+    client, seen = bounded_client
+    assert client.get("/fetch-inbox").status_code == 200
+    assert seen == {"limit": 20, "offset": 0}
+
+
+@pytest.mark.parametrize("limit,expected", [(100, 200), (101, 422)])
+def test_the_unlinked_ceiling_is_tighter_because_it_selects_bodies(bounded_client, limit, expected):
+    client, _ = bounded_client
+    assert client.get(f"/rate-cards/unlinked?limit={limit}").status_code == expected
+
+
+def test_the_unlinked_default_page_is_unchanged(bounded_client):
+    client, seen = bounded_client
+    assert client.get("/rate-cards/unlinked").status_code == 200
+    assert seen == {"limit": 50, "offset": 0}
+
+
+def test_the_bounds_are_annotated_so_direct_callers_still_get_ints():
+    """`Annotated[int, Query(ge=1, le=200)] = 20`, never `Query(20, ge=1, le=200)`.
+
+    The second form makes the *default* a Query object, so any caller that is not
+    an HTTP request — twenty-odd tests in this suite call these routes as plain
+    functions — gets a Query where it expects an int and dies with
+    `unsupported operand type(s) for +: 'Query' and 'int'` deep inside the
+    repository, reported to the operator as a 500.
+    """
+    import inspect
+
+    from backend.app.routes.inbox import fetch_inbox, list_unlinked_rate_cards
+
+    cases = (
+        (fetch_inbox, {"limit": 20, "offset": 0}),
+        (list_unlinked_rate_cards, {"limit": 50, "offset": 0}),
+    )
+    for fn, expected in cases:
+        defaults = {n: p.default for n, p in inspect.signature(fn).parameters.items()}
+        for name, value in expected.items():
+            assert type(defaults[name]) is int, f"{fn.__name__}.{name} is not a plain int"
+            assert defaults[name] == value, f"{fn.__name__}.{name} default moved"

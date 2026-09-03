@@ -1,8 +1,9 @@
 """Reading the inbox: list, body, attachments, and the unlinked rate cards."""
 
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from backend.app.errors import AppException
 from backend.repositories import email_repo
@@ -13,13 +14,23 @@ router = APIRouter(tags=["inbox"])
 
 
 @router.get("/fetch-inbox")
-def fetch_inbox(limit: int = 20, offset: int = 0, search: str = "", label: str = ""):
+def fetch_inbox(
+    limit: Annotated[int, Query(ge=1, le=200)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+    search: str = "",
+    label: str = "",
+):
     """A page of the inbox from Supabase — no Gmail call, so ordering and
     pagination are stable.
 
     `label` narrows the page to one classification, so a caller after customer
     requests gets a page of customer requests and a total of how many exist.
     Unfiltered is the whole inbox, as before.
+
+    `limit` is capped (BUGS.md P2-7): it went straight into `.range(offset,
+    offset + limit - 1)`, so `?limit=1000000` was a full-table read one typo
+    away. 422 on an out-of-range value is the right answer — a silently clamped
+    limit makes a paging caller loop forever on a page size it never asked for.
     """
     if label and label not in inbox_service.LABELS:
         # 422 rather than an empty page: an unknown label is a caller bug, and
@@ -94,11 +105,18 @@ def get_email_attachments(message_id: str):
 
 
 @router.get("/rate-cards/unlinked")
-def list_unlinked_rate_cards(limit: int = 50, offset: int = 0):
+def list_unlinked_rate_cards(
+    limit: Annotated[int, Query(ge=1, le=100)] = 50,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
     """Rate cards that never attached to an RFQ, with the reason for each.
 
     Nothing is lost — these are ordinary inbox emails — but they are absent from
     the request page, so they need somewhere an operator will actually look.
+
+    Capped at 100 rather than 200 (BUGS.md P2-7) because this query selects
+    message **bodies**, so the same page count costs an order of magnitude more
+    bytes than `/fetch-inbox` — and egress is metered on Railway.
     """
     try:
         return reply_service.list_unlinked(limit=limit, offset=offset)
