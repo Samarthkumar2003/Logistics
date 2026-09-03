@@ -1010,8 +1010,9 @@ export default function Dashboard() {
     { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: sentJobs.length,    color: 'var(--yellow)' },
   ];
 
+  // `themed` opts this subtree into the palette in app/theme.css.
   return (
-    <div className="dash-app">
+    <div className="dash-app themed">
 
       {/* ── Sidebar ── */}
       <aside className="sidebar">

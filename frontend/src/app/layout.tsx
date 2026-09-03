@@ -1,4 +1,7 @@
 import "./globals.css";
+// Light/dark tokens for every themed route, not just the dashboard. Imported
+// here rather than per-page so a page cannot load its markup without them.
+import "./theme.css";
 import Script from "next/script";
 
 import AuthGate from "@/components/AuthGate";
