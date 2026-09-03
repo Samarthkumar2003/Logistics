@@ -12,6 +12,7 @@ agents, and files the rate cards that come back — all through a web dashboard.
 | [Code tour](Documentation/02-code-tour.md) | Where everything lives, what to read first |
 | [Data model](Documentation/03-data-model.md) | Supabase tables and the life of one email |
 | [Running locally](Documentation/04-running-locally.md) | Setup and troubleshooting |
+| [Deploying](Documentation/06-deploying.md) | Railway, the env matrix, and the first operator account |
 | [Known bugs](Documentation/BUGS.md) | Ranked defect register — read before changing anything |
 
 ## Quick start

@@ -978,7 +978,10 @@ def _alert_sync_drift(gaps: list[dict], healed: bool) -> None:
     not break the heal loop. Recipient: SYNC_ALERT_RECIPIENT. Sends via the same
     Gmail SMTP account (EMAIL_ACCOUNT/EMAIL_PASSWORD) the RFQ sender uses, and does
     NOT honour EMAIL_REDIRECT — an alert must always reach the human."""
-    recipient = os.getenv("SYNC_ALERT_RECIPIENT", "bhutani.samarth@gmail.com").strip()
+    # No default. This was hardcoded to the original author's personal address,
+    # so every deployment by anyone else mailed drift alerts to them — silently,
+    # since a delivered email produces no error here.
+    recipient = settings.sync_alert_recipient
     account = os.getenv("EMAIL_ACCOUNT", "").strip()
     password = os.getenv("EMAIL_PASSWORD", "").strip()
     if not (recipient and account and password):

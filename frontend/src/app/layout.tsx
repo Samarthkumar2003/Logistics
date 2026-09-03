@@ -1,6 +1,8 @@
 import "./globals.css";
 import Script from "next/script";
 
+import AuthGate from "@/components/AuthGate";
+
 export const metadata = {
   title: "Logistics Copilot - Multi-Agent Office",
   description: "Visual interface for AI operations",
@@ -26,7 +28,13 @@ export default function RootLayout({
         <Script id="theme-init" strategy="beforeInteractive">
           {THEME_INIT}
         </Script>
-        {children}
+        {/*
+          Wrapped here, in the root layout, so there is no page in the app that
+          can forget to gate itself. AuthGate is a client component; this layout
+          stays a server component, because a client child does not make its
+          parent one. It exempts /login itself — see the component.
+        */}
+        <AuthGate>{children}</AuthGate>
       </body>
     </html>
   );

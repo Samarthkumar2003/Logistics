@@ -6,6 +6,7 @@ is safe to run on a plane, in CI without secrets, and against a production .env
 without touching production.
 """
 
+import os
 import socket
 import sys
 from pathlib import Path
@@ -17,6 +18,29 @@ import pytest
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
+
+# --- Auth defaults for the suite --------------------------------------------
+#
+# Set BEFORE anything imports backend.core.config, which reads the environment
+# once at import and freezes it. conftest is the only file pytest guarantees runs
+# first, so this is the only place it can go.
+#
+# A hard assignment, not setdefault: `load_dotenv()` does not override values
+# already in os.environ, so this wins over a developer's real .env — which is the
+# point. Without it, a .env with AUTH_ENABLED=1 would 401 every request in the
+# twenty test files that predate auth and know nothing about tokens.
+#
+# tests/test_auth.py does not rely on this; it builds its app with
+# `create_app(auth_enabled=True)` and asks for the check explicitly.
+os.environ["AUTH_ENABLED"] = "0"
+# Long enough to satisfy require_auth_secret(), and obviously not a real secret.
+# Needed because test_auth.py mints and verifies real tokens with it.
+os.environ.setdefault(
+    "JWT_SECRET", "test-only-signing-key-not-a-secret-abcdefghijklmnop"
+)
+# The suite must never spend 250ms per bcrypt call. 4 is the library minimum and
+# tests only care that a hash round-trips, not that it is expensive to crack.
+os.environ.setdefault("BCRYPT_ROUNDS", "4")
 
 
 @pytest.fixture(autouse=True)

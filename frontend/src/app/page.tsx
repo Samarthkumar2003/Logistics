@@ -2,8 +2,7 @@
 
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
-
-const API_BASE = 'http://localhost:8001';
+import { apiFetch } from '@/lib/api';
 
 const DESKS = {
   intake:  { left: 90,  top: 265 },
@@ -342,6 +341,11 @@ export default function Office() {
   const [ingestRunning, setIngestRunning] = useState(false);
 
   const PAGE_SIZE = 20;
+  // Must match the `le=` ceiling on GET /fetch-inbox (backend/app/routes/inbox.py).
+  // A restore deeper than this asks for a page the server now refuses with a 422,
+  // which would blank the view on refresh; clamped, the user gets the newest 200
+  // back with has_more set and pages on from there.
+  const MAX_RESTORE = 200;
   // Persists how deep the inbox was scrolled so a browser refresh restores the
   // same emails (offset would otherwise reset to 0 and drop loaded pages).
   const INBOX_DEPTH_KEY = 'inboxLoadedCount';
@@ -368,7 +372,7 @@ export default function Office() {
 
   async function fetchAutomationStatus() {
     try {
-      const res = await fetch(`${API_BASE}/automation/status`);
+      const res = await apiFetch(`/automation/status`);
       if (res.ok) setAutomationStatus(await res.json());
     } catch { /* non-critical */ }
   }
@@ -379,7 +383,7 @@ export default function Office() {
       // 202 = the scan was started in the background; 409 = one is already
       // running. Neither returns results, so poll the status endpoint instead
       // of treating the response body as a finished run.
-      const res = await fetch(`${API_BASE}/automation/run-now`, { method: 'POST' });
+      const res = await apiFetch(`/automation/run-now`, { method: 'POST' });
       if (!res.ok) {
         let detail = `Server error ${res.status}`;
         try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
@@ -402,7 +406,7 @@ export default function Office() {
     while (Date.now() < deadline) {
       await new Promise(r => setTimeout(r, 2000));
       try {
-        const res = await fetch(`${API_BASE}/ingest/status`);
+        const res = await apiFetch(`/ingest/status`);
         if (!res.ok) return;
         const body: IngestStatus = await res.json();
         if (!body.running) return;
@@ -418,7 +422,7 @@ export default function Office() {
     // 5-minute scheduler had not already pulled — it re-rendered the same rows.
     setIngestRunning(true);
     try {
-      const res = await fetch(`${API_BASE}/ingest/run-now`, { method: 'POST' });
+      const res = await apiFetch(`/ingest/run-now`, { method: 'POST' });
       // 409 = a sweep is already in flight. For this button that is success, not
       // an error: new mail is on its way, so wait on it like our own run.
       if (!res.ok && res.status !== 409) {
@@ -443,7 +447,7 @@ export default function Office() {
 
   async function toggleAutomation(enabled: boolean) {
     try {
-      await fetch(`${API_BASE}/automation/toggle`, {
+      await apiFetch(`/automation/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled }),
@@ -468,11 +472,15 @@ export default function Office() {
     try {
       // On a reset we either restore the previous scroll depth (one big request)
       // or load a single page. On "load more" we page from the current length.
-      const limit = reset ? (effectiveRestore && effectiveRestore > PAGE_SIZE ? effectiveRestore : PAGE_SIZE) : PAGE_SIZE;
+      const restoreDepth =
+        effectiveRestore && effectiveRestore > PAGE_SIZE
+          ? Math.min(effectiveRestore, MAX_RESTORE)
+          : PAGE_SIZE;
+      const limit = reset ? restoreDepth : PAGE_SIZE;
       const offset = reset ? 0 : inbox.length;
       const search = overrideSearch !== undefined ? overrideSearch : searchQuery;
       const searchParam = search ? `&search=${encodeURIComponent(search)}` : '';
-      const res = await fetch(`${API_BASE}/fetch-inbox?limit=${limit}&offset=${offset}${searchParam}`);
+      const res = await apiFetch(`/fetch-inbox?limit=${limit}&offset=${offset}${searchParam}`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data = await res.json();
       const newEmails: InboxEmail[] = data.emails || [];
@@ -516,7 +524,7 @@ export default function Office() {
     let body = email.body;
     if (!body) {
       try {
-        const res = await fetch(`${API_BASE}/email-body/${email.id}`);
+        const res = await apiFetch(`/email-body/${email.id}`);
         if (res.ok) body = (await res.json()).body || '';
       } catch { /* proceed with empty body — form stays blank */ }
     }
@@ -553,7 +561,7 @@ export default function Office() {
 
   async function loadJobs() {
     try {
-      const res = await fetch(`${API_BASE}/jobs`);
+      const res = await apiFetch(`/jobs`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const data: RFQJob[] = await res.json();
       setJobs(data);
@@ -567,7 +575,7 @@ export default function Office() {
   async function loadJobDetail(job: RFQJob) {
     setSelectedJob(job);
     try {
-      const res = await fetch(`${API_BASE}/jobs/${job.reference}`);
+      const res = await apiFetch(`/jobs/${job.reference}`);
       if (!res.ok) throw new Error(`Server error ${res.status}`);
       const detail: RFQJob = await res.json();
       setSelectedJob(detail);
@@ -800,7 +808,7 @@ export default function Office() {
                       onChange={async (e) => {
                         const corrected = e.target.value;
                         if (!corrected) return;
-                        await fetch(`${API_BASE}/feedback`, {
+                        await apiFetch(`/feedback`, {
                           method: 'POST',
                           headers: { 'Content-Type': 'application/json' },
                           body: JSON.stringify({

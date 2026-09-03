@@ -3,8 +3,7 @@
 import { useEffect, useState } from 'react';
 import { useParams } from 'next/navigation';
 import Link from 'next/link';
-
-const API_BASE = 'http://localhost:8001';
+import { apiFetch } from '@/lib/api';
 
 /* ─── Types ─────────────────────────────────────────────────────── */
 interface CustomerEmail {
@@ -76,7 +75,7 @@ function ReplyCard({ reply }: { reply: Reply }) {
     if (next && !fetched && reply.has_attachments) {
       setLoadingAtts(true);
       try {
-        const res = await fetch(`${API_BASE}/email-attachments/${reply.id}`);
+        const res = await apiFetch(`/email-attachments/${reply.id}`);
         if (res.ok) setAttachments((await res.json()).attachments ?? []);
       } catch { /* leave the list empty — the body is still readable */ }
       setLoadingAtts(false);
@@ -161,7 +160,7 @@ export default function CustomerRequestPage() {
     (async () => {
       setStatus('loading');
       try {
-        const res = await fetch(`${API_BASE}/customer-request/${id}`);
+        const res = await apiFetch(`/customer-request/${id}`);
         if (!res.ok) {
           let detail = `Server error ${res.status}`;
           try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }

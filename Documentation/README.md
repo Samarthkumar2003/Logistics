@@ -13,6 +13,7 @@ into RFQs sent to freight agents, and files the rate cards that come back.
 | 3 | [03-data-model.md](03-data-model.md) | The Supabase tables, and the life of one email |
 | 4 | [04-running-locally.md](04-running-locally.md) | Getting it running on your machine |
 | 5 | [05-hardening-plan.md](05-hardening-plan.md) | Phased plan to restructure, fix logging, and productionise |
+| 6 | [06-deploying.md](06-deploying.md) | Railway, every env var per service, and bootstrapping the first login |
 | — | [BUGS.md](BUGS.md) | Known defects, ranked. **Read before changing anything.** |
 | — | [archive/](archive/) | Superseded reviews, kept for history |
 
@@ -45,14 +46,18 @@ Working and in daily use:
 - The request page: the customer's email, and every agent's reply in full
 
 - The nightly Excel report, off the email store rather than Gmail
+- Bearer-token auth on every endpoint but `/health` and `/auth/login`, with a
+  login page and bcrypt password hashing — see
+  [06-deploying.md](06-deploying.md#6-bootstrap-the-first-operator) for creating
+  the first account
 
 Known broken or unfinished:
 
 - Dashboard label corrections silently 422 and show "✓ Corrected" anyway
 - `frontend/src/app/page.tsx` (the "office view") is largely dead animation code
-- Test coverage is partial: 146 tests cover the reference matcher, the classifier
-  rules, logging, retry, and the body-lookup route — but no service or repository
-  has any, and nothing runs them on push
+- Test coverage is partial: 353 tests cover the reference matcher, the classifier
+  rules, logging, retry, auth, the RFQ send path, and the body-lookup route — but
+  most repositories have none, and nothing runs them on push
 
 All of it is written up with severities in [BUGS.md](BUGS.md).
 

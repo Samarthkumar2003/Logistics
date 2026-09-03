@@ -77,6 +77,29 @@ class Settings:
     email_redirect: str
     gmail_mailbox: str
     report_recipient: str
+    # Where the sync-gap drift alert goes. Previously a hardcoded personal
+    # address inside email_store._alert_sync_drift, which meant a deployment for
+    # anyone else silently mailed the original author.
+    sync_alert_recipient: str
+
+    # --- Auth ----------------------------------------------------------------
+    # False disables the bearer check on every route. Only for the offline test
+    # suite, which exercises the middleware stack without minting tokens. Never
+    # set it in a deployment: the API sends real mail to real freight agents and
+    # /agents returns the whole contact database.
+    auth_enabled: bool
+    # HS256 signing key. No default on purpose — a default would be published in
+    # this repo, and a published signing key means anyone can mint a valid token.
+    jwt_secret: str
+    jwt_algorithm: str
+    # How long a login lasts. The frontend holds the token and is bounced to
+    # /login when it expires, so this is a re-login interval, not a hard timeout.
+    jwt_expiry_minutes: int
+    # bcrypt work factor. 12 is ~250ms per verify on a small container — slow
+    # enough to make an offline crack of a leaked hash expensive, fast enough
+    # that a login does not look broken. Raising it does not invalidate existing
+    # hashes; the cost is stored inside each hash and read back from it.
+    bcrypt_rounds: int
 
     # --- Runtime -------------------------------------------------------------
     run_scheduler: bool
@@ -118,6 +141,25 @@ class Settings:
         if not self.openai_api_key:
             raise ConfigError("OPENAI_API_KEY must be set — see .env.example")
 
+    def require_auth_secret(self) -> None:
+        """Fail at boot, not at first login.
+
+        Called from create_app() rather than lazily on the login route. A missing
+        JWT_SECRET discovered on the first login attempt looks like a bad
+        password to the operator; discovered at boot it is one line in the deploy
+        log and the container never reports healthy.
+
+        Does not consult `auth_enabled` itself — create_app() decides whether auth
+        is on for that instance (a test may force it on with AUTH_ENABLED unset)
+        and only calls this when it is.
+        """
+        if len(self.jwt_secret) < 32:
+            raise ConfigError(
+                "JWT_SECRET must be set to at least 32 characters when "
+                "AUTH_ENABLED=1 — generate one with "
+                "`python -c \"import secrets; print(secrets.token_urlsafe(48))\"`"
+            )
+
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
@@ -139,6 +181,12 @@ def get_settings() -> Settings:
         email_redirect=_env("EMAIL_REDIRECT"),
         gmail_mailbox=_env("GMAIL_MAILBOX"),
         report_recipient=_env("REPORT_RECIPIENT"),
+        sync_alert_recipient=_env("SYNC_ALERT_RECIPIENT"),
+        auth_enabled=_flag("AUTH_ENABLED", True),
+        jwt_secret=_env("JWT_SECRET"),
+        jwt_algorithm=_env("JWT_ALGORITHM", "HS256"),
+        jwt_expiry_minutes=_int("JWT_EXPIRY_MINUTES", 720),
+        bcrypt_rounds=_int("BCRYPT_ROUNDS", 12),
         run_scheduler=_flag("RUN_SCHEDULER", True),
         scan_batch=_int("SCAN_BATCH", 50),
         stale_sending_minutes=_int("STALE_SENDING_MINUTES", 15),

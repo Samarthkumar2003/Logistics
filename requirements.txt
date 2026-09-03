@@ -14,6 +14,12 @@ google-genai>=1.0.0
 openpyxl>=3.1.0
 apscheduler>=3.10.0
 supabase>=2.0.0
+# Auth. bcrypt hashes operator passwords; PyJWT signs and verifies the bearer
+# token every request carries. PyJWT was already installed as an msal transitive
+# dependency — named directly here because backend/core/security.py imports it,
+# and a transitive pin can vanish when its parent changes.
+bcrypt>=4.1.0
+PyJWT>=2.8.0
 # Structured logs when LOG_JSON=1. Optional at runtime — logging_config falls
 # back to the text format if it is missing rather than refusing to boot.
 python-json-logger>=2.0.0

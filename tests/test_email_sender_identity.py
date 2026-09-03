@@ -26,8 +26,14 @@ def gmail_api_sends(monkeypatch):
     monkeypatch.setattr(email_sender, "EMAIL_PROVIDER", "gmail_workspace")
     calls = []
 
-    def _send(to_addr, subject, body):
-        calls.append({"to": to_addr, "subject": subject, "body": body})
+    # Signature mirrors gmail_connector.send_message exactly, including
+    # `attachments`. It is a keyword `_send_via_gmail_api` always passes, so a
+    # double that omits it raises TypeError — which the caller catches and turns
+    # into {"status": "failed"}, i.e. the stale double looked like a broken send
+    # path rather than a broken test.
+    def _send(to_addr, subject, body, attachments=None):
+        calls.append({"to": to_addr, "subject": subject, "body": body,
+                      "attachments": attachments})
         return "msg-123"
 
     monkeypatch.setattr(gmail_connector, "send_message", _send)
@@ -84,7 +90,29 @@ def test_gmail_workspace_sends_over_the_api_and_never_touches_smtp(
     monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", "")
 
     assert email_sender.send_rfq_email(TO, "RFQ", "body") == {"status": "sent", "to": TO}
-    assert gmail_api_sends == [{"to": TO, "subject": "RFQ", "body": "body"}]
+    assert gmail_api_sends == [
+        {"to": TO, "subject": "RFQ", "body": "body", "attachments": None},
+    ]
+
+
+def test_attachments_reach_the_gmail_api_untouched(gmail_api_sends, monkeypatch):
+    """An RFQ's files must arrive on the API path, not just the SMTP one.
+
+    The reason this test exists: `_send_via_gmail_api` catches every exception
+    from `send_message` and converts it to {"status": "failed"}. So a signature
+    mismatch on this argument does not raise — it returns a failed send with the
+    TypeError buried in the `error` string, and the operator sees "send failed"
+    for a vendor whose RFQ carried a PDF. Nothing asserted the pass-through, so
+    the only thing that caught it was a stale test double.
+    """
+    monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", "")
+    files = [{"filename": "rates.pdf", "content": b"%PDF-1.4",
+              "mime_type": "application/pdf"}]
+
+    result = email_sender.send_rfq_email(TO, "RFQ", "body", attachments=files)
+
+    assert result == {"status": "sent", "to": TO}
+    assert gmail_api_sends[0]["attachments"] == files
 
 
 def test_the_default_provider_still_sends_over_smtp(smtp_sends, monkeypatch):

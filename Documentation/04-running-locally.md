@@ -36,6 +36,23 @@ cd frontend && npm install && npm run dev    # http://localhost:3000
 Go to **http://localhost:3000/dashboard** — not `/`. The root route is the
 legacy office view.
 
+You will be bounced to `/login`, because auth is on by default. Give yourself an
+account first — there is no signup route:
+
+```bash
+python -m backend.scripts.create_user --email you@yourdomain.com
+```
+
+It prompts for the password twice without echo (minimum 12 characters) and needs
+`setup_app_users.sql` to have been run. `JWT_SECRET` must be set in `.env` and at
+least 32 characters, or the API refuses to boot:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(48))"
+```
+
+Deploying is [06-deploying.md](06-deploying.md).
+
 Quieter backend, no background jobs:
 
 ```bash
@@ -55,6 +72,7 @@ add_customer_request_link.sql       customer_email_id / customer_thread_id
 setup_agents_table.sql              agents
 setup_scan_state.sql                automation_state
 link_replies_to_jobs.sql            emails.rfq_reference + scan retry columns
+setup_app_users.sql                 app_users — required, the API refuses logins without it
 ```
 
 `link_replies_to_jobs.sql` also contains a commented-out `DELETE FROM
@@ -117,7 +135,7 @@ already in flight.
 
 With `RUN_SCHEDULER=1` (the default), `app/lifespan.py` starts four one-shot
 threads — LLM warmup, an ingest, a classification backfill, and one pass of the
-attachment worker — then registers six repeating jobs:
+attachment worker — then registers seven repeating jobs:
 
 | Job | Interval | `job=` id prefix |
 |---|---|---|
@@ -125,6 +143,7 @@ attachment worker — then registers six repeating jobs:
 | Email ingest | 5 min | `ingest` |
 | Attachment worker | 2 min | `attachment_worker` |
 | Retry pending classifications | 15 min | `retry_pending` |
+| Recover RFQs stuck at `sending` | 15 min | `stuck_sends` |
 | Metrics snapshot | 1 h | `metrics_snapshot` |
 | Sync-gap audit + heal | 24 h | `gap_heal` |
 
@@ -138,7 +157,7 @@ inbox costs real money. `RUN_SCHEDULER=0` avoids it.
 ### `RUN_SCHEDULER` is the one setting you must get right when scaling out
 
 The scheduler starts in the lifespan handler, so **every process that runs
-lifespan gets its own copy of all ten jobs.** That includes:
+lifespan gets its own copy of every one of those jobs.** That includes:
 
 - `uvicorn --workers 3` — lifespan runs three times, three schedulers
 - three container replicas behind a load balancer — three schedulers

@@ -57,7 +57,7 @@ ENV LOG_TO_FILE=0 \
 # Deliberately 0, against config.py's default of True.
 #
 # The scheduler starts in the lifespan handler, so EVERY process running lifespan
-# gets its own copy of all ten background jobs. Scale this image to 3 replicas
+# gets its own copy of every background job. Scale this image to 3 replicas
 # with the default and you get three schedulers scanning the same inbox every 5
 # minutes. The atomic claim in the scan keeps that correct — no email is
 # processed twice — but it happens after classification, so you pay OpenAI three
@@ -69,13 +69,21 @@ ENV LOG_TO_FILE=0 \
 # gets ingested, so it surfaces in minutes. Silent triple billing does not.
 ENV RUN_SCHEDULER=0
 
+# The port the app listens on. 8001 locally, because 8000 is taken on the dev
+# machine; a platform that injects its own PORT overrides it at runtime.
+ENV PORT=8001
+
 EXPOSE 8001
 
 # /health returns 200 when Supabase is reachable, 503 when it is not, so the
 # status code alone is the signal. Python rather than curl: this image has no
 # curl and adding one would mean an apt layer for a single request.
+#
+# Reads $PORT so it still probes the right socket when the platform reassigns it.
+# Railway ignores this HEALTHCHECK entirely and polls healthcheckPath from
+# railway.toml over its own network — this one is for `docker run` locally.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
-    CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8001/health', timeout=4).status == 200 else 1)"
+    CMD python -c "import os,urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:'+os.environ.get('PORT','8001')+'/health', timeout=4).status == 200 else 1)"
 
 # No --reload: it runs a file-watching supervisor that restarts the app on source
 # changes, and the source in an image does not change. See run_backend.sh, which
@@ -85,4 +93,14 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
 # lifespan handler once per worker and each one starts its own scheduler — the
 # duplicate-spend problem above, inside a single container where RUN_SCHEDULER
 # cannot distinguish them.
-CMD ["uvicorn", "backend.app.api:app", "--host", "0.0.0.0", "--port", "8001"]
+#
+# Shell form, not the exec-form list, because $PORT has to be expanded and the
+# list form passes it to uvicorn as the literal string "$PORT". Railway assigns a
+# port per service and injects it as PORT; a container that ignores it binds a
+# socket the platform's proxy never connects to, and the deploy fails its
+# healthcheck with an app that is running perfectly on the wrong number.
+#
+# `exec` matters as much as the expansion: without it, sh stays alive as PID 1 and
+# uvicorn is its child, so SIGTERM on shutdown reaches the shell and not the app.
+# The scheduler's jobs would then be killed mid-flight instead of at a checkpoint.
+CMD ["sh", "-c", "exec uvicorn backend.app.api:app --host 0.0.0.0 --port ${PORT:-8001}"]

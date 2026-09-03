@@ -194,6 +194,41 @@ class AgentContact:
 
 
 @dataclass
+class AppUser:
+    """An operator who may call this API.
+
+    `password_hash` is on the dataclass because auth_service needs it to verify a
+    login, and pulling it in a second query would mean two round trips for every
+    login. It must never reach the HTTP layer — routes return the Pydantic
+    `UserResponse` in routes/auth.py, which has no such field, rather than this.
+
+    `is_active` is the revocation mechanism. There is no token denylist, so
+    flipping it to false stops future logins but leaves any already-issued token
+    valid until it expires — which is why auth_service re-reads the user on
+    /auth/me rather than trusting the token's claims alone.
+    """
+    id: str
+    email: str
+    password_hash: str = ""
+    full_name: str = ""
+    role: str = "operator"
+    is_active: bool = True
+
+    @classmethod
+    def from_row(cls, row: dict) -> "AppUser":
+        return cls(
+            id=_s(row, "id"),
+            email=_s(row, "email").lower(),
+            password_hash=_s(row, "password_hash"),
+            full_name=_s(row, "full_name"),
+            role=_s(row, "role") or "operator",
+            # Absent means active: a partial select that omits the column must not
+            # read as "this account is disabled" and lock everyone out.
+            is_active=bool(row.get("is_active", True)),
+        )
+
+
+@dataclass
 class Attachment:
     id: str
     file_name: str = ""

@@ -1,0 +1,12 @@
+# Node for the frontend. Nothing else — Python is managed by venv/ (see
+# Documentation/04-running-locally.md), not by mise.
+#
+# Next 16 refuses to run on Node 18: `next dev` exits with
+#   You are using Node.js 18.20.2. For Next.js, Node.js version ">=20.9.0" is required.
+# This machine's global mise config pins 18.20.2, which is why it has to be
+# overridden here rather than left to the default. A repo-local mise.toml takes
+# precedence over ~/.config/mise/config.toml, so other projects keep 18.
+#
+# Matches engines.node in frontend/package.json.
+[tools]
+node = "24"

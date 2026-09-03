@@ -20,8 +20,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import {
   appendPage, mergeFirstPage, nextCursor, serverSaysMore, type PagingState,
 } from './inboxPaging';
-
-const API_BASE = 'http://localhost:8001';
+import { apiFetch } from '@/lib/api';
 
 export interface InboxEmail {
   id: string;
@@ -78,9 +77,10 @@ export function useInboxFeed(
   const cursor = useRef(0);
   const inFlight = useRef(false);
 
+  // API-relative, no host: apiFetch prefixes API_BASE.
   const url = useCallback(
     (offset: number) =>
-      `${API_BASE}/fetch-inbox?limit=${pageSize}&offset=${offset}`
+      `/fetch-inbox?limit=${pageSize}&offset=${offset}`
       + (label ? `&label=${label}` : ''),
     [label, pageSize],
   );
@@ -92,7 +92,7 @@ export function useInboxFeed(
     setLoadingMore(true);
     setError('');
     try {
-      const res = await fetch(url(offset));
+      const res = await apiFetch(url(offset));
       const d: PageResponse = await res.json();
       if (!res.ok) throw new Error(d?.detail ?? `Server error ${res.status}`);
       setEmails(prev => appendPage(prev, d.emails ?? []));
@@ -117,7 +117,7 @@ export function useInboxFeed(
     inFlight.current = true;
     setError('');
     try {
-      const res = await fetch(url(0));
+      const res = await apiFetch(url(0));
       const d: PageResponse = await res.json();
       if (!res.ok) throw new Error(d?.detail ?? `Server error ${res.status}`);
       const incoming = d.emails ?? [];

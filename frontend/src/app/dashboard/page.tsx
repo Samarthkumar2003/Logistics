@@ -5,9 +5,8 @@ import Link from 'next/link';
 import { needsClick, remaining, shouldAutoLoad } from './inboxPaging';
 import { countAgents, groupByThread } from './replyThreads';
 import { useInboxFeed, type InboxFeed } from './useInboxFeed';
+import { apiFetch, fetchCurrentUser, logout } from '@/lib/api';
 import './dashboard.css';
-
-const API_BASE = 'http://localhost:8001';
 
 /** Rows a page of the unfiltered inbox holds. */
 const INBOX_PAGE = 20;
@@ -161,6 +160,48 @@ function useTheme(): [Theme, () => void] {
   return [theme, toggle];
 }
 
+/* ─── Signed-in operator ─────────────────────────────────────── */
+/** Who is signed in, and the way out.
+ *
+ *  Worth the row of pixels because this desk sends mail as a named person: an
+ *  operator who does not notice they are on a colleague's session sends RFQs
+ *  under that colleague's identity. */
+function SignedInAs() {
+  const [email, setEmail] = useState('');
+
+  useEffect(() => {
+    // Silent on failure. apiFetch has already redirected if the session is
+    // actually gone, and an API blip must not blank the dashboard over a caption.
+    // Sign out works regardless — it only clears local storage.
+    fetchCurrentUser().then(u => setEmail(u.email)).catch(() => {});
+  }, []);
+
+  return (
+    <div style={{ marginTop: 8, borderTop: '1px solid var(--border)', paddingTop: 8 }}>
+      {/* title so a long address is readable without widening the sidebar */}
+      <div
+        title={email}
+        style={{
+          fontSize: 11, color: 'var(--muted)', marginBottom: 6,
+          overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
+        }}
+      >
+        {email || ' '}
+      </div>
+      <button
+        onClick={logout}
+        style={{
+          width: '100%', padding: '7px 0', borderRadius: 8,
+          border: '1px solid var(--input-border)', background: 'transparent',
+          color: 'var(--muted-soft)', fontSize: 12, cursor: 'pointer',
+        }}
+      >
+        Sign out
+      </button>
+    </div>
+  );
+}
+
 /* ─── Label Pill ─────────────────────────────────────────────── */
 function LabelPill({ label, confidence }: { label?: string; confidence?: number }) {
   if (!label) return <span className="pill pill-gray">Unclassified</span>;
@@ -209,7 +250,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
     setSaving(true);
     setCorrectionError('');
     try {
-      const res = await fetch(`${API_BASE}/feedback`, {
+      const res = await apiFetch(`/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -234,6 +275,12 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
       // unconditional, so a rejected correction still rendered "✓ Corrected".
       if (isApprove) setApproved(true);
       else setCorrectedLabel(newLabel);
+      // `POST /feedback` writes the label cache as well as the audit row, so the
+      // server's answer for this email has genuinely changed — the tab counts and
+      // the two label-filtered lists are now stale. The local `correctedLabel`
+      // above only fixes this one card. This prop was passed in from the
+      // dashboard and never called, so a correction sat stale until the 60s poll.
+      onProcessed?.();
     } catch (err: unknown) {
       setCorrectionError(err instanceof Error ? err.message : 'Feedback failed');
     } finally {
@@ -257,8 +304,8 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
       setLoadingAtts(true);
       try {
         const [bodyRes, attRes] = await Promise.all([
-          fetch(`${API_BASE}/email-body/${email.id}`),
-          fetch(`${API_BASE}/email-attachments/${email.id}`),
+          apiFetch(`/email-body/${email.id}`),
+          apiFetch(`/email-attachments/${email.id}`),
         ]);
         if (bodyRes.ok) {
           const d = await bodyRes.json();
@@ -284,7 +331,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
     let body = fullBody ?? email.body ?? '';
     if (!body) {
       try {
-        const r = await fetch(`${API_BASE}/email-body/${email.id}`);
+        const r = await apiFetch(`/email-body/${email.id}`);
         if (r.ok) body = decodeEntities((await r.json()).body ?? '');
       } catch { /* proceed with empty body — form stays blank */ }
     }
@@ -551,7 +598,7 @@ function ShipmentCard({ job }: { job: RFQJob }) {
     setLoadingR(true);
     setReplyError('');
     try {
-      const r = await fetch(`${API_BASE}/jobs/${job.reference}/replies`);
+      const r = await apiFetch(`/jobs/${job.reference}/replies`);
       // A 500 returns {detail}, not an array — guard before trusting the shape.
       const d = await r.json();
       if (!r.ok) throw new Error(d?.detail ?? `Server error ${r.status}`);
@@ -572,7 +619,7 @@ function ShipmentCard({ job }: { job: RFQJob }) {
     setApproving(true);
     setApproveResult(null);
     try {
-      const r = await fetch(`${API_BASE}/jobs/${job.reference}/approve`, { method: 'POST' });
+      const r = await apiFetch(`/jobs/${job.reference}/approve`, { method: 'POST' });
       const d = await r.json();
       if (r.ok) {
         setJobStatus('approved');
@@ -791,7 +838,7 @@ export default function Dashboard() {
     if (automationEnabled === null) return;
     setTogglingAutomation(true);
     try {
-      const r = await fetch(`${API_BASE}/automation/toggle`, {
+      const r = await apiFetch(`/automation/toggle`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ enabled: !automationEnabled }),
@@ -802,15 +849,13 @@ export default function Dashboard() {
     }
   }
 
-  const fetchData = useCallback(async (showRefreshing = false) => {
-    if (showRefreshing) setRefreshing(true);
-
+  const fetchData = useCallback(async () => {
     // Jobs + automation status load first — unblocks UI immediately
     try {
       const [jr, ar, ur] = await Promise.all([
-        fetch(`${API_BASE}/jobs`),
-        fetch(`${API_BASE}/automation/status`),
-        fetch(`${API_BASE}/rate-cards/unlinked?limit=50`),
+        apiFetch(`/jobs`),
+        apiFetch(`/automation/status`),
+        apiFetch(`/rate-cards/unlinked?limit=50`),
       ]);
       if (jr.ok) setJobs(await jr.json());
       if (ar.ok) {
@@ -824,17 +869,38 @@ export default function Dashboard() {
       setError('Cannot reach the backend. Make sure the server is running.');
     } finally {
       setLoading(false);
-      setRefreshing(false);
     }
   }, []);
 
-  /** Everything on screen, re-read. The feeds merge their first page rather than
-   *  replacing it, so a list scrolled several pages deep stays where it is. */
-  const refreshAll = useCallback(() => {
-    fetchData();
-    refreshInbox();
-    refreshRequests();
-    refreshRateCards();
+  /**
+   * Everything on screen, re-read. The feeds merge their first page rather than
+   * replacing it, so a list scrolled several pages deep stays where it is.
+   *
+   * The three email lists live in `useInboxFeed`, not in this component's state,
+   * so they are only re-read by calling each feed's own `refresh`. "Refresh Now"
+   * used to call `fetchData` alone — which reloads jobs, automation status and
+   * unlinked rate cards, none of which the Inbox, Customer Requests or Rate Cards
+   * tab displays. The button moved the "Updated Ns ago" line and changed nothing
+   * else on screen, so it read as broken. It goes through here now.
+   *
+   * `allSettled`, not `all`: one list failing must not abandon the other three.
+   * Each feed keeps its own error line, and `fetchData` sets the shared banner.
+   */
+  const refreshAll = useCallback(async (showRefreshing = false) => {
+    // Held until every list has landed, not just the first — releasing the button
+    // while three feeds are still in flight invites a second click that the
+    // feeds' in-flight guard would silently drop.
+    if (showRefreshing) setRefreshing(true);
+    try {
+      await Promise.allSettled([
+        fetchData(),
+        refreshInbox(),
+        refreshRequests(),
+        refreshRateCards(),
+      ]);
+    } finally {
+      if (showRefreshing) setRefreshing(false);
+    }
   }, [fetchData, refreshInbox, refreshRequests, refreshRateCards]);
 
   // Jobs, automation status and the unlinked list, once. The feeds load their own
@@ -842,7 +908,9 @@ export default function Dashboard() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   useEffect(() => {
-    const t = setInterval(refreshAll, 60_000);
+    // Wrapped rather than passed directly: the poll must not show the button's
+    // spinner, and `setInterval` would hand the callback its own arguments.
+    const t = setInterval(() => { void refreshAll(); }, 60_000);
     return () => clearInterval(t);
   }, [refreshAll]);
 
@@ -977,7 +1045,11 @@ export default function Dashboard() {
           <div className="refresh-time">
             {lastRefresh ? `Updated ${timeAgo(lastRefresh.toISOString())}` : 'Loading…'}
           </div>
-          <button className="btn-refresh" onClick={() => fetchData(true)} disabled={refreshing}>
+          <button
+            className="btn-refresh"
+            onClick={() => { void refreshAll(true); }}
+            disabled={refreshing}
+          >
             {refreshing ? '⏳ Refreshing…' : '↻ Refresh Now'}
           </button>
           <button
@@ -1004,6 +1076,7 @@ export default function Dashboard() {
             <span className="theme-label">{theme === 'dark' ? 'Light mode' : 'Dark mode'}</span>
           </button>
           <Link href="/" className="btn-office">🏢 Office View</Link>
+          <SignedInAs />
         </div>
       </aside>
 

@@ -2,6 +2,10 @@
   "name": "frontend",
   "version": "0.1.0",
   "private": true,
+  "//engines": "Next 16 refuses to run on Node 18 — it errors with 'Node.js version \">=20.9.0\" is required'. Declared so the build platform installs a Node that works instead of failing at `next build`.",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "scripts": {
     "dev": "next dev",
     "build": "next build",

@@ -11,8 +11,7 @@ import {
   containerSizeText, containerSummary, hasContainers, quantityOf, setManualText,
   setQuantity, toggleContainer, toggleManual,
 } from './containerSize';
-
-const API_BASE = 'http://localhost:8001';
+import { apiFetch } from '@/lib/api';
 
 /* ─── Types ─────────────────────────────────────────────────────── */
 interface Agent {
@@ -359,7 +358,7 @@ export default function SendRequestPage() {
     async function init() {
       // 1. Load agents list
       try {
-        const res = await fetch(`${API_BASE}/agents`);
+        const res = await apiFetch(`/agents`);
         if (!res.ok) {
           // Backend errors are JSON {detail: "..."} — surface the real reason
           let detail = `Server error ${res.status}`;
@@ -385,7 +384,7 @@ export default function SendRequestPage() {
       setSourceEmail(email);
       setExtracting(true);
       try {
-        const res = await fetch(`${API_BASE}/extract-details`, {
+        const res = await apiFetch(`/extract-details`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ sender: email.sender, subject: email.subject, body: email.body }),
@@ -474,7 +473,7 @@ export default function SendRequestPage() {
 
     setPreviewing(true);
     try {
-      const res = await fetch(`${API_BASE}/preview-rfq`, {
+      const res = await apiFetch(`/preview-rfq`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
@@ -514,7 +513,7 @@ export default function SendRequestPage() {
 
     setPhase('sending');
     try {
-      const res = await fetch(`${API_BASE}/send-rfq`, {
+      const res = await apiFetch(`/send-rfq`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
