@@ -7,11 +7,23 @@ and an untested security control is a guess.
 
 The other half of the job is not over-redacting: a filter that masks RFQ
 references or port codes makes the logs useless and gets switched off.
+
+The formatter tests at the foot of this file cover P1-2: a filter runs before
+`Formatter.formatException`, so it cannot see a traceback, and every
+`logger.exception` call used to write its frames verbatim past both matchers.
 """
 
+import json
 import logging
+import sys
 
-from backend.core.logging_config import SecretRedactingFilter, collect_secrets
+from backend.core.logging_config import (
+    RedactingFormatter,
+    SecretRedactingFilter,
+    _json_formatter,
+    collect_secrets,
+    scrub,
+)
 
 SECRET = "super-secret-value-12345"
 
@@ -20,6 +32,27 @@ def _apply(filter_: SecretRedactingFilter, message: str, *args) -> str:
     record = logging.LogRecord("test", logging.INFO, __file__, 1, message, args or None, None)
     filter_.filter(record)
     return record.getMessage()
+
+
+def _record(msg: str = "operation failed", *, exc: BaseException | None = None,
+            sinfo: str | None = None, **extra) -> logging.LogRecord:
+    """A record carrying whatever a real `logger.exception` call would carry."""
+    exc_info = None
+    if exc is not None:
+        try:
+            raise exc
+        except BaseException:
+            exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "test", logging.ERROR, __file__, 1, msg, None, exc_info, None, sinfo
+    )
+    # Supplied by CorrelationFilter in the real stack; the JSON format string
+    # names them, so they have to exist before a formatter sees the record.
+    for field in ("ctx", "request_id", "scan_id", "job_id", "email_id"):
+        setattr(record, field, "")
+    for key, value in extra.items():
+        setattr(record, key, value)
+    return record
 
 
 # ---------------------------------------------------------------------------
@@ -124,3 +157,107 @@ def test_the_filter_returns_true_so_lines_are_never_dropped():
     assert SecretRedactingFilter([SECRET]).filter(
         logging.LogRecord("t", logging.INFO, __file__, 1, SECRET, None, None)
     ) is True
+
+
+# ---------------------------------------------------------------------------
+# The formatter — P1-2. A filter cannot reach a traceback; this can.
+# ---------------------------------------------------------------------------
+
+def test_a_raised_secret_does_not_survive_into_the_traceback():
+    """The case BUGS.md P1-2 names. Reverting the formatter to a plain
+    logging.Formatter fails this and the five below it."""
+    out = RedactingFormatter("%(message)s", secrets=[]).format(
+        _record(exc=RuntimeError("sk-live-AbCdEfGhIjKlMnOpQrStUvWx0123456789"))
+    )
+    assert "sk-live-" not in out
+    assert "***REDACTED***" in out
+    assert "RuntimeError" in out  # the diagnostic value is kept
+
+
+def test_an_env_secret_in_a_traceback_is_masked():
+    out = RedactingFormatter("%(message)s", secrets=[SECRET]).format(
+        _record(exc=ValueError(f"connect failed for {SECRET}"))
+    )
+    assert SECRET not in out
+
+
+def test_a_supabase_url_with_an_embedded_key_is_masked():
+    """The concrete leak: the service_role JWT lands in a frame's locals or the
+    URL of a failing request."""
+    key = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJyb2xlIjoic2VydmljZV9yb2xlIn0.abcdef123456"
+    out = RedactingFormatter("%(message)s", secrets=[]).format(
+        _record(exc=RuntimeError(f"POST https://proj.supabase.co/rest/v1/emails?apikey={key}"))
+    )
+    assert key not in out
+    assert "eyJ" not in out
+
+
+def test_stack_info_is_masked_too():
+    out = RedactingFormatter("%(message)s", secrets=[SECRET]).format(
+        _record(sinfo=f'  File "x.py", line 1\n    login(password="{SECRET}")')
+    )
+    assert SECRET not in out
+
+
+def test_the_message_is_still_masked_when_there_is_no_exception():
+    out = RedactingFormatter("%(message)s", secrets=[SECRET]).format(
+        _record(msg=f"using {SECRET}")
+    )
+    assert SECRET not in out
+
+
+def test_scrubbing_is_idempotent_because_two_handlers_share_one_formatter():
+    """`Formatter.format` caches its rendered traceback on `record.exc_text`, so
+    the second handler re-renders the already-scrubbed text. Masking a mask must
+    not corrupt the line."""
+    formatter = RedactingFormatter("%(message)s", secrets=[SECRET])
+    record = _record(exc=RuntimeError(f"boom {SECRET}"))
+    first = formatter.format(record)
+    assert formatter.format(record) == first
+    assert SECRET not in first
+
+
+def test_the_formatter_leaves_an_ordinary_traceback_intact():
+    out = RedactingFormatter("%(message)s", secrets=[SECRET]).format(
+        _record(exc=KeyError("RFQ-20260101-a1b2"))
+    )
+    assert "RFQ-20260101-a1b2" in out
+    assert "***REDACTED***" not in out
+
+
+def test_scrub_handles_empty_and_untouched_text():
+    assert scrub("", [SECRET]) == ""
+    assert scrub("linked RFQ-20260101-a1b2, port INNSA", [SECRET]) == \
+        "linked RFQ-20260101-a1b2, port INNSA"
+
+
+# ---------------------------------------------------------------------------
+# The JSON formatter — the production path (LOG_JSON=1 in the Dockerfile)
+# ---------------------------------------------------------------------------
+
+def test_json_formatter_masks_a_traceback():
+    out = _json_formatter([SECRET]).format(_record(exc=RuntimeError(f"boom {SECRET}")))
+    assert SECRET not in out
+    assert json.loads(out)  # still one valid JSON object per line
+
+
+def test_json_formatter_masks_extra_fields():
+    """`extra=` was only ever message-redacted, so a secret handed to a
+    structured field went out untouched."""
+    out = _json_formatter([SECRET]).format(_record(upstream_auth=SECRET))
+    assert SECRET not in out
+
+
+def test_json_formatter_masks_a_secret_that_json_would_escape():
+    """Scrubbing only the rendered line misses this: the quote and backslash come
+    back as \\" and \\\\, so the raw substring no longer matches. The
+    pre-serialisation pass is what catches it."""
+    awkward = 'pa"ss\\word-long-enough'
+    out = _json_formatter([awkward]).format(_record(msg=f"login {awkward} failed"))
+    assert awkward not in out
+    assert json.loads(out)["message"] == "login ***REDACTED*** failed"
+
+
+def test_json_formatter_keeps_ordinary_content():
+    out = json.loads(_json_formatter([SECRET]).format(_record(msg="linked RFQ-20260101-a1b2")))
+    assert out["message"] == "linked RFQ-20260101-a1b2"
