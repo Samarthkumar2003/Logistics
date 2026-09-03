@@ -1,6 +1,6 @@
 # Known bugs
 
-_Last reviewed: 2026-08-18. Scope: full backend + frontend._
+_Last reviewed: 2026-09-03. Scope: full backend + frontend._
 
 Priority is **impact × silence**. A defect that corrupts data without anyone
 noticing outranks one that throws a visible error.
@@ -47,36 +47,40 @@ _None open._
 ## P1 — wrong data, real money, silent loss
 
 ### P1-1 · No authentication, bound to 0.0.0.0
-`run_backend.sh` exposes the API on every interface. `POST /send-rfq` and
-`POST /jobs/{ref}/approve` send real email to real vendors; `GET /agents`
-returns the full contact database. CORS restricts browsers only — it stops
-nothing with `curl`.
-
-**Fix:** a shared-secret header at minimum, or bind to `127.0.0.1` until there
-is real auth.
+**Closed 2026-09-01** — see [Fixed on 2026-09-01](#fixed-on-2026-09-01). Bearer
+auth now covers every endpoint except `/health` and `/auth/login`. Two residual
+gaps are tracked there: no token revocation, and the token lives in
+`localStorage`.
 
 ### P1-2 · Tracebacks are never redacted
-`SecretRedactingFilter.filter` rewrites `record.getMessage()` and nothing else.
-`exc_text` does not exist yet at filter time — `Formatter.formatException`
-produces it afterwards — so **every `logger.exception` call writes its traceback
-verbatim**, past both the env-name and the shape-based matchers. Anything a frame
-carries goes to disk: a Supabase URL with an embedded key, an SMTP password in a
-`login()` argument, an API key in a provider client's repr. The same hole applies
-to the JSON formatter's `extra` fields, which are also only message-redacted.
+**Closed 2026-09-03** — see [Fixed on 2026-09-03](#fixed-on-2026-09-03).
+Redaction moved into the formatter, which is the only layer that can see a
+rendered traceback.
 
-Silent by construction: the log looks redacted, because the *messages* are. The
-recent conversion of ~31 handlers from `str(e)` to `logger.exception` was the
-right call for debuggability and multiplied the volume of unredacted traceback
-text by roughly the same factor.
+### P1-3 · Real vendor data is committed to a public repository
+`github.com/Samarthkumar2003/Logistics` is **public**.
+`data/agents_database.csv` holds 110 vendor rows — 83 distinct real email
+domains, 35 rows carrying phone numbers — and `data/historical_shipments.json`
+holds ten real completed shipments with the rates paid. Both are tracked, so
+both are readable by anyone, and both are in the history: deleting the files does
+not undo the disclosure.
 
-**Consequence today:** `logs/` must be treated as containing secrets. Do not
-attach a log file to a ticket or ship it to an aggregator without reading it.
+Was filed under P3 hygiene, which understated it — that entry assumed a private
+repo. It is listed as P1 because the data is third-party (vendors who did not
+agree to publication) and because commercial rates paid are exactly what a
+competitor would want.
 
-**Fix:** redact in the `Formatter`, not the `Filter` — override `format()` /
-`formatException()` and run the existing scrubber over the rendered result,
-including `exc_text` and `stack_info`. A filter cannot do this; it runs too early.
-Then extend the same pass over `extra`. Add a test asserting a raised
-`RuntimeError("sk-live-…")` does not appear in the formatted output.
+Note that `data/agents_database.csv` cannot simply be dropped: `agent_repo` falls
+back to it when the `agents` table is empty, and the Dockerfile copies `data/`
+into the image for that reason.
+
+**Options, none of them free:** make the repo private (fastest, and does not
+address forks or anything already cloned); rewrite history with
+`git filter-repo` and force-push (invalidates every existing clone and PR);
+or accept the disclosure and tell the vendors. Whichever is chosen, the CSV
+should move to a seed loaded from the database rather than a tracked file.
+
+_Not a code defect, so nothing here fixes it — this is a decision._
 
 ---
 
@@ -123,10 +127,16 @@ per-agent outcome correlation; `tests/test_rfq_approve.py` (13) covers awarding
 against a failed acceptance; `tests/test_inbox_routes.py` covers the six
 outcomes of a body lookup through the route layer.
 
+377 tests as of 2026-09-03, and **CI runs them on push** —
+`.github/workflows/ci.yml`, added 2026-09-03: the suite on 3.12 against
+`requirements.lock`, `next build` (which runs `tsc`), the four
+`frontend/tests/*.check.ts` scripts, and two greps — one for sliced credentials,
+one for tracked credential files.
+
 Still open: **`reply_service.link_reply` has no test** — the function that
 decides which job a rate card attaches to, and the one place a wrong answer
 silently attributes a vendor's rate to the wrong shipment. Most routes remain
-uncovered. Also still no CI: nothing runs the suite on push.
+uncovered.
 
 `_strip_quoted` was deliberately left uncovered. `normalize_port` and
 `_extract_country` were covered, then deleted along with their modules.
@@ -151,16 +161,14 @@ confirm the parts that *are* right: a permanent error consumes exactly one
 attempt, and "invalid api key … please try again" is correctly treated as
 permanent despite matching both keyword lists.
 
-### P2-7 · Four more unbounded reads, from the 2026-08-18 bounds audit
+### P2-7 · Three more unbounded reads, from the 2026-08-18 bounds audit
 The audit that produced the four fixes below found these and left them open. They
 are the same defect class — a limit that is absent, or attached to the wrong
 quantity — ranked here by blast radius.
 
-- **`GET /inbox?limit=` has no ceiling.** `limit: int = 20` goes straight into
-  `.range(offset, offset + limit - 1)`, so `?limit=1000000` is a full-table read.
-  Same at `/inbox/unlinked-rate-cards` (`limit: int = 50`), which also selects
-  **bodies**. Sharpened by P1-1: there is no auth, so anyone who can reach the
-  port can issue it. Fix is one line each — `Query(20, ge=1, le=200)`.
+- ~~**`GET /inbox?limit=` has no ceiling.**~~ **Closed 2026-09-03** — see
+  [Fixed on 2026-09-03](#fixed-on-2026-09-03). `/fetch-inbox` is capped at 200
+  and `/rate-cards/unlinked` at 100.
 - **`list_replies_for()` has no limit and no pagination.** `.in_(...).order(...)`
   over `rfq_reference`, selecting bodies, bounded only by how many replies exist
   across the references passed. Grows monotonically with deployment age.
@@ -182,9 +190,8 @@ quantity — ranked here by blast radius.
 
 - **Secrets in a synced folder.** `.env`, `.env.dwd-backup` and
   `service_account.json` sit in a OneDrive-synced directory. `.gitignore` does
-  not stop cloud sync. `data/agents_database.csv` is committed with 110 real
-  vendor emails and mobile numbers; `data/historical_shipments.json` holds ten
-  real completed shipments with the rates paid.
+  not stop cloud sync. (The committed vendor data that used to be described here
+  is now [P1-3](#p1) — the repository is public, which changes what it is.)
 - **`next_run` is never returned.** Both frontends type and render it;
   `automation.get_status()` doesn't provide it. Always "—". The office view also
   captions the schedule "Daily at 07:00 UTC" when it's every 5 minutes.
@@ -197,6 +204,185 @@ quantity — ranked here by blast radius.
 - **Agent data quality.** "Emu Lines" and "Emulines" are listed as separate
   companies; two DP World rows carry `@unifeeder.com` addresses while Unifeeder
   is also its own entry.
+
+---
+
+## Fixed on 2026-09-03
+
+<a id="fixed-on-2026-09-03"></a>
+
+**Every traceback went to the log unredacted (P1-2).** The reason was a layering
+mistake, not a missing pattern: `SecretRedactingFilter` is a `logging.Filter`,
+and a filter runs *before* `Formatter.formatException` builds `record.exc_text`.
+There was simply nothing there to match yet. So all 31 `logger.exception`
+handlers wrote their frames verbatim past both matchers, while the *message* on
+the same line was masked — the log looked redacted, which is what made it worth a
+P1 rather than a P3.
+
+This was the last thing standing between the app and a hosted log store. The
+Dockerfile sets `LOG_JSON=1` and the deploy sets `LOG_TO_FILE=0`, so stdout *is*
+the log and the platform retains it — meaning the deploy is what would have
+turned a local-disk exposure into a third-party one.
+
+Redaction now happens in the formatter, over the fully rendered line:
+`RedactingFormatter` for text, `RedactingJsonFormatter` for the production JSON
+path. Four things worth knowing:
+
+- **The rendered line, not an attribute list.** Scrubbing `format()`'s output
+  covers the message, the traceback and `stack_info` in one pass. Enumerating the
+  places a secret is allowed to reach is exactly how the original hole stayed
+  open, so the fix deliberately does not enumerate.
+- **`scrub()` has to be idempotent, and is.** `_MASK` contains nothing either
+  matcher looks for. Both handlers share one formatter instance and
+  `Formatter.format` caches its rendered traceback on `record.exc_text`, so the
+  same text passes through the scrubber more than once by design.
+- **The JSON path scrubs twice, for two different reasons.**
+  `process_log_record` sees field values *before* serialisation, so a secret
+  containing a quote or a backslash is matched raw rather than JSON-escaped —
+  and that pass is also what reaches `extra` fields, which the message-only
+  filter never touched. `format()` then scrubs the rendered line as a backstop.
+- **The filter stays.** It collapses `args` into an already-masked `msg`, so
+  nothing downstream can re-expand a secret by re-running %-substitution. The
+  formatter is the only layer that can reach a traceback. Neither is sufficient
+  alone.
+
+The `python-json-logger`-missing fallback now returns a `RedactingFormatter` too:
+an optional dependency going absent must not quietly switch the redaction off.
+
+Covered by 15 new cases in `tests/test_secret_redaction.py`, including the one
+P1-2 asked for — a raised `RuntimeError("sk-live-…")` absent from the formatted
+output — plus a Supabase service_role JWT in a failing request URL, an
+escape-carrying password through the JSON path, and the idempotency case.
+Negative control: with a plain `logging.Formatter`, or with the filter alone,
+`sk-live-` is present in the output.
+
+**`?limit=1000000` was a full-table read (P2-7, first of four).** `/fetch-inbox`
+is now `Annotated[int, Query(ge=1, le=200)]` and `/rate-cards/unlinked` `le=100`
+— tighter because that query selects message **bodies**, so the same page count
+costs an order of magnitude more egress, which Railway meters.
+
+Two traps in a change that BUGS.md called "one line each":
+
+- **`Annotated[int, Query(...)] = 20`, not `Query(20, ...)`.** The second form
+  makes the *default* a `Query` object, so every caller that is not an HTTP
+  request gets a `Query` where it expects an int. It fails deep in the
+  repository with `unsupported operand type(s) for +: 'Query' and 'int'`,
+  surfacing to the operator as a 500. Four tests in
+  `test_inbox_label_page.py` caught it; `test_the_bounds_are_annotated_so_direct_callers_still_get_ints`
+  now pins it.
+- **The office view asked for more than 200 and would have started 422-ing.**
+  `loadInbox` restores scroll depth as one big request with `limit =
+  inboxRef.current.length`, which is unbounded — the caller that made the
+  endpoint unbounded in practice. Past ten pages a refresh would have blanked the
+  view. `MAX_RESTORE = 200` in `page.tsx` clamps it, so a deeper restore returns
+  the newest 200 with `has_more` set and pages on from there.
+
+Also refused now: `limit=0` and a negative `offset`, neither of which is a page
+of anything. 422 rather than a silent clamp — a clamped limit makes a paging
+caller loop forever on a page size it never asked for. Ten cases in
+`tests/test_inbox_routes.py`.
+
+**Nothing ran the test suite on push.** `.github/workflows/ci.yml`: pytest on
+3.12 against `requirements.lock` with `--no-deps` (the same pinned set the image
+installs, so a green run says something about what actually deploys), `next
+build` on Node 24, the four `frontend/tests/*.check.ts` scripts, and the
+sliced-credential grep that `SecretRedactingFilter`'s docstring had been
+pointing at a file that did not exist. No secrets are provided to the test job:
+`conftest.py` blocks `socket.connect` for the whole suite, so a test needing the
+network fails there rather than passing quietly against someone's `.env`.
+
+---
+
+## Fixed on 2026-09-01
+
+<a id="fixed-on-2026-09-01"></a>
+
+**The API had no authentication at all (P1-1).** Anything that could reach the
+port could `POST /send-rfq` and mail real freight agents under this desk's
+identity, or `GET /agents` and take the whole vendor contact database. CORS was
+the only thing in the way and CORS restricts browsers only — it stops nothing
+with `curl`. This was the blocker on deploying anywhere public.
+
+Now: bcrypt-hashed passwords in a new `app_users` table, a `POST /auth/login`
+that returns an HS256 bearer token, and one middleware that requires that token
+on **every** path except `/health` and `/auth/login`. `/metrics`, `/docs` and
+`/openapi.json` are deliberately *not* public — the first leaks operational
+volumes, the other two enumerate every route and payload shape.
+
+Four decisions in it worth knowing, because each one is a trap avoided:
+
+- **Middleware order is CORS → correlate → auth → router.** `add_middleware`
+  inserts at position 0, so registration order is the *reverse* of execution
+  order. Get it wrong and the 401 goes out without
+  `Access-Control-Allow-Origin`, the browser rejects the response before the
+  frontend can read the status, and `fetch` throws a generic `TypeError` instead
+  — so the dashboard cannot tell "you are logged out" from "the API is down".
+  `tests/test_auth.py` asserts the 401 carries the header.
+- **The middleware returns `JSONResponse` directly, never `AppException`.**
+  `BaseHTTPMiddleware` sits *outside* Starlette's `ExceptionMiddleware`, so an
+  `AppException` raised there bypasses its handler and becomes a plain-text 500.
+  Also tested.
+- **Every rejected login says exactly `Invalid email or password`**, and an
+  unknown address still burns a real bcrypt verify against a dummy hash. Without
+  that, an unknown email returns in ~2 ms and a known one in ~250 ms, which
+  enumerates the user table regardless of how carefully the message is worded.
+  A deactivated account gets the same message for the same reason.
+- **`/auth/me` re-reads the row** instead of trusting the signed claims. Claims
+  are trustworthy about what was true *at login*; deactivating an operator would
+  otherwise sit unenforced for up to `JWT_EXPIRY_MINUTES`.
+
+Residual gaps, stated rather than hidden:
+
+- **No revocation.** There is no denylist, so a stolen token stays valid until it
+  expires (12 h by default). `is_active = false` blocks the next *login* and
+  bounces the browser on its next `/auth/me`, but does not kill an issued token
+  mid-flight. Rotating `JWT_SECRET` invalidates every token at once and is
+  currently the only way to force everyone out.
+- **The token is in `localStorage`, not an httpOnly cookie**, so injected
+  JavaScript can read it. The trade-off is deliberate: the API is on a different
+  origin from the dashboard, so a cookie would need `SameSite=None; Secure` with
+  credentialed CORS — which forbids the wildcard in `allow_headers` and adds a
+  CSRF surface a bearer token does not have. Revisit if this is ever exposed
+  beyond the desk.
+- **Password change does not invalidate existing tokens**, including any a thief
+  holds. Same missing denylist.
+
+`AUTH_ENABLED=0` still exists and turns the check off for the whole API. The
+offline test suite sets it in `tests/conftest.py`; a deployment must not.
+`create_app()` logs a `WARNING` naming the consequence when it boots that way.
+
+Files: `backend/core/security.py`, `backend/services/auth_service.py`,
+`backend/app/auth.py`, `backend/app/routes/auth.py`,
+`backend/repositories/user_repo.py`, `backend/scripts/create_user.py`,
+`sql/setup_app_users.sql`, `frontend/src/lib/api.ts`,
+`frontend/src/components/AuthGate.tsx`, `frontend/src/app/login/page.tsx`.
+Covered by `tests/test_auth.py` (40 cases).
+
+**"↻ Refresh Now" refreshed everything except the list you were looking at.** The
+button called `fetchData`, which re-reads jobs, automation status and unlinked
+rate cards. The Inbox, Customer Requests and Rate Cards tabs are not in that
+state — they belong to three `useInboxFeed` instances, each with its own
+`refresh`. Pressing the button therefore updated the "Updated Ns ago" line and
+the Shipments pane, and left the three email lists and all four nav badge counts
+exactly as they were, which reads as a dead button.
+
+A `refreshAll` already existed and was already wired to the 60s poll; the button
+just never used it. It now does, and `refreshAll` became `async` so the spinner
+is held until all four requests land rather than only the first — releasing it
+early invites a second click that `useInboxFeed`'s `inFlight` guard silently
+drops. `Promise.allSettled`, not `all`, so one failing list does not abandon the
+other three.
+
+Found alongside it: **`EmailCard`'s `onProcessed` prop was passed but never
+called.** `POST /feedback` writes the label cache as well as the audit row, so a
+correction changes what the server returns for that email — but only the card's
+own local state moved, so the tab counts and the two label-filtered lists stayed
+wrong until the poll came round. `submitFeedback` now calls it after the server
+agrees. It was silent rather than a crash because the prop is optional.
+
+Files: `frontend/src/app/dashboard/page.tsx`. The paging and merge helpers this
+leans on are covered by `frontend/tests/inboxPaging.check.ts`; the wiring itself
+is not — there is no DOM test harness in the frontend.
 
 ---
 
