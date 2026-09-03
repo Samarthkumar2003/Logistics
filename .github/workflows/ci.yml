@@ -45,13 +45,25 @@ jobs:
 
       # The layer SecretRedactingFilter's docstring points at. The redactor
       # matches whole values, so `key[:8]` defeats it by construction — a
-      # truncated secret is not a substring of anything it knows about. That has
-      # already happened once: OPENAI_API_KEY's first 8 characters were printed
-      # on every daily_report run, into public Actions output.
+      # truncated secret is not a substring of anything it knows about.
+      #
+      # This is not hypothetical and it is not fixed everywhere: `main` still
+      # carries the pre-restructure `daily_report.py`, whose line 44 logs
+      # `_api_key[:8]` on every scheduled run, into this public repo's Actions
+      # output. Scoped to `git ls-files` rather than `backend/` precisely so that
+      # a merge from `main`, or any root-level script coming back, is caught here
+      # instead of on a public log page.
+      # Tested on output, not on exit status: piping through xargs makes the
+      # status useless here. xargs returns 123 if *any* grep invocation exits 1,
+      # so "no matches anywhere" also looks like a failure — and worse, a single
+      # batch that does match exits 0, so the obvious `if grep ...` form passes
+      # silently on exactly the case it is meant to catch.
       - name: No sliced credentials in log calls
         run: |
-          if grep -rnE '(secret|password|token|api_?key|credential)[A-Za-z_]*\[\s*:?[0-9]+' \
-               --include='*.py' backend/ ; then
+          hits=$(git ls-files -z '*.py' | xargs -0 -r \
+                   grep -nE '(secret|password|token|api_?key|credential)[A-Za-z_]*\[\s*:?[0-9]+' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
             echo "::error::A credential is being sliced. The redactor matches whole values, so a truncated secret goes to the log unmasked. Log a boolean or a length instead."
             exit 1
           fi
@@ -60,9 +72,11 @@ jobs:
       # by name — an `git add -f` or a rename walks straight past it.
       - name: No credential files committed
         run: |
-          if git ls-files \
-               | grep -E '(^|/)(\.env($|\.)|service_account\.json|.*\.(pem|key)$)' \
-               | grep -v '\.env\.example$' ; then
+          hits=$(git ls-files \
+                   | grep -E '(^|/)(\.env($|\.)|service_account\.json|.*\.(pem|key)$)' \
+                   | grep -v '\.env\.example$' || true)
+          if [ -n "$hits" ]; then
+            echo "$hits"
             echo "::error::A credential file is tracked. Git history is effectively permanent — rotate the secret, do not just delete the file."
             exit 1
           fi
