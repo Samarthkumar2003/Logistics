@@ -147,9 +147,13 @@ export default function LoginPage() {
 
 /**
  * Inline style objects, per the project convention — no CSS files. Literal colours
- * rather than the dashboard's CSS variables: those are declared inside
- * dashboard.css and scoped to that subtree, so referencing them here would render
- * an unstyled form. Values copied from that palette so the two look like one app.
+ * rather than tokens, and this is now a choice rather than a constraint: the
+ * palette moved to app/theme.css, which the root layout imports, so the tokens
+ * do reach this route. Converting the literals below to var() and adding
+ * `themed` to the root element is all it would take for this form to follow the
+ * toggle as well. Untouched so far only because it was not part of the theming
+ * fix; values are copied from that palette's dark block, so the two look like
+ * one app until someone does.
  */
 const S: Record<string, React.CSSProperties> = {
   page: {

@@ -91,12 +91,12 @@ const CATEGORIES = [
 
 const inputStyle: React.CSSProperties = {
   width: '100%', padding: '9px 12px', fontSize: 13, fontFamily: 'monospace',
-  background: '#0d1117', border: '1px solid #2a2a3a', borderRadius: 6,
-  color: '#e2e8f0', outline: 'none', boxSizing: 'border-box',
+  background: 'var(--surface)', border: '1px solid var(--input-border)', borderRadius: 6,
+  color: 'var(--text)', outline: 'none', boxSizing: 'border-box',
 };
 
 const labelStyle: React.CSSProperties = {
-  fontSize: 11, fontWeight: 700, color: '#94a3b8', textTransform: 'uppercase',
+  fontSize: 11, fontWeight: 700, color: 'var(--muted-soft)', textTransform: 'uppercase',
   letterSpacing: '0.05em', marginBottom: 5, display: 'block',
 };
 
@@ -118,8 +118,8 @@ function AgentMultiSelect({ label, agents, selected, onToggle }: {
         onClick={() => setOpen(!open)}
         style={{
           ...inputStyle, textAlign: 'left', cursor: 'pointer',
-          color: count > 0 ? '#60a5fa' : '#64748b',
-          border: `1px solid ${count > 0 ? '#3b82f6' : '#2a2a3a'}`,
+          color: count > 0 ? 'var(--blue-soft)' : 'var(--muted)',
+          border: `1px solid ${count > 0 ? 'var(--blue)' : 'var(--input-border)'}`,
         }}
       >
         {count > 0 ? `${count} selected` : `Select agents... (${agents.length} available)`} {open ? '▲' : '▼'}
@@ -127,27 +127,27 @@ function AgentMultiSelect({ label, agents, selected, onToggle }: {
       {open && (
         <div style={{
           position: 'absolute', zIndex: 10, top: '100%', left: 0, right: 0, marginTop: 4,
-          maxHeight: 220, overflowY: 'auto', background: '#0d1117',
-          border: '1px solid #3b82f6', borderRadius: 6, padding: 4,
+          maxHeight: 220, overflowY: 'auto', background: 'var(--surface)',
+          border: '1px solid var(--blue)', borderRadius: 6, padding: 4,
         }}>
           {agents.length === 0 && (
-            <div style={{ padding: 8, fontSize: 12, color: '#64748b' }}>No agents in this category</div>
+            <div style={{ padding: 8, fontSize: 12, color: 'var(--muted)' }}>No agents in this category</div>
           )}
           {agents.map(a => (
             <label key={a.id} style={{
               display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
-              fontSize: 12, color: '#e2e8f0', cursor: 'pointer', borderRadius: 4,
-              background: selected.has(a.id) ? '#1e3a5f' : 'transparent',
+              fontSize: 12, color: 'var(--text)', cursor: 'pointer', borderRadius: 4,
+              background: selected.has(a.id) ? 'var(--blue-tint-2)' : 'transparent',
             }}>
               <input
                 type="checkbox"
                 checked={selected.has(a.id)}
                 onChange={() => onToggle(a.id)}
-                style={{ accentColor: '#3b82f6' }}
+                style={{ accentColor: 'var(--blue)' }}
               />
               <span>
                 {a.agent_name}
-                <span style={{ color: '#64748b', fontSize: 10 }}> — {a.location || a.country} · {a.email}</span>
+                <span style={{ color: 'var(--muted)', fontSize: 10 }}> — {a.location || a.country} · {a.email}</span>
               </span>
             </label>
           ))}
@@ -167,7 +167,7 @@ function ContainerMultiSelect({ selection, onChange }: {
 
   const row: React.CSSProperties = {
     display: 'flex', alignItems: 'center', gap: 8, padding: '6px 8px',
-    fontSize: 12, color: '#e2e8f0', cursor: 'pointer', borderRadius: 4,
+    fontSize: 12, color: 'var(--text)', cursor: 'pointer', borderRadius: 4,
   };
 
   return (
@@ -178,8 +178,8 @@ function ContainerMultiSelect({ selection, onChange }: {
         onClick={() => setOpen(!open)}
         style={{
           ...inputStyle, textAlign: 'left', cursor: 'pointer',
-          color: chosen ? '#60a5fa' : '#64748b',
-          border: `1px solid ${chosen ? '#3b82f6' : '#2a2a3a'}`,
+          color: chosen ? 'var(--blue-soft)' : 'var(--muted)',
+          border: `1px solid ${chosen ? 'var(--blue)' : 'var(--input-border)'}`,
           overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap',
         }}
       >
@@ -188,7 +188,7 @@ function ContainerMultiSelect({ selection, onChange }: {
       {open && (
         <div style={{
           position: 'absolute', zIndex: 10, top: '100%', left: 0, right: 0, marginTop: 4,
-          background: '#0d1117', border: '1px solid #3b82f6', borderRadius: 6, padding: 4,
+          background: 'var(--surface)', border: '1px solid var(--blue)', borderRadius: 6, padding: 4,
         }}>
           {CONTAINER_OPTIONS.map(o => {
             const on = selection.picked.includes(o);
@@ -197,20 +197,20 @@ function ContainerMultiSelect({ selection, onChange }: {
               // click that lands on the spinner would also toggle the tick.
               <div
                 key={o}
-                style={{ ...row, background: on ? '#1e3a5f' : 'transparent', cursor: 'default' }}
+                style={{ ...row, background: on ? 'var(--blue-tint-2)' : 'transparent', cursor: 'default' }}
               >
                 <label style={{ display: 'flex', alignItems: 'center', gap: 8, flex: 1, cursor: 'pointer' }}>
                   <input
                     type="checkbox"
                     checked={on}
                     onChange={() => onChange(toggleContainer(selection, o))}
-                    style={{ accentColor: '#3b82f6' }}
+                    style={{ accentColor: 'var(--blue)' }}
                   />
                   <span>{o}</span>
                 </label>
                 {on && (
                   <>
-                    <span style={{ fontSize: 10, color: '#64748b' }}>QTY</span>
+                    <span style={{ fontSize: 10, color: 'var(--muted)' }}>QTY</span>
                     <input
                       type="number"
                       min={MIN_QUANTITY}
@@ -229,16 +229,16 @@ function ContainerMultiSelect({ selection, onChange }: {
             );
           })}
           <label style={{
-            ...row, background: selection.manualOn ? '#1e3a5f' : 'transparent',
-            borderTop: '1px solid #1e293b', borderRadius: 0, marginTop: 2,
+            ...row, background: selection.manualOn ? 'var(--blue-tint-2)' : 'transparent',
+            borderTop: '1px solid var(--border)', borderRadius: 0, marginTop: 2,
           }}>
             <input
               type="checkbox"
               checked={selection.manualOn}
               onChange={() => onChange(toggleManual(selection))}
-              style={{ accentColor: '#3b82f6' }}
+              style={{ accentColor: 'var(--blue)' }}
             />
-            <span>Manual entry<span style={{ color: '#64748b', fontSize: 10 }}> — anything not listed</span></span>
+            <span>Manual entry<span style={{ color: 'var(--muted)', fontSize: 10 }}> — anything not listed</span></span>
           </label>
           {selection.manualOn && (
             <input
@@ -550,35 +550,41 @@ export default function SendRequestPage() {
   const byCategory = (key: string) => agents.filter(a => a.category === key);
 
   return (
-    <div style={{
+    // Colours below are tokens from app/theme.css, not literals, so this page
+    // follows the theme the dashboard toggle stored. `themed` is what brings the
+    // tokens into scope — without it every var() resolves to nothing.
+    <div className="themed" style={{
       // globals.css pins `body { height:100vh; overflow:hidden }` for the fixed
       // dashboard, which clips this tall form and removes the page scrollbar.
       // Own the scroll here: fill the viewport and scroll internally.
       height: '100vh', overflowY: 'auto',
-      background: '#0a0e17', color: '#e2e8f0',
+      // body is a centring flex container, so without this the root is only as
+      // wide as its content and body's own background shows down both sides.
+      width: '100%',
+      background: 'var(--bg)', color: 'var(--text)',
       fontFamily: 'monospace', padding: '32px 24px',
     }}>
       <div style={{ maxWidth: 720, margin: '0 auto' }}>
         {/* Header */}
         <div style={{ display: 'flex', alignItems: 'center', gap: 12, marginBottom: 24 }}>
-          <Link href="/" style={{ color: '#64748b', textDecoration: 'none', fontSize: 13 }}>← Inbox</Link>
+          <Link href="/" style={{ color: 'var(--muted)', textDecoration: 'none', fontSize: 13 }}>← Inbox</Link>
           <h1 style={{ fontSize: 20, margin: 0 }}>✉️ Send RFQ Request</h1>
         </div>
 
-        {phase === 'loading' && <div style={{ color: '#94a3b8', fontSize: 13 }}>Loading agents...</div>}
+        {phase === 'loading' && <div style={{ color: 'var(--muted-soft)', fontSize: 13 }}>Loading agents...</div>}
 
         {/* FAIL PAGE — shown when the dashboard cannot load at all */}
         {phase === 'error' && (
           <div style={{
-            background: '#0d1117', border: '1px solid #7f1d1d', borderRadius: 10,
+            background: 'var(--surface)', border: '1px solid var(--red-line)', borderRadius: 10,
             padding: '36px 28px', textAlign: 'center',
           }}>
             <div style={{ fontSize: 40, marginBottom: 12 }}>🚧</div>
-            <div style={{ fontSize: 17, fontWeight: 700, color: '#f87171', marginBottom: 8 }}>
+            <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--red)', marginBottom: 8 }}>
               Could not open the Send Request dashboard
             </div>
             <div style={{
-              fontSize: 12, color: '#94a3b8', marginBottom: 6, maxWidth: 480,
+              fontSize: 12, color: 'var(--muted-soft)', marginBottom: 6, maxWidth: 480,
               margin: '0 auto 18px', lineHeight: 1.6, wordBreak: 'break-word',
             }}>
               {errorMsg || 'An unexpected error occurred while loading the agents list.'}
@@ -588,7 +594,7 @@ export default function SendRequestPage() {
                 onClick={() => window.location.reload()}
                 style={{
                   padding: '9px 20px', fontSize: 13, fontWeight: 600,
-                  background: '#3b82f6', color: 'white', border: 'none',
+                  background: 'var(--blue)', color: 'var(--on-accent)', border: 'none',
                   borderRadius: 6, cursor: 'pointer',
                 }}
               >
@@ -596,8 +602,8 @@ export default function SendRequestPage() {
               </button>
               <Link href="/" style={{
                 padding: '9px 20px', fontSize: 13, fontWeight: 600,
-                background: 'transparent', color: '#94a3b8',
-                border: '1px solid #334155', borderRadius: 6, textDecoration: 'none',
+                background: 'transparent', color: 'var(--muted-soft)',
+                border: '1px solid var(--border-strong)', borderRadius: 6, textDecoration: 'none',
               }}>
                 ← Back to Inbox
               </Link>
@@ -607,24 +613,24 @@ export default function SendRequestPage() {
 
         {/* SENT — show RFQ reference + per-agent results */}
         {phase === 'sent' && result && (
-          <div style={{ background: '#0d1117', border: '1px solid #22c55e', borderRadius: 8, padding: 20 }}>
-            <div style={{ fontSize: 15, fontWeight: 700, color: '#4ade80', marginBottom: 10 }}>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--green)', borderRadius: 8, padding: 20 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--green-soft)', marginBottom: 10 }}>
               ✅ {result.total_sent} RFQ{result.total_sent === 1 ? '' : 's'} sent — one unique reference per agent
             </div>
             {result.jobs.map((j, i) => (
               <div key={i} style={{
                 display: 'flex', alignItems: 'center', gap: 10, fontSize: 12, padding: '6px 0',
-                borderBottom: i < result.jobs.length - 1 ? '1px solid #1e293b' : 'none',
+                borderBottom: i < result.jobs.length - 1 ? '1px solid var(--border)' : 'none',
               }}>
                 <span>{j.status === 'sent' ? '📤' : '⚠️'}</span>
-                <span style={{ color: '#60a5fa', fontWeight: 700, fontFamily: 'monospace' }}>{j.reference}</span>
-                <span style={{ color: '#e2e8f0' }}>{j.agent_name}</span>
-                <span style={{ marginLeft: 'auto', color: j.status === 'sent' ? '#4ade80' : '#f87171' }}>{j.status}</span>
+                <span style={{ color: 'var(--blue-soft)', fontWeight: 700, fontFamily: 'monospace' }}>{j.reference}</span>
+                <span style={{ color: 'var(--text)' }}>{j.agent_name}</span>
+                <span style={{ marginLeft: 'auto', color: j.status === 'sent' ? 'var(--green-soft)' : 'var(--red)' }}>{j.status}</span>
               </div>
             ))}
             <Link href="/" style={{
               display: 'inline-block', marginTop: 16, padding: '8px 16px', fontSize: 12, fontWeight: 600,
-              background: '#3b82f6', color: 'white', borderRadius: 6, textDecoration: 'none',
+              background: 'var(--blue)', color: 'var(--on-accent)', borderRadius: 6, textDecoration: 'none',
             }}>Back to Inbox</Link>
           </div>
         )}
@@ -634,12 +640,12 @@ export default function SendRequestPage() {
             {/* Source email banner */}
             {sourceEmail && (
               <div style={{
-                background: '#0d1117', border: '1px solid #2a2a3a', borderRadius: 8,
-                padding: '10px 14px', marginBottom: 20, fontSize: 12, color: '#94a3b8',
+                background: 'var(--surface)', border: '1px solid var(--input-border)', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 20, fontSize: 12, color: 'var(--muted-soft)',
               }}>
-                📦 From: <span style={{ color: '#e2e8f0' }}>{sourceEmail.sender}</span>
-                {' — '}<span style={{ color: '#e2e8f0' }}>{sourceEmail.subject}</span>
-                {extracting && <span style={{ color: '#fbbf24' }}> · extracting details...</span>}
+                📦 From: <span style={{ color: 'var(--text)' }}>{sourceEmail.sender}</span>
+                {' — '}<span style={{ color: 'var(--text)' }}>{sourceEmail.subject}</span>
+                {extracting && <span style={{ color: 'var(--amber)' }}> · extracting details...</span>}
               </div>
             )}
 
@@ -710,14 +716,14 @@ export default function SendRequestPage() {
                   onClick={addManualEmail}
                   style={{
                     ...inputStyle, width: 'auto', padding: '9px 16px', cursor: 'pointer',
-                    color: '#60a5fa', border: '1px solid #3b82f6', whiteSpace: 'nowrap',
+                    color: 'var(--blue-soft)', border: '1px solid var(--blue)', whiteSpace: 'nowrap',
                   }}
                 >+ Add</button>
               </div>
               {manualNote && (
                 <div style={{
                   marginTop: 8, fontSize: 11, lineHeight: 1.5,
-                  color: manualNote.tone === 'error' ? '#f87171' : '#fbbf24',
+                  color: manualNote.tone === 'error' ? 'var(--red)' : 'var(--amber)',
                 }}>{manualNote.text}</div>
               )}
               {manualAgents.length > 0 && (
@@ -725,8 +731,8 @@ export default function SendRequestPage() {
                   {manualAgents.map(m => (
                     <span key={m.email} style={{
                       display: 'inline-flex', alignItems: 'center', gap: 6,
-                      background: '#1e3a5f', border: '1px solid #3b82f6', borderRadius: 14,
-                      padding: '4px 6px 4px 10px', fontSize: 11, color: '#e2e8f0',
+                      background: 'var(--blue-tint-2)', border: '1px solid var(--blue)', borderRadius: 14,
+                      padding: '4px 6px 4px 10px', fontSize: 11, color: 'var(--text)',
                     }}>
                       {m.agent_name} · {m.email}
                       <button
@@ -734,7 +740,7 @@ export default function SendRequestPage() {
                         onClick={() => removeManualEmail(m.email)}
                         aria-label={`Remove ${m.email}`}
                         style={{
-                          background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer',
+                          background: 'none', border: 'none', color: 'var(--blue-text)', cursor: 'pointer',
                           fontSize: 14, lineHeight: 1, padding: '0 2px',
                         }}
                       >×</button>
@@ -749,8 +755,8 @@ export default function SendRequestPage() {
               <span style={labelStyle}>Attachments (optional)</span>
               <label style={{
                 display: 'flex', alignItems: 'center', justifyContent: 'center', gap: 8,
-                padding: '14px', border: '1px dashed #334155', borderRadius: 6,
-                cursor: 'pointer', color: '#64748b', fontSize: 12,
+                padding: '14px', border: '1px dashed var(--border-strong)', borderRadius: 6,
+                cursor: 'pointer', color: 'var(--muted)', fontSize: 12,
               }}>
                 📎 Click to attach PDF, photos, CSV, etc. — {formatBytes(attachmentsTotalBytes)} of {formatBytes(MAX_ATTACHMENT_TOTAL_BYTES)} used
                 <input
@@ -761,23 +767,23 @@ export default function SendRequestPage() {
                 />
               </label>
               {attachmentError && (
-                <div style={{ marginTop: 8, fontSize: 11, color: '#f87171' }}>{attachmentError}</div>
+                <div style={{ marginTop: 8, fontSize: 11, color: 'var(--red)' }}>{attachmentError}</div>
               )}
               {attachments.length > 0 && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
                   {attachments.map(a => (
                     <span key={a.filename} style={{
                       display: 'inline-flex', alignItems: 'center', gap: 6,
-                      background: '#1e293b', border: '1px solid #334155', borderRadius: 14,
-                      padding: '4px 6px 4px 10px', fontSize: 11, color: '#e2e8f0',
+                      background: 'var(--border)', border: '1px solid var(--border-strong)', borderRadius: 14,
+                      padding: '4px 6px 4px 10px', fontSize: 11, color: 'var(--text)',
                     }}>
-                      📄 {a.filename} <span style={{ color: '#64748b' }}>· {formatBytes(a.size_bytes)}</span>
+                      📄 {a.filename} <span style={{ color: 'var(--muted)' }}>· {formatBytes(a.size_bytes)}</span>
                       <button
                         type="button"
                         onClick={() => removeAttachment(a.filename)}
                         aria-label={`Remove ${a.filename}`}
                         style={{
-                          background: 'none', border: 'none', color: '#93c5fd', cursor: 'pointer',
+                          background: 'none', border: 'none', color: 'var(--blue-text)', cursor: 'pointer',
                           fontSize: 14, lineHeight: 1, padding: '0 2px',
                         }}
                       >×</button>
@@ -790,43 +796,43 @@ export default function SendRequestPage() {
             {/* Draft preview panel */}
             {preview && (
               <div style={{
-                background: '#0d1117', border: '1px solid #7c3aed', borderRadius: 8,
+                background: 'var(--surface)', border: '1px solid var(--purple)', borderRadius: 8,
                 padding: 16, marginBottom: 20,
               }}>
                 <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: '#a78bfa' }}>
+                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--purple)' }}>
                     {manualDraft ? '✍️ COMPOSE DRAFT' : '✏️ EDIT DRAFT'} — sent to all {totalRecipients} agent{totalRecipients === 1 ? '' : 's'}
                   </span>
                   <button
                     onClick={() => { setPreview(null); setManualDraft(false); }}
                     style={{
                       marginLeft: 'auto', background: 'transparent', border: 'none',
-                      color: '#64748b', fontSize: 16, cursor: 'pointer', padding: '0 4px',
+                      color: 'var(--muted)', fontSize: 16, cursor: 'pointer', padding: '0 4px',
                     }}
                   >×</button>
                 </div>
-                <div style={{ fontSize: 11, color: '#64748b', marginBottom: 10 }}>
+                <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
                   Edit freely. Each agent gets its own unique RFQ reference added to the subject
                   automatically, so replies still match the right agent.
                 </div>
-                <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 4 }}>Subject</label>
+                <label style={{ fontSize: 11, color: 'var(--muted-soft)', display: 'block', marginBottom: 4 }}>Subject</label>
                 <input
                   value={editedSubject}
                   onChange={e => setEditedSubject(e.target.value)}
                   style={{
-                    width: '100%', fontSize: 12, color: '#e2e8f0', marginBottom: 12,
-                    background: '#080b12', border: '1px solid #1e293b', borderRadius: 6,
+                    width: '100%', fontSize: 12, color: 'var(--text)', marginBottom: 12,
+                    background: 'var(--sunken)', border: '1px solid var(--border)', borderRadius: 6,
                     padding: '8px 10px', boxSizing: 'border-box',
                   }}
                 />
-                <label style={{ fontSize: 11, color: '#94a3b8', display: 'block', marginBottom: 4 }}>Body</label>
+                <label style={{ fontSize: 11, color: 'var(--muted-soft)', display: 'block', marginBottom: 4 }}>Body</label>
                 <textarea
                   value={editedBody}
                   onChange={e => setEditedBody(e.target.value)}
                   rows={12}
                   style={{
-                    width: '100%', fontSize: 12, color: '#cbd5e1', lineHeight: 1.6,
-                    whiteSpace: 'pre-wrap', background: '#080b12', border: '1px solid #1e293b',
+                    width: '100%', fontSize: 12, color: 'var(--text-soft)', lineHeight: 1.6,
+                    whiteSpace: 'pre-wrap', background: 'var(--sunken)', border: '1px solid var(--border)',
                     borderRadius: 6, padding: 12, boxSizing: 'border-box', resize: 'vertical',
                     fontFamily: 'inherit',
                   }}
@@ -834,7 +840,7 @@ export default function SendRequestPage() {
               </div>
             )}
 
-            {errorMsg && <div style={{ color: '#ef4444', fontSize: 12, marginBottom: 12 }}>{errorMsg}</div>}
+            {errorMsg && <div style={{ color: 'var(--red)', fontSize: 12, marginBottom: 12 }}>{errorMsg}</div>}
 
             <div style={{ display: 'flex', gap: 10 }}>
               <button
@@ -842,8 +848,8 @@ export default function SendRequestPage() {
                 disabled={previewing || phase === 'sending'}
                 style={{
                   flex: '0 0 auto', padding: '14px 20px', fontSize: 13, fontWeight: 600,
-                  background: 'transparent', color: previewing ? '#64748b' : '#a78bfa',
-                  border: '1px solid #7c3aed', borderRadius: 8,
+                  background: 'transparent', color: previewing ? 'var(--muted)' : 'var(--purple)',
+                  border: '1px solid var(--purple)', borderRadius: 8,
                   cursor: previewing ? 'default' : 'pointer',
                 }}
               >
@@ -855,8 +861,8 @@ export default function SendRequestPage() {
                   disabled={previewing || phase === 'sending'}
                   style={{
                     flex: '0 0 auto', padding: '14px 20px', fontSize: 13, fontWeight: 600,
-                    background: 'transparent', color: '#94a3b8',
-                    border: '1px solid #334155', borderRadius: 8, cursor: 'pointer',
+                    background: 'transparent', color: 'var(--muted-soft)',
+                    border: '1px solid var(--border-strong)', borderRadius: 8, cursor: 'pointer',
                   }}
                 >✍️ Write manually</button>
               )}
@@ -865,8 +871,8 @@ export default function SendRequestPage() {
                 disabled={phase === 'sending'}
                 style={{
                   flex: 1, padding: 14, fontSize: 14, fontWeight: 700,
-                  background: phase === 'sending' ? '#1e293b' : '#3b82f6',
-                  color: phase === 'sending' ? '#64748b' : 'white',
+                  background: phase === 'sending' ? 'var(--border)' : 'var(--blue)',
+                  color: phase === 'sending' ? 'var(--muted)' : 'var(--on-accent)',
                   border: 'none', borderRadius: 8, cursor: phase === 'sending' ? 'default' : 'pointer',
                 }}
               >

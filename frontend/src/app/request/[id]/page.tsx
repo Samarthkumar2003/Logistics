@@ -56,7 +56,7 @@ function fmt(iso?: string): string {
 }
 
 const card: React.CSSProperties = {
-  background: '#0d1117', border: '1px solid #1e293b', borderRadius: 10,
+  background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 10,
   padding: 18, marginBottom: 18,
 };
 
@@ -89,17 +89,17 @@ function ReplyCard({ reply }: { reply: Reply }) {
         onClick={toggle}
         style={{ cursor: 'pointer', display: 'flex', alignItems: 'baseline', gap: 10 }}
       >
-        <span style={{ color: '#64748b', fontSize: 12 }}>{open ? '▾' : '▸'}</span>
+        <span style={{ color: 'var(--muted)', fontSize: 12 }}>{open ? '▾' : '▸'}</span>
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontSize: 13, fontWeight: 600, color: '#e2e8f0' }}>
+          <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)' }}>
             {reply.subject || '(no subject)'}
           </div>
-          <div style={{ fontSize: 11, color: '#64748b', marginTop: 3 }}>
+          <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 3 }}>
             {reply.sender}
             {reply.has_attachments && <span style={{ marginLeft: 8 }}>📎</span>}
           </div>
         </div>
-        <span style={{ fontSize: 11, color: '#475569', whiteSpace: 'nowrap' }}>
+        <span style={{ fontSize: 11, color: 'var(--faint)', whiteSpace: 'nowrap' }}>
           {fmt(reply.received_at)}
         </span>
       </div>
@@ -107,13 +107,13 @@ function ReplyCard({ reply }: { reply: Reply }) {
       {open && (
         <>
           <div style={{
-            marginTop: 12, fontSize: 12, color: '#cbd5e1', whiteSpace: 'pre-wrap',
-            lineHeight: 1.6, background: '#080b12', border: '1px solid #1e293b',
+            marginTop: 12, fontSize: 12, color: 'var(--text-soft)', whiteSpace: 'pre-wrap',
+            lineHeight: 1.6, background: 'var(--sunken)', border: '1px solid var(--border)',
             borderRadius: 6, padding: 12, maxHeight: 420, overflowY: 'auto',
           }}>{reply.body || '(no text body — the rates may be in an attachment)'}</div>
 
           {loadingAtts && (
-            <div style={{ marginTop: 8, fontSize: 11, color: '#475569' }}>Loading attachments…</div>
+            <div style={{ marginTop: 8, fontSize: 11, color: 'var(--faint)' }}>Loading attachments…</div>
           )}
           {attachments.length > 0 && (
             <div style={{ marginTop: 10, display: 'flex', flexWrap: 'wrap', gap: 6 }}>
@@ -126,8 +126,8 @@ function ReplyCard({ reply }: { reply: Reply }) {
                   style={{
                     display: 'inline-flex', alignItems: 'center', gap: 6,
                     padding: '5px 10px', borderRadius: 6, fontSize: 12,
-                    border: '1px solid #2a2a3a', background: '#080b12',
-                    color: att.url ? '#93c5fd' : '#475569', textDecoration: 'none',
+                    border: '1px solid var(--input-border)', background: 'var(--sunken)',
+                    color: att.url ? 'var(--blue-text)' : 'var(--faint)', textDecoration: 'none',
                     pointerEvents: att.url ? undefined : 'none',
                   }}
                 >
@@ -135,7 +135,7 @@ function ReplyCard({ reply }: { reply: Reply }) {
                     : att.file_name?.match(/\.(xlsx?|csv)$/i) ? '📊' : '📎'}</span>
                   <span>{att.file_name}</span>
                   {att.size_bytes ? (
-                    <span style={{ color: '#475569' }}>· {Math.round(att.size_bytes / 1024)}KB</span>
+                    <span style={{ color: 'var(--faint)' }}>· {Math.round(att.size_bytes / 1024)}KB</span>
                   ) : null}
                 </a>
               ))}
@@ -188,62 +188,65 @@ export default function CustomerRequestPage() {
   // the dashboard). This is a scrollable document page, so escape that.
   const outer: React.CSSProperties = {
     position: 'fixed', inset: 0, overflowY: 'auto',
-    background: '#0a0a14', color: '#e2e8f0', fontFamily: 'system-ui, sans-serif',
+    background: 'var(--bg)', color: 'var(--text)', fontFamily: 'system-ui, sans-serif',
   };
+  // Colours below are tokens from app/theme.css, not literals, so this page
+  // follows the theme the dashboard toggle stored. `themed` is what brings the
+  // tokens into scope — without it every var() resolves to nothing.
   const wrap: React.CSSProperties = {
     maxWidth: 980, margin: '0 auto', padding: '28px 20px', textAlign: 'left',
   };
 
   return (
-    <div style={outer}>
+    <div className="themed" style={outer}>
     <div style={wrap}>
-      <Link href="/dashboard" style={{ color: '#60a5fa', fontSize: 13, textDecoration: 'none' }}>
+      <Link href="/dashboard" style={{ color: 'var(--blue-soft)', fontSize: 13, textDecoration: 'none' }}>
         ← Back to inbox
       </Link>
       <h1 style={{ fontSize: 20, fontWeight: 700, margin: '14px 0 20px' }}>📋 Customer Request</h1>
 
-      {status === 'loading' && <div style={{ color: '#94a3b8' }}>Loading…</div>}
-      {status === 'error' && <div style={{ color: '#ef4444', fontSize: 13 }}>{errorMsg}</div>}
+      {status === 'loading' && <div style={{ color: 'var(--muted-soft)' }}>Loading…</div>}
+      {status === 'error' && <div style={{ color: 'var(--red)', fontSize: 13 }}>{errorMsg}</div>}
 
       {status === 'ready' && data && (
         <>
           {/* Original customer email */}
           {data.customer_email ? (
             <div style={card}>
-              <div style={{ fontSize: 11, color: '#64748b', marginBottom: 6 }}>ORIGINAL REQUEST</div>
+              <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>ORIGINAL REQUEST</div>
               <div style={{ fontSize: 13, marginBottom: 4 }}>
-                <span style={{ color: '#94a3b8' }}>From: </span>{data.customer_email.sender}
+                <span style={{ color: 'var(--muted-soft)' }}>From: </span>{data.customer_email.sender}
               </div>
               <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>{data.customer_email.subject}</div>
               <div style={{
-                fontSize: 12, color: '#cbd5e1', whiteSpace: 'pre-wrap', lineHeight: 1.6,
-                background: '#080b12', border: '1px solid #1e293b', borderRadius: 6,
+                fontSize: 12, color: 'var(--text-soft)', whiteSpace: 'pre-wrap', lineHeight: 1.6,
+                background: 'var(--sunken)', border: '1px solid var(--border)', borderRadius: 6,
                 padding: 12, maxHeight: 260, overflowY: 'auto',
               }}>{data.customer_email.body}</div>
             </div>
           ) : (
-            <div style={{ ...card, color: '#94a3b8', fontSize: 13 }}>
+            <div style={{ ...card, color: 'var(--muted-soft)', fontSize: 13 }}>
               Original email not stored — showing agent replies only.
             </div>
           )}
 
           {/* Summary */}
           <div style={{ display: 'flex', gap: 24, margin: '4px 4px 18px', fontSize: 13 }}>
-            <span><strong style={{ color: '#a78bfa' }}>{data.counts.agents}</strong> agents contacted</span>
+            <span><strong style={{ color: 'var(--purple)' }}>{data.counts.agents}</strong> agents contacted</span>
             {/* Agents first, messages second. An agent who sends a rate and then a
                 correction is one response, so "2 replies" alone overstated how
                 many quotes there are to compare. */}
-            <span><strong style={{ color: '#34d399' }}>{data.counts.agents_replied}</strong> agents replied</span>
-            <span><strong style={{ color: '#34d399' }}>{data.counts.replies}</strong> replies received</span>
-            <span><strong style={{ color: '#fbbf24' }}>{awaiting.length}</strong> awaiting reply</span>
+            <span><strong style={{ color: 'var(--green-soft)' }}>{data.counts.agents_replied}</strong> agents replied</span>
+            <span><strong style={{ color: 'var(--green-soft)' }}>{data.counts.replies}</strong> replies received</span>
+            <span><strong style={{ color: 'var(--amber)' }}>{awaiting.length}</strong> awaiting reply</span>
           </div>
 
           {/* Agent replies */}
-          <div style={{ fontSize: 12, fontWeight: 700, color: '#a78bfa', margin: '0 4px 10px' }}>
+          <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--purple)', margin: '0 4px 10px' }}>
             💬 AGENT REPLIES
           </div>
           {data.counts.replies === 0 && (
-            <div style={{ ...card, color: '#94a3b8', fontSize: 13 }}>
+            <div style={{ ...card, color: 'var(--muted-soft)', fontSize: 13 }}>
               No replies linked yet. A reply is linked when the agent keeps the RFQ
               reference in the subject — one that dropped it is still in the inbox,
               just not shown here.
@@ -251,9 +254,9 @@ export default function CustomerRequestPage() {
           )}
           {Object.entries(repliesByAgent).map(([agent, replies]) => (
             <div key={agent} style={{ marginBottom: 20 }}>
-              <div style={{ fontSize: 13, fontWeight: 600, margin: '0 4px 8px', color: '#e2e8f0' }}>
+              <div style={{ fontSize: 13, fontWeight: 600, margin: '0 4px 8px', color: 'var(--text)' }}>
                 {agent}
-                <span style={{ color: '#64748b', fontWeight: 400 }}>
+                <span style={{ color: 'var(--muted)', fontWeight: 400 }}>
                   {' '}· {replies.length} {replies.length === 1 ? 'message' : 'messages'}
                 </span>
               </div>
@@ -264,8 +267,8 @@ export default function CustomerRequestPage() {
           {/* Awaiting */}
           {awaiting.length > 0 && (
             <div style={card}>
-              <div style={{ fontSize: 12, fontWeight: 700, color: '#fbbf24', marginBottom: 8 }}>⏳ AWAITING REPLY</div>
-              <div style={{ fontSize: 12, color: '#cbd5e1' }}>{awaiting.join(', ')}</div>
+              <div style={{ fontSize: 12, fontWeight: 700, color: 'var(--amber)', marginBottom: 8 }}>⏳ AWAITING REPLY</div>
+              <div style={{ fontSize: 12, color: 'var(--text-soft)' }}>{awaiting.join(', ')}</div>
             </div>
           )}
         </>
