@@ -1,0 +1,99 @@
+name: CI
+
+# Nothing ran the suite on push, so "353 tests pass" was only ever true on the
+# machine that last remembered to run them. This is the gate.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+# A second push to the same branch makes the first run's answer worthless.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  backend:
+    name: Backend tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"   # matches the Dockerfile
+          cache: pip
+
+      # requirements.lock, --no-deps: the same pinned set the image installs, so
+      # a green CI run says something about what actually deploys. An unpinned
+      # `>=` resolve here would let CI pass against code the image never runs.
+      - name: Install dependencies
+        run: pip install --no-deps -r requirements.lock
+
+      # No secrets, deliberately. conftest.py blocks socket.connect for the whole
+      # suite, so a test that needs the network fails here rather than passing
+      # quietly against someone's .env. Nothing to leak means nothing to protect.
+      - name: Run tests
+        run: python -m pytest -q
+
+  secret-hygiene:
+    name: Secret hygiene
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The layer SecretRedactingFilter's docstring points at. The redactor
+      # matches whole values, so `key[:8]` defeats it by construction — a
+      # truncated secret is not a substring of anything it knows about. That has
+      # already happened once: OPENAI_API_KEY's first 8 characters were printed
+      # on every daily_report run, into public Actions output.
+      - name: No sliced credentials in log calls
+        run: |
+          if grep -rnE '(secret|password|token|api_?key|credential)[A-Za-z_]*\[\s*:?[0-9]+' \
+               --include='*.py' backend/ ; then
+            echo "::error::A credential is being sliced. The redactor matches whole values, so a truncated secret goes to the log unmasked. Log a boolean or a length instead."
+            exit 1
+          fi
+
+      # .gitignore covers these, but .gitignore only stops the file being added
+      # by name — an `git add -f` or a rename walks straight past it.
+      - name: No credential files committed
+        run: |
+          if git ls-files \
+               | grep -E '(^|/)(\.env($|\.)|service_account\.json|.*\.(pem|key)$)' \
+               | grep -v '\.env\.example$' ; then
+            echo "::error::A credential file is tracked. Git history is effectively permanent — rotate the secret, do not just delete the file."
+            exit 1
+          fi
+
+  frontend:
+    name: Frontend build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"       # matches mise.toml; Next 16 refuses to run on 18
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - run: npm ci
+
+      # `next build` runs tsc, so this covers type errors as well as the build.
+      # NEXT_PUBLIC_API_BASE is deliberately unset: it is inlined at build time,
+      # and baking a real URL into a CI artifact would be misleading, since this
+      # bundle is never deployed. Railway builds its own with the value set.
+      - run: npm run build
+
+      # No test runner in the frontend; these are plain assertion scripts.
+      - name: Check helper scripts
+        run: |
+          for check in tests/*.check.ts; do
+            echo "--- $check"
+            node --experimental-strip-types "$check"
+          done
