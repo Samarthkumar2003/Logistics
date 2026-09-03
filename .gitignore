@@ -36,6 +36,7 @@ Samarth_Resume.pdf
 
 # Claude
 .claude/scheduled_tasks.lock
+.claude/worktrees/
 # OAuth PKCE state between authorize_gmail steps
 .oauth_pending.json
 .env.dwd-backup
@@ -46,3 +47,8 @@ recovery_poll.log
 
 # DB backups (contain real customer/vendor data)
 rfq_jobs_backup_*.json
+
+# macOS Finder metadata. Appears in any directory the Finder has opened, so
+# match at every depth rather than only the repo root.
+.DS_Store
+**/.DS_Store
