@@ -55,7 +55,9 @@ def _parse_args() -> argparse.Namespace:
         description="Create an API operator or reset a password."
     )
     parser.add_argument("--email", required=True, help="Login address.")
-    parser.add_argument("--name", default="", help="Full name, for the UI.")
+    parser.add_argument("--name", default="",
+                        help="Full name. Signs the RFQ emails this operator "
+                             "sends, so it is required when creating.")
     parser.add_argument("--role", default="operator",
                         help="Goes into the JWT. No behaviour attached yet.")
     parser.add_argument("--reset", action="store_true",
@@ -89,6 +91,21 @@ def main() -> int:
         logger.error("%s does not exist — run without --reset to create it.", email)
         return 1
 
+    # Checked before the password prompt, so a missing name is not discovered
+    # after typing one twice. Only on create: --reset returns before the insert
+    # and has no business demanding a name it will not write.
+    #
+    # Required rather than defaulted because it is load-bearing now, not cosmetic.
+    # It rides the JWT and signs every RFQ this operator sends; blank meant the
+    # model was asked to write a professional email with nobody to sign it as, and
+    # it closed with a "[Your Name]" placeholder that reached real freight agents.
+    # An operator with no name here cannot draft at all — /preview-rfq and
+    # /send-rfq return 422 — so creating one is setting up a confusing failure.
+    if not args.reset and not args.name.strip():
+        logger.error("--name is required: it signs the RFQ emails this operator "
+                     "sends. Without it they cannot draft at all.")
+        return 1
+
     password = _prompt_password()
     password_hash = security.hash_password(password)
 
@@ -101,7 +118,7 @@ def main() -> int:
         return 0
 
     user = user_repo.create(email=email, password_hash=password_hash,
-                            full_name=args.name, role=args.role)
+                            full_name=args.name.strip(), role=args.role)
     logger.info("\nCreated %s (id=%s, role=%s).", user.email, user.id, user.role)
     logger.info("Log in at the frontend's /login, or:\n"
                 "  curl -X POST $API/auth/login -H 'Content-Type: application/json' "

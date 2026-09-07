@@ -228,6 +228,36 @@ class AppUser:
         )
 
 
+@dataclass(frozen=True)
+class SenderIdentity:
+    """Who an outgoing RFQ is signed by.
+
+    A type rather than a bare string because the signature has two lines and
+    threading two positional strings through four call frames is how the second
+    one ends up in the wrong place. Frozen because nothing downstream of the
+    route has any business editing who the mail is from.
+
+    `name` comes from the operator's `app_users.full_name`, carried on their JWT
+    (see core/security.py). `company` comes from COMPANY_NAME in the environment:
+    it is identical for every operator, so putting it in a per-user token would
+    be storing one fact N times and invalidating N tokens to change it.
+
+    There is deliberately no default for `name`. An empty one is what produced
+    the `[Your Name]` placeholders that reached real freight agents: the model was
+    asked for a professional email, given nobody to sign it as, and did the only
+    thing left. Callers must refuse to draft rather than pass a blank — the check
+    lives in `_sender_or_422` in app/routes/rfq.py, which is the only layer that
+    can turn it into an actionable message for the operator.
+    """
+    name: str
+    company: str = ""
+
+    @property
+    def signature(self) -> str:
+        """The sign-off block, newline-separated. Never ends in a blank line."""
+        return "\n".join(part for part in (self.name, self.company) if part)
+
+
 @dataclass
 class Attachment:
     id: str

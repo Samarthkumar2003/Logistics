@@ -19,7 +19,7 @@ from backend.agents.rfq_agent import DraftEmail, generate_rfq_drafts
 from backend.connectors.email_sender import send_rfq_email, send_rfq_emails_batch
 from backend.core.logging_context import carry_context
 from backend.core.rfq_reference import inject_reference
-from backend.domain.models import STATUS_SENDING, RfqJob
+from backend.domain.models import STATUS_SENDING, RfqJob, SenderIdentity
 from backend.repositories import agent_repo, email_repo, job_repo
 
 logger = logging.getLogger(__name__)
@@ -55,9 +55,21 @@ def new_reference() -> str:
     return f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8]}"
 
 
-def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent]) -> dict[str, Any]:
+def _signed(body: str, sender: SenderIdentity) -> str:
+    """Attach the sign-off the model was told not to write.
+
+    Done here rather than asked for in the prompt because a signature is fixed
+    text: there is nothing for a language model to decide, and everything for it
+    to get wrong. The instruction not to write one is belt; this is braces.
+    """
+    return f"{body.rstrip()}\n\n{sender.signature}\n"
+
+
+def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent],
+                  sender: SenderIdentity) -> dict[str, Any]:
     """One sample draft, sent to nobody. Lets the operator see what an agent
-    would receive before committing."""
+    would receive before committing — signature included, because the whole point
+    is that what they approve is what leaves."""
     if not shipment.get("origin") or not shipment.get("destination"):
         raise RfqError("Origin and destination ports are required")
 
@@ -68,6 +80,7 @@ def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent]) -> d
         shipment_data=shipment,
         agents=[{"agent_name": target.agent_name, "email": target.email}],
         reference=reference,
+        sender=sender,
     )
     drafts = result.drafts if hasattr(result, "drafts") else result
     if not drafts:
@@ -78,7 +91,7 @@ def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent]) -> d
         "reference": reference,
         "vendor_name": draft.vendor_name,
         "subject": draft.subject,
-        "body": draft.body,
+        "body": _signed(draft.body, sender),
         "note": "Sample only — each agent gets its own unique reference at send time.",
     }
 
@@ -88,12 +101,18 @@ def _draft_for_agent(
     shipment: dict[str, Any],
     edited_subject: str,
     edited_body: str,
+    sender: SenderIdentity,
 ) -> dict[str, Any]:
     """One agent's draft and its own reference.
 
     When the operator has edited a draft, that exact text goes out verbatim with
     no model call — only the reference in the subject differs per agent, so
     replies stay attributable.
+
+    Note which branch signs. The edited text arrived from `preview_draft`, which
+    already appended the signature, so the operator has been looking at it and may
+    well have adjusted it; signing again would print it twice. Only the model
+    branch signs, because only the model was told to leave it out.
     """
     reference = new_reference()
     entry: dict[str, Any] = {
@@ -115,10 +134,12 @@ def _draft_for_agent(
             shipment_data=shipment,
             agents=[{"agent_name": agent.agent_name, "email": agent.email}],
             reference=reference,
+            sender=sender,
         )
         drafts = result.drafts if hasattr(result, "drafts") else result
         if drafts:
             draft = drafts[0]
+            draft.body = _signed(draft.body, sender)
             # The prompt asks the model for the reference; this guarantees it.
             # Without this the subject was whatever the model returned, and a
             # deviation meant the RFQ went out unmatchable — the reply could
@@ -292,6 +313,7 @@ def send_rfqs(
     shipment: dict[str, Any],
     agents: list[SelectedAgent],
     customer: dict[str, str],
+    sender: SenderIdentity,
     edited_subject: str = "",
     edited_body: str = "",
     attachments: Optional[list[dict[str, Any]]] = None,
@@ -313,7 +335,7 @@ def send_rfqs(
     # emits — this is the money path, and a pool worker would otherwise log the
     # model's failures with no way back to the request that caused them.
     draft_one = carry_context(
-        lambda a: _draft_for_agent(a, shipment, edited_subject, edited_body)
+        lambda a: _draft_for_agent(a, shipment, edited_subject, edited_body, sender)
     )
     with ThreadPoolExecutor(max_workers=min(len(agents), MAX_DRAFT_WORKERS)) as pool:
         entries = list(pool.map(draft_one, agents))

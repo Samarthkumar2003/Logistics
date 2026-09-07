@@ -57,6 +57,12 @@ class TokenClaims:
     user_id: str
     email: str
     role: str
+    # The operator's display name, used to sign the RFQ emails they send. Empty
+    # for any token minted before this claim existed, and for a row whose
+    # full_name was never filled in — both are normal and neither is an
+    # authentication failure, so decode_token does not reject them. Refusing is
+    # the drafting path's job, not the token check's.
+    name: str
     issued_at: datetime
     expires_at: datetime
 
@@ -94,7 +100,7 @@ def verify_password(plain: str, hashed: str) -> bool:
         return False
 
 
-def mint_token(user_id: str, email: str, role: str) -> tuple[str, int]:
+def mint_token(user_id: str, email: str, role: str, name: str = "") -> tuple[str, int]:
     """Sign a token for an identity that has ALREADY been proven.
 
     Returns (token, seconds_until_expiry). The second value is what the frontend
@@ -111,6 +117,7 @@ def mint_token(user_id: str, email: str, role: str) -> tuple[str, int]:
         "sub": user_id,
         "email": email,
         "role": role,
+        "name": name,
         "iat": int(now.timestamp()),
         "exp": int(expires_at.timestamp()),
         "jti": uuid.uuid4().hex,
@@ -145,6 +152,10 @@ def decode_token(token: str) -> TokenClaims:
         user_id=str(payload["sub"]),
         email=str(payload.get("email", "")),
         role=str(payload.get("role", "operator")),
+        # Defaulted, not required: a token issued before this claim existed must
+        # keep working. It arrives blank and is refused later, at the one place
+        # that knows why it matters.
+        name=str(payload.get("name", "")),
         issued_at=datetime.fromtimestamp(payload.get("iat", 0), tz=timezone.utc),
         expires_at=datetime.fromtimestamp(payload["exp"], tz=timezone.utc),
     )
