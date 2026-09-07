@@ -22,6 +22,7 @@ from dataclasses import dataclass
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from backend.classifier.llm_provider import get_provider
+from backend.classifier.rate_limiter import estimate_tokens, get_llm_bucket
 from backend.core.db import get_db
 from backend.core.logging_context import carry_context, email_context
 from backend.core.rfq_reference import extract_rfq_reference, has_rfq_reference
@@ -116,6 +117,23 @@ Respond ONLY with valid JSON, no markdown:
 
 _VALID_LABELS = {"customer_requirement", "quotation_rate_card", "general"}
 MAX_BODY_CHARS = 8000
+# A label and a confidence, nothing more. Named rather than inline because the
+# pacer below has to charge for the same number the call is made with.
+CLASSIFY_MAX_TOKENS = 60
+
+
+def _pace_llm_call(user_prompt: str) -> None:
+    """Wait for the token bucket before spending tokens. No-op with LLM_TPM=0.
+
+    Charged per ATTEMPT, not per email: a 429 retry re-sends the whole prompt, so
+    the second attempt costs the provider exactly what the first did.
+    """
+    bucket = get_llm_bucket()
+    if bucket is None:
+        return
+    bucket.acquire(
+        estimate_tokens(CLASSIFY_SYSTEM_PROMPT, user_prompt, CLASSIFY_MAX_TOKENS)
+    )
 
 
 def _parse_llm_label(raw: str) -> tuple[str, float]:
@@ -248,7 +266,13 @@ def classify_email(subject: str, body: str, sender: str = "") -> ClassificationR
     for attempt in range(3):
         try:
             provider = get_provider()
-            raw = provider.complete(CLASSIFY_SYSTEM_PROMPT, user_prompt, temperature=0.0, max_tokens=60)
+            # Pace before the request leaves. Five workers hitting a Tier 1 key
+            # at once put ~17,700 tokens in flight against a 30,000 TPM ceiling,
+            # and the backoff below only discovers that by exceeding it — paying
+            # the tokens, the wait, and a full re-send.
+            _pace_llm_call(user_prompt)
+            raw = provider.complete(CLASSIFY_SYSTEM_PROMPT, user_prompt,
+                                    temperature=0.0, max_tokens=CLASSIFY_MAX_TOKENS)
             label, confidence = _parse_llm_label(raw)
             logger.info("Classified by %s: %s (%.0f%%)", provider.name, label, confidence * 100)
             return ClassificationResult(

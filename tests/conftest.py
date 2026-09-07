@@ -41,6 +41,11 @@ os.environ.setdefault(
 # The suite must never spend 250ms per bcrypt call. 4 is the library minimum and
 # tests only care that a hash round-trips, not that it is expensive to crack.
 os.environ.setdefault("BCRYPT_ROUNDS", "4")
+# No provider to pace, so no reason to hold a real token bucket. Hard-assigned for
+# the same reason as AUTH_ENABLED: a developer's .env carries a real LLM_TPM, and a
+# test that reaches the pacing path would then sleep against it. test_rate_limiter
+# builds its own Settings where it wants pacing on.
+os.environ["LLM_TPM"] = "0"
 
 
 @pytest.fixture(autouse=True)
