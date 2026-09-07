@@ -147,14 +147,36 @@ def list_stale_sending(before: str) -> list[RfqJob]:
     return [RfqJob.from_row(r) for r in rows]
 
 
-def mark_quotes_received(reference: str, current_status: str) -> None:
-    """Advance an open job when a reply lands.
+def mark_quotes_received(reference: str, current_status: str) -> bool:
+    """Advance an open job when a reply lands. True when it actually moved.
 
     Guarded so a late reply cannot reopen an approved job — the desk has already
     committed to an agent by then.
+
+    The guard has to be the UPDATE's own WHERE clause, not a Python `if` over
+    `current_status`. The caller (reply_service.link_reply) reads the job, then
+    calls this; an operator approving in that window leaves `current_status`
+    holding a stale `rfqs_sent`, the Python check passes, and an unconditional
+    write puts an approved job back to `quotes_received` — silently un-awarding
+    a shipment. `set_status_if` exists for exactly this and was simply not used
+    here.
+
+    Returns False both when the status had already moved on and when the write
+    failed, so a caller can tell "linked and advanced" from "linked only". It
+    still does not raise: a reply that is attached but whose status lagged is
+    recoverable, and a 500 in the scan loop is not.
     """
-    if current_status in OPEN_JOB_STATUSES:
-        try:
-            set_status(reference, "quotes_received")
-        except Exception as e:
-            logger.warning("Status update failed for %s: %s", reference, e)
+    if current_status not in OPEN_JOB_STATUSES:
+        return False
+    try:
+        moved = set_status_if(reference, "quotes_received", current_status)
+    except Exception as e:
+        logger.warning("Status update failed for %s: %s", reference, e)
+        return False
+    if not moved:
+        logger.info(
+            "Job %s stayed put — it left %s while the reply was being linked, "
+            "so the reply is attached and the status is whatever won the race",
+            reference, current_status,
+        )
+    return moved
