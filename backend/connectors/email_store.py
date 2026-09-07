@@ -7,12 +7,13 @@ ingestion idempotent.
 - Incremental fetch via a date high-water mark (`sync_state.last_received_at`),
   NOT a fragile provider cursor. `UNIQUE(message_id)` makes re-fetch a no-op, so
   classification/extraction runs once per email ever.
-- Attachment BYTES go to a Supabase Storage bucket keyed by UUID; the DB row
-  holds metadata + storage_path only.
+- Attachment BYTES go to a Supabase Storage bucket keyed by CONTENT HASH; the DB
+  row holds metadata + storage_path only, so identical files share one object.
 
 Tables + bucket: see sql/setup_email_store.sql.
 """
 
+import hashlib
 import os
 import uuid
 import logging
@@ -134,6 +135,31 @@ def _advance_watermark(provider: str, newest: datetime) -> None:
 # Attachments
 # ---------------------------------------------------------------------------
 
+def _extension_for(file_name: str) -> str:
+    return os.path.splitext(file_name or "")[1].lstrip(".").lower() or "bin"
+
+
+def content_address(data: bytes, file_name: str) -> tuple[str, str]:
+    """Return (storage_path, sha256_hex) for these bytes.
+
+    `<aa>/<sha256>.<ext>`, where `aa` is the hash's first two characters. Two
+    copies of one file therefore resolve to one object instead of one per row: a
+    426,103-byte animated signature banner occupied 5,958 separate objects — 2.5 GB
+    of a single file — while every row minted a fresh UUID.
+
+    The two-character shard exists because a flat prefix makes the bucket listing
+    unusable at this row count, not for lookup speed: reads go through
+    `storage_path` on the row, never a listing.
+
+    Keyed on the bytes alone, deliberately — not on `(hash, name)`. The same rate
+    sheet arriving as `rates.pdf` from one office and `RATES (1).pdf` from another
+    is one object, and each row keeps its own `file_name` for the operator to see.
+    The extension rides along only so a signed URL still hints at the type.
+    """
+    digest = hashlib.sha256(data).hexdigest()
+    return f"{digest[:2]}/{digest}.{_extension_for(file_name)}", digest
+
+
 def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optional[str]:
     """Download an attachment's bytes and persist to the bucket + attachments table,
     synchronously. Returns the attachment UUID, or None on failure.
@@ -143,15 +169,17 @@ def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optiona
     blocked on Gmail/Storage I/O — see process_pending_attachments."""
     att_uuid = str(uuid.uuid4())
     filename = meta.get("filename", "")
-    ext = os.path.splitext(filename)[1].lstrip(".").lower() or "bin"
-    storage_path = f"{att_uuid}.{ext}"
     try:
         data = fetch_attachment(provider_msg_id, meta["attachment_id"])
         if not data:
             return None
+        storage_path, content_hash = content_address(data, filename)
         get_db().storage.from_(ATTACHMENT_BUCKET).upload(
             storage_path, data,
-            {"content-type": meta.get("mime_type", "application/octet-stream")},
+            # upsert because a content-addressed path collides exactly when the
+            # bytes are identical, which is the dedup working rather than a clash.
+            {"content-type": meta.get("mime_type", "application/octet-stream"),
+             "upsert": "true"},
         )
         get_db().table("attachments").insert({
             "id": att_uuid,
@@ -159,6 +187,8 @@ def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optiona
             "file_name": filename,
             "mime_type": meta.get("mime_type", ""),
             "storage_path": storage_path,
+            "content_hash": content_hash,
+            "content_id": (meta.get("content_id") or "").strip(),
             "size_bytes": meta.get("size_bytes"),
             "processing_status": "stored",
         }).execute()
@@ -228,6 +258,11 @@ def enqueue_attachment(email_id: str, provider_msg_id: str, meta: dict) -> bool:
             "provider_msg_id": provider_msg_id,
             "attachment_id": meta["attachment_id"],
             "storage_path": "",
+            # The value is_body_furniture actually judged on. It was read off the
+            # in-memory part and thrown away, so no stored row could be re-judged
+            # on the filter's own criterion afterwards — a retrospective prune had
+            # to infer intent from file names.
+            "content_id": (meta.get("content_id") or "").strip(),
             "processing_status": "skipped" if furniture else "pending",
         }).execute()
         return not furniture
@@ -243,8 +278,6 @@ def _download_pending_attachment(row: dict) -> str:
     pending) until MAX_ATTACHMENT_ATTEMPTS, then 'failed' so it stops looping."""
     att_id = row["id"]
     attempts = (row.get("attempts") or 0) + 1
-    ext = os.path.splitext(row.get("file_name") or "")[1].lstrip(".").lower() or "bin"
-    storage_path = f"{att_id}.{ext}"
     try:
         data = fetch_attachment(row["provider_msg_id"], row["attachment_id"])
         if not data:
@@ -253,14 +286,18 @@ def _download_pending_attachment(row: dict) -> str:
                 {"processing_status": "failed", "attempts": attempts}
             ).eq("id", att_id).execute()
             return "failed"
+        storage_path, content_hash = content_address(data, row.get("file_name") or "")
         get_db().storage.from_(ATTACHMENT_BUCKET).upload(
             storage_path, data,
-            # upsert so a retry after a half-done attempt overwrites rather than 409s.
+            # upsert so a retry after a half-done attempt overwrites rather than
+            # 409s — and so the second row holding identical bytes writes the one
+            # shared object instead of failing on the collision that IS the dedup.
             {"content-type": row.get("mime_type") or "application/octet-stream",
              "upsert": "true"},
         )
         get_db().table("attachments").update(
-            {"storage_path": storage_path, "processing_status": "stored", "attempts": attempts}
+            {"storage_path": storage_path, "content_hash": content_hash,
+             "processing_status": "stored", "attempts": attempts}
         ).eq("id", att_id).execute()
         return "stored"
     except Exception as e:

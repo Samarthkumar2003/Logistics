@@ -35,7 +35,10 @@ create table if not exists attachments (
   email_id          uuid references emails(id) on delete cascade,
   file_name         text default '',
   mime_type         text default '',
-  storage_path      text default '',         -- <uuid>.<ext> in the rate-card-attachments bucket
+  storage_path      text default '',         -- <aa>/<sha256>.<ext> in the rate-card-attachments
+                                             -- bucket; see add_attachment_dedup.sql, which adds
+                                             -- content_hash and content_id. Rows written before
+                                             -- that keep a <uuid>.<ext> path, which still resolves.
   size_bytes        integer,
   processing_status text default 'stored',   -- stored | parsed | failed
   created_at        timestamptz default now()
