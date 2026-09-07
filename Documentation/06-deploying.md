@@ -64,6 +64,16 @@ Railway region is the one that has to give. Check it under **Project Settings �
 General** in Supabase, then set the matching region on each Railway service under
 **Settings → Deploy → Region**.
 
+Do not try to infer it from the API. `<ref>.supabase.co` is fronted by Cloudflare,
+so the `cf-ray` header names the edge PoP nearest *you*, not where the database is,
+and `db.<ref>.supabase.co` does not resolve publicly. The dashboard is the only
+answer.
+
+This project's Supabase lives in **ap-northeast-2 (Seoul)**, which Railway does not
+offer, so an exact match is not on the table — pick the nearest Railway region and
+accept the hop. Check the current list at service-creation time rather than
+trusting this sentence; Railway adds regions.
+
 ## 2. Run the SQL
 
 All the schema files in `sql/`, in the order given in
@@ -72,12 +82,36 @@ All the schema files in `sql/`, in the order given in
 
 ```
 setup_app_users.sql                 app_users  ← required for login
+add_attachment_dedup.sql            attachments.content_id + content_hash
 ```
 
-It is idempotent and additive. Then seed the agents table:
+`add_attachment_dedup.sql` has to run **before** the code that writes those two
+columns, not after. PostgREST rejects an insert or update naming a column that does
+not exist, so on the old schema every attachment enqueue and every download
+completion fails — the queue stalls with rows stuck `pending`, retrying until
+`MAX_ATTACHMENT_ATTEMPTS` retires them, and the mail keeps arriving without its
+files. Both files are idempotent and additive. Then seed the agents table:
 
 ```bash
 python -m backend.scripts.seed_agents_table
+```
+
+**Verify rather than assume.** The file names do not match the table names — 13
+files create 13 tables with different names, and a long-lived project can easily be
+missing a couple that were added after it was set up. This deploy found
+`sync_gap_audits` and `metrics_snapshots` absent. Neither crashes anything: both
+call sites wrap the write in `try/except` and log a warning naming the SQL file, so
+the symptom is a silently empty dashboard trend strip and no drift history, not an
+error. Confirm the full set:
+
+```sql
+select t.name, (to_regclass('public.' || t.name) is not null) as exists
+from unnest(array[
+  'agents','app_users','emails','attachments','email_classifications',
+  'sync_state','shipments','rfq_jobs','quotations','classification_feedback',
+  'sync_gap_audits','metrics_snapshots','automation_state'
+]) as t(name)
+order by exists, t.name;
 ```
 
 ## 3. Create the API service
@@ -140,6 +174,7 @@ force that — there is no revocation list.
 | `ATTACHMENT_BUCKET` | `rate-card-attachments` | |
 | `LLM_PROVIDER` | `openai` | or `gemini` |
 | `OPENAI_MODEL` | `gpt-4o-mini` | |
+| `LLM_TPM` | the key's own tokens-per-minute limit, e.g. `30000` for Tier 1 gpt-4o | Client-side pacing before a request leaves, at 85% of this. It describes the provider's limit, not a budget: too low throttles work the account was entitled to run, too high means the 429 backoff finds the ceiling by exceeding it — paying the tokens, the wait *and* a full re-send, five workers at a time. `0` disables it. Per process, so it is only accurate while `RUN_SCHEDULER=1` lives on exactly one service. |
 | `EMAIL_PROVIDER` | `gmail_workspace` | |
 | `SMTP_SERVER` | `smtp.gmail.com` | |
 | `SMTP_PORT` | `587` | see [§ Outbound SMTP](#outbound-smtp-is-a-hard-requirement) |
