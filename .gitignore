@@ -4,6 +4,16 @@ __pycache__/
 *.pyc
 node_modules/
 .next/
+
+# Documentation/06-deploying.md has you run `npm install railway` at the repo root
+# for the IaC commands, which creates these two as a side effect. Keep them out of
+# the repo: the api service builds from the root with no rootDirectory set, and a
+# root package.json is a Node-project signal to Railway's build detection that
+# nothing here intends. Local-only tooling, so there is nothing to gain by
+# committing it either.
+/package.json
+/package-lock.json
+
 sitecustomize_debug.txt
 service_account.json
 
@@ -52,3 +62,9 @@ rfq_jobs_backup_*.json
 # match at every depth rather than only the repo root.
 .DS_Store
 **/.DS_Store
+
+# JetBrains project files. Machine-local: contains absolute paths, the SDK name
+# and per-user run configurations, none of which mean anything on another
+# checkout. Ignored rather than committed so it stops showing up as untracked
+# noise next to files that genuinely need staging.
+.idea/
