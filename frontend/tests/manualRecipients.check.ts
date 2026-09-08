@@ -15,6 +15,11 @@
  * work inside a setState updater while pushing into arrays declared outside it, so
  * the tallies were read back before React had run the updater (no message could
  * ever appear) and the development double-invoke added every address twice.
+ *
+ * The roster case is now confirmed visually instead of in prose: the page selects
+ * the agent and renders a chip for it, so describeSplit stays silent for it. Checks
+ * 1 and 4 pin that silence, because reintroducing the note would tell the operator
+ * the same thing twice.
  */
 
 import assert from 'node:assert/strict';
@@ -30,14 +35,14 @@ const ROSTER: RosterAgent[] = [
 const NONE: ManualRecipient[] = [];
 
 // 1. THE REPORTED BUG: an address already in the agents table used to be dropped
-// with no chip and no message. Now it selects that agent and says so.
+// with no chip and no message. Now it selects that agent and chips it.
 {
   const s = splitManualTokens(['VISHAL@asvasan.in'], ROSTER, NONE, '');
   assert.deepEqual(s.added, []);
   assert.deepEqual(s.onRoster.map(a => a.id), [7], 'must resolve to the agent id, case-insensitively');
-  const note = describeSplit(s)!;
-  assert.equal(note.tone, 'info');
-  assert.match(note.text, /Already in the agent list — selected A S Vasan/);
+  // Deliberately silent: the page selects the agent AND renders a chip for it, so a
+  // note here would be a second, weaker copy of confirmation the operator can see.
+  assert.equal(describeSplit(s), null, 'a roster hit is chipped, not narrated');
 }
 
 // 2. A typo used to clear the box silently. Now it is kept for repair and named.
@@ -68,6 +73,7 @@ const NONE: ManualRecipient[] = [];
   assert.deepEqual(s.invalid, ['nope@']);
   const note = describeSplit(s)!;
   assert.equal(note.tone, 'error', 'an invalid token dominates the tone');
+  assert.ok(!note.text.includes('Maersk'), 'a roster hit is chipped, not narrated');
 }
 
 // 5. Purity: the old version pushed into arrays declared outside the state updater,

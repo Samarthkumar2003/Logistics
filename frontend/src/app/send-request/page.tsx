@@ -255,10 +255,48 @@ function ContainerMultiSelect({ selection, onChange }: {
   );
 }
 
+/* ─── Recipient chip ────────────────────────────────────────────── */
+/** One chosen recipient, with a remove control.
+ *
+ *  Used for hand-typed addresses and for roster agents pulled in by typing their
+ *  address, so both read as one list. Typing a known agent's address used to
+ *  answer with a line of text saying it had been selected; a chip is stronger,
+ *  because the category dropdowns are collapsed by default and the checkbox it
+ *  ticks is therefore off-screen. */
+function RecipientChip({ name, email, onRemove }: {
+  name: string;
+  email: string;
+  onRemove: () => void;
+}) {
+  return (
+    <span style={{
+      display: 'inline-flex', alignItems: 'center', gap: 6,
+      background: 'var(--blue-tint-2)', border: '1px solid var(--blue)', borderRadius: 14,
+      padding: '4px 6px 4px 10px', fontSize: 11, color: 'var(--text)',
+    }}>
+      {name} · {email}
+      <button
+        type="button"
+        onClick={onRemove}
+        aria-label={`Remove ${email}`}
+        style={{
+          background: 'none', border: 'none', color: 'var(--blue-text)', cursor: 'pointer',
+          fontSize: 14, lineHeight: 1, padding: '0 2px',
+        }}
+      >×</button>
+    </span>
+  );
+}
+
 /* ─── Page ──────────────────────────────────────────────────────── */
 export default function SendRequestPage() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [selected, setSelected] = useState<Set<number>>(new Set());
+  // Roster agents selected by typing their address into the manual box rather than
+  // by ticking a dropdown. Tracked purely so they can be shown as chips: the
+  // category dropdowns are collapsed by default, so a checkbox ticking itself
+  // inside a closed panel is not visible confirmation of anything.
+  const [textSelectedIds, setTextSelectedIds] = useState<Set<number>>(new Set());
   const [sourceEmail, setSourceEmail] = useState<SourceEmail | null>(null);
 
   // Form fields
@@ -435,7 +473,9 @@ export default function SendRequestPage() {
     // known agent's address looked like the Add button doing nothing at all, and it
     // got steadily more likely as the table grew past a hundred rows.
     if (split.onRoster.length > 0) {
-      setSelected(prev => new Set([...prev, ...split.onRoster.map(a => a.id)]));
+      const ids = split.onRoster.map(a => a.id);
+      setSelected(prev => new Set([...prev, ...ids]));
+      setTextSelectedIds(prev => new Set([...prev, ...ids]));
     }
 
     // Keep any invalid tokens in the box so the user can fix them; clear the rest.
@@ -460,6 +500,17 @@ export default function SendRequestPage() {
     ...manualAgents,
   ]);
   const totalRecipients = recipients.length;
+
+  // Roster agents pulled in by typing an address, shown as chips next to the box the
+  // operator typed into. Intersected with `selected` rather than trusted on its own,
+  // so unticking one in its dropdown also drops the chip and the two controls can
+  // never claim different recipient lists.
+  const textSelectedAgents = agents.filter(a => textSelectedIds.has(a.id) && selected.has(a.id));
+
+  function removeTextSelected(id: number) {
+    setSelected(prev => { const next = new Set(prev); next.delete(id); return next; });
+    setTextSelectedIds(prev => { const next = new Set(prev); next.delete(id); return next; });
+  }
 
   async function handlePreview() {
     setErrorMsg('');
@@ -726,25 +777,23 @@ export default function SendRequestPage() {
                   color: manualNote.tone === 'error' ? 'var(--red)' : 'var(--amber)',
                 }}>{manualNote.text}</div>
               )}
-              {manualAgents.length > 0 && (
+              {(textSelectedAgents.length > 0 || manualAgents.length > 0) && (
                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 10 }}>
+                  {textSelectedAgents.map(a => (
+                    <RecipientChip
+                      key={`roster-${a.id}`}
+                      name={a.agent_name}
+                      email={a.email}
+                      onRemove={() => removeTextSelected(a.id)}
+                    />
+                  ))}
                   {manualAgents.map(m => (
-                    <span key={m.email} style={{
-                      display: 'inline-flex', alignItems: 'center', gap: 6,
-                      background: 'var(--blue-tint-2)', border: '1px solid var(--blue)', borderRadius: 14,
-                      padding: '4px 6px 4px 10px', fontSize: 11, color: 'var(--text)',
-                    }}>
-                      {m.agent_name} · {m.email}
-                      <button
-                        type="button"
-                        onClick={() => removeManualEmail(m.email)}
-                        aria-label={`Remove ${m.email}`}
-                        style={{
-                          background: 'none', border: 'none', color: 'var(--blue-text)', cursor: 'pointer',
-                          fontSize: 14, lineHeight: 1, padding: '0 2px',
-                        }}
-                      >×</button>
-                    </span>
+                    <RecipientChip
+                      key={m.email}
+                      name={m.agent_name}
+                      email={m.email}
+                      onRemove={() => removeManualEmail(m.email)}
+                    />
                   ))}
                 </div>
               )}
