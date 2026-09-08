@@ -6,7 +6,8 @@
  * not a wrong decision but a silent one: every rejection path — a typo, an
  * address that already belonged to an agent — cleared the input box and produced
  * no message, so the Add button looked broken. The rule here is that every token
- * lands in exactly one bucket and every non-empty bucket gets said out loud.
+ * lands in exactly one bucket and no bucket is discarded in silence: three are
+ * reported as text, and `onRoster` is confirmed by the recipient chip it produces.
  */
 
 /** An ad-hoc recipient typed in by hand, not backed by a row in the agents table. */
@@ -105,15 +106,17 @@ export function dedupeByEmail(recipients: ManualRecipient[]): ManualRecipient[] 
   return unique;
 }
 
-/** Say something for every outcome. Silence was the actual defect: a typo and an
- *  address that happened to match an agent both cleared the box and left no trace,
- *  which reads as "Add is broken". */
+/** Say something for the outcomes the operator cannot otherwise see.
+ *
+ *  Silence was the original defect: a typo and an address that already belonged
+ *  to an agent both cleared the box and left no trace, which reads as "Add is
+ *  broken". Note what is deliberately NOT reported here: `onRoster`. That case
+ *  is shown instead as a chip in the recipient row, because a message the
+ *  operator has to read is weaker confirmation than seeing the recipient appear.
+ *  Do not restore a note for it without removing the chip. */
 export function describeSplit(split: TokenSplit): ManualNote | null {
   const notes: string[] = [];
   if (split.invalid.length > 0) notes.push(`Not a valid email: ${split.invalid.join(', ')}`);
-  if (split.onRoster.length > 0) {
-    notes.push(`Already in the agent list — selected ${split.onRoster.map(a => a.agent_name).join(', ')}`);
-  }
   if (split.duplicates.length > 0) notes.push(`Already added: ${split.duplicates.join(', ')}`);
   if (notes.length === 0) return null;
   return { text: notes.join(' · '), tone: split.invalid.length > 0 ? 'error' : 'info' };
