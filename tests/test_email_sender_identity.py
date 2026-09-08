@@ -221,3 +221,93 @@ def test_a_reauth_requirement_fails_the_send_rather_than_crashing_the_batch(monk
 
     assert [r["status"] for r in results] == ["failed", "failed"]
     assert [r["vendor_name"] for r in results] == ["Alpha", "Beta"]
+
+
+# ---------------------------------------------------------------------------
+# The redirect is a choke point, not a per-provider courtesy
+#
+# Regression: EMAIL_REDIRECT was applied inside each provider branch, and the
+# Outlook branch returned before its call. A test run mailed every real freight
+# agent on the list while /health reported safe mode as active.
+# ---------------------------------------------------------------------------
+
+REDIRECT = "desk@example.com"
+VENDOR = "quotes@realvendor.com"
+
+
+def _capture_outlook(monkeypatch):
+    """Stand in for outlook_sender.send_rfq_email and record what it was handed."""
+    seen = {}
+
+    def _send(to_addr, subject, body, attachments=None):
+        seen.update(to_addr=to_addr, subject=subject)
+        return {"status": "sent", "to": to_addr}
+
+    import backend.connectors.outlook_sender as outlook
+    monkeypatch.setattr(outlook, "send_rfq_email", _send)
+    return seen
+
+
+def test_the_outlook_path_honours_email_redirect(monkeypatch):
+    """The regression. This path used to return before the guard ran."""
+    monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", REDIRECT)
+    monkeypatch.setattr(email_sender, "EMAIL_PROVIDER", "outlook")
+    seen = _capture_outlook(monkeypatch)
+
+    result = email_sender.send_rfq_email(VENDOR, "Request for Quotation", "body")
+
+    assert seen["to_addr"] == REDIRECT, "Outlook mailed the real vendor"
+    assert VENDOR in seen["subject"], "the intended recipient is lost from the subject"
+    # The caller correlates outcomes to the agent it chose, never to the redirect.
+    assert result["to"] == VENDOR
+
+
+def test_the_smtp_path_honours_email_redirect(monkeypatch, smtp_sends):
+    """SMTP with the redirect ON was never exercised end-to-end: the one test that
+    claimed to cover it called _apply_redirect directly and never sent."""
+    monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", REDIRECT)
+
+    result = email_sender.send_rfq_email(VENDOR, "Request for Quotation", "body")
+
+    assert smtp_sends[0]["to"] == REDIRECT, "SMTP mailed the real vendor"
+    # The prefix carries a non-ASCII arrow, so the Subject header is RFC 2047
+    # encoded on the wire and a substring check against the raw message would
+    # silently never match. Decode it rather than assert on the encoding.
+    from email.header import decode_header, make_header
+    msg = message_from_bytes(smtp_sends[0]["raw"].encode())
+    subject = str(make_header(decode_header(msg["Subject"])))
+    assert f"[TEST \u2192 {VENDOR}]" in subject
+    assert result["to"] == VENDOR
+
+
+def test_the_gmail_api_path_honours_email_redirect(monkeypatch, gmail_api_sends):
+    monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", REDIRECT)
+
+    result = email_sender.send_rfq_email(VENDOR, "Request for Quotation", "body")
+
+    assert gmail_api_sends[0]["to"] == REDIRECT
+    assert VENDOR in gmail_api_sends[0]["subject"]
+    assert result["to"] == VENDOR
+
+
+def test_the_batch_path_does_not_hand_outlook_the_whole_list(monkeypatch):
+    """outlook_sender's own batch loops its OWN sender and never sees the guard,
+    so email_sender must not delegate to it."""
+    monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", REDIRECT)
+    monkeypatch.setattr(email_sender, "EMAIL_PROVIDER", "outlook")
+    seen = _capture_outlook(monkeypatch)
+
+    import backend.connectors.outlook_sender as outlook
+
+    def _must_not_run(drafts):
+        raise AssertionError("email_sender delegated the batch and skipped the redirect")
+
+    monkeypatch.setattr(outlook, "send_rfq_emails_batch", _must_not_run)
+
+    results = email_sender.send_rfq_emails_batch(
+        [{"vendor_name": "Alpha", "vendor_email": VENDOR,
+          "subject": "RFQ", "body": "body"}]
+    )
+    assert seen["to_addr"] == REDIRECT
+    assert results[0]["vendor_name"] == "Alpha"
+    assert results[0]["to"] == VENDOR

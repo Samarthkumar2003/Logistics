@@ -64,6 +64,16 @@ class Settings:
     openai_api_key: str
     llm_provider: str
     openai_model: str
+    # Tokens-per-minute the client-side pacer will spend, before its safety
+    # margin (backend/classifier/rate_limiter.py). It is the provider's *own*
+    # advertised TPM for the key, not a budget of our choosing — 30,000 is the
+    # Tier 1 gpt-4o figure, and a key on a higher tier should say so here or the
+    # pacer throttles work the account was entitled to run.
+    #
+    # 0 turns pacing off entirely. Per process, so exactly one scheduler:
+    # two processes on one key each get a full allowance and together exceed the
+    # org limit no matter what this says.
+    llm_tpm: int
 
     # --- Mail ----------------------------------------------------------------
     email_provider: str
@@ -81,6 +91,11 @@ class Settings:
     # address inside email_store._alert_sync_drift, which meant a deployment for
     # anyone else silently mailed the original author.
     sync_alert_recipient: str
+    # Signs the RFQ emails sent to freight vendors. The operator's own name comes
+    # from their app_users row and rides the JWT; this is the company line under
+    # it, which is the same for everyone and so has no business in a per-user
+    # token. Empty renders a name-only signature rather than a blank line.
+    company_name: str
 
     # --- Auth ----------------------------------------------------------------
     # False disables the bearer check on every route. Only for the offline test
@@ -128,7 +143,20 @@ class Settings:
 
     @property
     def safe_mode(self) -> bool:
-        """True when outgoing mail is being redirected away from real vendors."""
+        """True when outgoing mail is being redirected away from real vendors.
+
+        One env var and no provider check, which is only honest because the
+        redirect is applied at a single choke point at the top of
+        email_sender.send_rfq_email, above every provider branch.
+
+        It was NOT honest before that: the Outlook branch returned before the
+        guard ran, so this reported safe mode while /send-rfq mailed real freight
+        agents. The tempting fix is to make this property provider-aware. That
+        would be the wrong layer — it would leave the redirect broken and merely
+        describe the breakage accurately. Fixing the send path instead makes the
+        simple answer here the true one. If a provider is ever added that does not
+        route through send_rfq_email, this property becomes a lie again.
+        """
         return bool(self.email_redirect)
 
     def require_supabase(self) -> None:
@@ -172,6 +200,7 @@ def get_settings() -> Settings:
         openai_api_key=_env("OPENAI_API_KEY"),
         llm_provider=_env("LLM_PROVIDER", "openai").lower(),
         openai_model=_env("OPENAI_MODEL", "gpt-4o-mini"),
+        llm_tpm=_int("LLM_TPM", 30_000),
         email_provider=_env("EMAIL_PROVIDER", "gmail").lower(),
         email_account=_env("EMAIL_ACCOUNT"),
         email_password=_env("EMAIL_PASSWORD"),
@@ -182,6 +211,7 @@ def get_settings() -> Settings:
         gmail_mailbox=_env("GMAIL_MAILBOX"),
         report_recipient=_env("REPORT_RECIPIENT"),
         sync_alert_recipient=_env("SYNC_ALERT_RECIPIENT"),
+        company_name=_env("COMPANY_NAME"),
         auth_enabled=_flag("AUTH_ENABLED", True),
         jwt_secret=_env("JWT_SECRET"),
         jwt_algorithm=_env("JWT_ALGORITHM", "HS256"),

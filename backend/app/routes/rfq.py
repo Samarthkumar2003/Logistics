@@ -7,11 +7,13 @@ here is driven by an explicit operator action.
 import logging
 from typing import List, Optional
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from pydantic import BaseModel
 
 from backend.agents.intake_agent import ShipmentDetails, run_intake_agent
 from backend.app.errors import AppException
+from backend.core.config import settings
+from backend.domain.models import SenderIdentity
 from backend.repositories import agent_repo
 from backend.services import rfq_service
 
@@ -70,6 +72,43 @@ class SendRFQRequest(BaseModel):
     attachments: List[AttachmentInput] = []
 
 
+NO_SENDER_NAME = (
+    "Your operator profile has no display name, so an RFQ cannot be signed. "
+    "Set full_name on your app_users row and log in again."
+)
+
+
+def _sender_or_422(request: Request) -> SenderIdentity:
+    """Who this RFQ will be signed by, or a refusal.
+
+    Reads the name from the verified token rather than the database: the bearer
+    middleware has already put the claims on `request.state`, so this costs
+    nothing, and app/auth.py notes that identity is exactly what they were put
+    there for.
+
+    Fails closed, and that is the whole point of the function. A blank name is
+    not cosmetic — it is what let the model sign RFQs to real freight agents as
+    `[Your Name]`. Three ways to get one, all handled here:
+
+      * a token minted before the `name` claim existed — blank, refused;
+      * an app_users row whose full_name was never filled in (the column
+        defaults to '') — blank, refused;
+      * AUTH_ENABLED=0, where the middleware returns before setting claims at
+        all, so `request.state.claims` does not exist — hence getattr, not
+        attribute access, or this would be a 500 instead of a 422.
+
+    The last case means the drafting endpoints do not work with auth disabled.
+    That is correct: with no token there is no operator, and an unsigned RFQ to a
+    vendor is worse than a refused one. The offline suite drives rfq_service
+    directly and passes its own SenderIdentity, so nothing there depends on this.
+    """
+    claims = getattr(request.state, "claims", None)
+    name = (getattr(claims, "name", "") or "").strip()
+    if not name:
+        raise AppException(status_code=422, detail=NO_SENDER_NAME)
+    return SenderIdentity(name=name, company=settings.company_name.strip())
+
+
 def _shipment(payload) -> dict:
     return {
         "origin": payload.origin_port.strip(),
@@ -108,12 +147,15 @@ def extract_details(payload: EmailInput):
 
 
 @router.post("/preview-rfq")
-def preview_rfq(payload: PreviewRFQRequest):
+def preview_rfq(payload: PreviewRFQRequest, request: Request):
     """One sample draft, sent to nobody."""
+    # Checked on preview as well as send, so a missing name is discovered while
+    # composing rather than at the moment the operator tries to send.
+    sender = _sender_or_422(request)
     agent = (rfq_service.SelectedAgent(payload.agent.agent_name, payload.agent.email)
              if payload.agent else None)
     try:
-        return rfq_service.preview_draft(_shipment(payload), agent)
+        return rfq_service.preview_draft(_shipment(payload), agent, sender)
     except rfq_service.RfqError as e:
         raise AppException(status_code=422, detail=str(e))
     except Exception as e:
@@ -129,8 +171,9 @@ MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024
 
 
 @router.post("/send-rfq")
-def send_rfq(payload: SendRFQRequest):
+def send_rfq(payload: SendRFQRequest, request: Request):
     """Send one RFQ per selected agent, each with its own reference."""
+    sender = _sender_or_422(request)
     agents = [rfq_service.SelectedAgent(a.agent_name, a.email) for a in payload.agents]
 
     total_bytes = sum(len(a.data_base64) for a in payload.attachments) * 3 // 4
@@ -151,6 +194,7 @@ def send_rfq(payload: SendRFQRequest):
                 "body": payload.customer_body,
                 "email_id": payload.customer_email_id,
             },
+            sender=sender,
             edited_subject=(payload.edited_subject or "").strip(),
             edited_body=(payload.edited_body or "").strip(),
             attachments=[a.model_dump() for a in payload.attachments],

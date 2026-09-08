@@ -10,12 +10,16 @@ looking like an agent who did not bother to answer.
 
 import pytest
 
-from backend.domain.models import OPEN_JOB_STATUSES, STATUS_SENDING
+from backend.domain.models import OPEN_JOB_STATUSES, STATUS_SENDING, SenderIdentity
 from backend.services import rfq_service
 from backend.services.rfq_service import SelectedAgent
 
 SHIPMENT = {"origin": "Nhava Sheva", "destination": "Hamburg", "mode": "sea"}
 CUSTOMER = {"email_id": "", "sender": "shipper@example.com", "subject": "Rates?"}
+# Who the RFQ is signed by. Required, not defaulted — see SenderIdentity. Named
+# OPERATOR rather than 'sender' because this module already has a 'sender'
+# fixture, which installs the batch mail sender and is a different thing entirely.
+OPERATOR = SenderIdentity(name="Test Operator", company="Test Freight Co")
 
 
 @pytest.fixture
@@ -63,7 +67,7 @@ def drafts_succeed(monkeypatch):
 
     monkeypatch.setattr(
         rfq_service, "generate_rfq_drafts",
-        lambda shipment_data, agents, reference: _Result([a["agent_name"] for a in agents]),
+        lambda shipment_data, agents, reference, sender: _Result([a["agent_name"] for a in agents]),
     )
 
 
@@ -83,7 +87,7 @@ def _agents(*names):
 
 
 def _send(agents):
-    return rfq_service.send_rfqs(SHIPMENT, agents, CUSTOMER)
+    return rfq_service.send_rfqs(SHIPMENT, agents, CUSTOMER, OPERATOR)
 
 
 # ---------------------------------------------------------------------------
@@ -151,7 +155,7 @@ def test_outcomes_correlate_by_position_when_the_model_renames_the_vendor(
 
     monkeypatch.setattr(
         rfq_service, "generate_rfq_drafts",
-        lambda shipment_data, agents, reference: _Result([a["agent_name"] for a in agents]),
+        lambda shipment_data, agents, reference, sender: _Result([a["agent_name"] for a in agents]),
     )
     sender(["sent", "failed"])
     _send(_agents("Alpha", "Beta"))
@@ -222,7 +226,7 @@ def test_send_failed_can_still_receive_a_reply():
 def test_a_drafting_failure_writes_no_row(monkeypatch, sender, sent_jobs):
     """Nothing was addressed and no reference reached anyone, so there is
     nothing for a reply to attach to."""
-    def _boom(shipment_data, agents, reference):
+    def _boom(shipment_data, agents, reference, sender):
         raise RuntimeError("model refused")
 
     monkeypatch.setattr(rfq_service, "generate_rfq_drafts", _boom)
@@ -231,7 +235,12 @@ def test_a_drafting_failure_writes_no_row(monkeypatch, sender, sent_jobs):
 
     assert sent_jobs == []
     assert result["total_sent"] == 0
+    # The model's own message, not just the "draft failed" prefix. _draft_for_agent
+    # catches bare Exception, so a mock whose signature has drifted from the real
+    # function raises TypeError and still lands in this field — which let this test
+    # pass while asserting nothing about the failure it names.
     assert "draft failed" in result["jobs"][0]["status"]
+    assert "model refused" in result["jobs"][0]["status"]
 
 
 # ---------------------------------------------------------------------------

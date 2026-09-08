@@ -1,8 +1,13 @@
+import logging
+
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from typing import List, Optional
 
 from backend.core.rfq_reference import subject_token
+from backend.domain.models import SenderIdentity
+
+logger = logging.getLogger(__name__)
 
 _client: Optional[OpenAI] = None
 
@@ -26,7 +31,17 @@ class RFQResponse(BaseModel):
     drafts: List[DraftEmail]
 
 
-def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str) -> RFQResponse:
+def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str,
+                        sender: SenderIdentity) -> RFQResponse:
+    """Draft one RFQ per agent. Bodies come back WITHOUT a sign-off.
+
+    `sender` is required, not optional. Without it the prompt described the job,
+    the shipment and the vendors but never said who was writing, so the model
+    closed a professional email with the only thing available to it — a
+    `[Your Name]` placeholder — and that went to real freight agents. Telling it
+    the name fixes the cause; instructing it to omit the sign-off entirely (the
+    caller appends `sender.signature`) removes the possibility.
+    """
     agent_names = [a["agent_name"] for a in agents]
     if not agent_names:
         agent_names = ["General Freight Forwarder (Fallback)"]
@@ -45,7 +60,15 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
         f"Draft a separate email for each of these vendors: {agents_str}. "
         f"Each email subject line MUST follow this format: \"{subject_token(reference)} | Request for Quotation - {mode} {origin} to {destination}\". "
         "Keep the RFQId token exactly as written — it is how the reply gets matched back to this shipment. "
-        "Keep the tone professional. Do NOT mention any historical pricing in the email to the vendor."
+        "Keep the tone professional. Do NOT mention any historical pricing in the email to the vendor. "
+        f"You are writing on behalf of {sender.name}"
+        + (f" at {sender.company}" if sender.company else "")
+        + ". Use that identity for any first-person reference in the body. "
+        "End the body after the last line of substance. Do NOT write a closing, "
+        "a sign-off, or a signature block — no 'Best regards', no name, no job "
+        "title, no company line. The signature is appended automatically after "
+        "you return, so anything you add there is either duplicated or wrong. "
+        "Never emit a square-bracketed placeholder such as [Your Name]."
     )
 
     agents_context = [
@@ -84,7 +107,18 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str)
     agent_email_map = {a["agent_name"]: a.get("email", "") for a in agents}
     for draft in result.drafts:
         draft.vendor_email = agent_email_map.get(draft.vendor_name, "")
+        # A model that renamed the vendor even slightly ('Kuehne & Nagel' for
+        # 'Kuehne+Nagel') falls off the map and leaves the address blank. Silent
+        # before: the draft simply never sent, with nothing in the log saying why.
+        if not draft.vendor_email:
+            logger.warning(
+                "Draft for %s has no address — model returned vendor_name %r, "
+                "which matches no selected agent (%s)",
+                reference, draft.vendor_name, ", ".join(agent_email_map) or "none",
+            )
 
+    logger.info("Drafted %d RFQ email(s) for %s, signed as %r",
+                len(result.drafts), reference, sender.name)
     return result
 
 
@@ -95,6 +129,7 @@ if __name__ == "__main__":
         {"agent_name": "DB Schenker", "email": "rfq@dbschenker.com", "specialty": "sea_freight"}
     ]
     mock_reference = "SHP-2026-0042"
-    result = generate_rfq_drafts(mock_intake, mock_agents, mock_reference)
+    mock_sender = SenderIdentity(name="Test Operator", company="Bhatia Shipping Group")
+    result = generate_rfq_drafts(mock_intake, mock_agents, mock_reference, mock_sender)
     for i, d in enumerate(result.drafts, 1):
         print(f"Draft {i} (To: {d.vendor_name} <{d.vendor_email}>)\nSubject: {d.subject}\n{d.body}\n---")

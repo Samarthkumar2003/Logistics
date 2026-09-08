@@ -72,7 +72,11 @@ def login(email: str, password: str) -> tuple[str, int, AppUser]:
         logger.warning("Login refused for %s: account is deactivated", email)
         raise AuthError(INVALID_CREDENTIALS)
 
-    token, expires_in = security.mint_token(user.id, user.email, user.role)
+    # full_name rides the token so the drafting path can sign an RFQ without a
+    # second read per send. It is display data, not a permission: a rename takes
+    # effect at the operator's next login, which is why nothing here re-reads it.
+    token, expires_in = security.mint_token(user.id, user.email, user.role,
+                                            user.full_name)
 
     try:
         user_repo.touch_last_login(user.id)

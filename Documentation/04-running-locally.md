@@ -73,7 +73,15 @@ setup_agents_table.sql              agents
 setup_scan_state.sql                automation_state
 link_replies_to_jobs.sql            emails.rfq_reference + scan retry columns
 setup_app_users.sql                 app_users — required, the API refuses logins without it
+setup_attachment_queue.sql          attachments.provider_msg_id / attachment_id / attempts
+add_attachment_dedup.sql            attachments.content_id / content_hash
 ```
+
+The two attachment files are not optional and their order is not cosmetic:
+`email_store` writes every one of those columns, and PostgREST rejects an insert
+naming a column that does not exist. Miss them and each attachment enqueue and
+each download completion fails — the queue fills with rows stuck `pending` while
+the mail itself lands fine, so the symptom is emails that quietly have no files.
 
 `link_replies_to_jobs.sql` also contains a commented-out `DELETE FROM
 quotations;`. Run it once you've taken any backup you want — those rows are
@@ -260,19 +268,18 @@ and deleting a file in a later layer does not remove it from the earlier one.
 
 Ordered by risk removed. The first is a blocker, the rest are hardening.
 
-- **Authentication.** There is none, and the image binds `0.0.0.0`.
-  `POST /send-rfq` and `POST /jobs/{ref}/approve` mail real freight vendors;
-  `GET /agents` returns 110 real contacts. CORS restricts browsers only — it
-  stops nothing with `curl`. Do not expose this publicly. ([BUGS.md](BUGS.md#p1))
 - **`EMAIL_REDIRECT` does not work on the Outlook path.** `send_rfq_email`
   returns to the Outlook sender before the redirect is applied, so with
   `EMAIL_PROVIDER=outlook` safe mode is inert while `/health` reports it active.
-- **CI on push.** The only workflow is the nightly report; nothing runs the
-  suite on push or PR. 193 tests, no secrets, one second — the cheapest job
-  available, and the thing that stops the lock file above from rotting.
+- **Token revocation.** Bearer auth covers every endpoint except `/health` and
+  `/auth/login` (P1-1, closed 2026-09-01), but there is no revocation list:
+  rotating `JWT_SECRET` is the only way to sign everyone out, and a deactivated
+  account's existing token stays usable for `JWT_EXPIRY_MINUTES`. The token also
+  lives in `localStorage`. ([BUGS.md](BUGS.md#fixed-on-2026-09-01))
 - **Hash pinning.** `requirements.lock` pins versions but not hashes. Add
-  `--generate-hashes` and `pip install --require-hashes` once there is CI to
-  prove the build still works.
+  `--generate-hashes` and `pip install --require-hashes`; the CI job added
+  2026-09-03 installs the lock with `--no-deps`, so it is what proves the build
+  still works afterwards.
 - **A declared Python version.** The floor is 3.10 (several modules annotate
   `int | None` in signatures evaluated at runtime, so 3.9 fails at import) and
   nothing states it — no `pyproject.toml`, no `requires-python`. Only the

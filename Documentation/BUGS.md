@@ -1,6 +1,6 @@
 # Known bugs
 
-_Last reviewed: 2026-09-03. Scope: full backend + frontend._
+_Last reviewed: 2026-09-07. Scope: full backend + frontend._
 
 Priority is **impact × silence**. A defect that corrupts data without anyone
 noticing outranks one that throws a visible error.
@@ -127,7 +127,10 @@ per-agent outcome correlation; `tests/test_rfq_approve.py` (13) covers awarding
 against a failed acceptance; `tests/test_inbox_routes.py` covers the six
 outcomes of a body lookup through the route layer.
 
-377 tests as of 2026-09-03, and **CI runs them on push** —
+415 tests as of 2026-09-07 — the newest are `tests/test_rate_limiter.py` (20,
+the token bucket against a fake clock plus the classifier's call site) and
+`tests/test_attachment_dedup.py` (18, content addressing and the two columns
+`add_attachment_dedup.sql` adds). CI **runs the suite on push** —
 `.github/workflows/ci.yml`, added 2026-09-03: the suite on 3.12 against
 `requirements.lock`, `next build` (which runs `tsc`), the four
 `frontend/tests/*.check.ts` scripts, and two greps — one for sliced credentials,
@@ -204,6 +207,78 @@ quantity — ranked here by blast radius.
 - **Agent data quality.** "Emu Lines" and "Emulines" are listed as separate
   companies; two DP World rows carry `@unifeeder.com` addresses while Unifeeder
   is also its own entry.
+
+---
+
+## Fixed on 2026-09-07
+
+<a id="fixed-on-2026-09-07"></a>
+
+Three pieces of work-in-progress that were on disk but wired to nothing. None was
+a defect in committed code; each was a fix that existed as a file and therefore
+read as done while changing no behaviour at all — the failure mode being recorded
+here so the next one is recognised faster.
+
+**The 429 backoff was the only thing standing between five workers and a Tier 1
+rate limit.** `backend/classifier/rate_limiter.py` — a client-side token bucket —
+was complete, tested by nothing, called by nothing, and read
+`settings.llm_tpm`, which did not exist. So the module could not have run even if
+something had called it.
+
+At this project's measured request size (a 5,881-char system prompt plus up to
+`MAX_BODY_CHARS` of body, ~3,543 billed tokens) `classify_emails_batch`'s five
+threads put ~17,700 tokens in flight the instant a batch starts, against 30,000
+TPM. Draining a backlog found the ceiling in seconds, and each 429 cost three
+times over: the rejected tokens, 5–20s of backoff, and a full re-send of the
+prompt. Now `classify_email` calls `_pace_llm_call` before `provider.complete`,
+inside the retry loop:
+
+- **Charged per attempt, not per email.** A retry re-sends the whole prompt, so
+  attempt two costs the provider exactly what attempt one did.
+- **`LLM_TPM` is the provider's limit for your key, not a budget.** The bucket
+  spends `SAFETY_FRACTION` (85%) of it, because the estimate is approximate and
+  the org limit is shared with anything else on the key. Set too low it throttles
+  work the account was entitled to run.
+- **Per process.** Two processes on one key each get a full allowance — a
+  deployment invariant (`RUN_SCHEDULER=1` on exactly one service), not something
+  a client-side limiter can enforce. `LLM_TPM=0` disables it, which is what the
+  offline suite runs with.
+
+20 cases in `tests/test_rate_limiter.py`, against a fake clock — including the
+two that would otherwise hang or lie: an oversized request is clamped rather than
+queued on a condition that can never be true, and the wait happens outside the
+lock so a five-wide pool does not serialise into a one-wide one.
+
+**Every attachment row minted a fresh UUID, so identical bytes were stored
+again per row.** One 426,103-byte animated signature banner — it rides on every
+mail from one agent — occupied 5,958 separate objects, 2.5 GB of a single file.
+`storage_path` is now `<aa>/<sha256>.<ext>`, keyed on the bytes alone: the same
+rate sheet arriving as `rates.pdf` and `RATES (1).pdf` is one object, and each
+row keeps its own `file_name`. Uploads pass `upsert` — at a content-addressed
+path a collision means the bytes are identical, which is the dedup working, not a
+clash; without it the second row would 409 and be marked `failed`, turning dedup
+into data loss.
+
+`content_id` is persisted for a different reason: it is the value
+`is_body_furniture` judges on, and it was read off the in-memory part and thrown
+away, so no stored row could be re-judged on the filter's own criterion — a
+retrospective prune had to infer intent from file names. 18 cases in
+`tests/test_attachment_dedup.py`.
+
+**`sql/add_attachment_dedup.sql` must run before that code deploys.** PostgREST
+rejects a write naming a column that does not exist, so on the old schema every
+enqueue and every download completion fails: the queue stalls at `pending`,
+retries until `MAX_ATTACHMENT_ATTEMPTS` retires the rows, and the mail keeps
+arriving without its files. Recorded in
+[06-deploying.md § Run the SQL](06-deploying.md#2-run-the-sql) and the local setup
+list, because the ordering is invisible from the code.
+
+**`LLM_TPM` was absent from both deploy surfaces.** Added to `.railway/railway.ts`
+and to `LITERALS` in `scripts/railway_push_vars.py`, with the same value in
+`.env.example` and as the config default. `railway config apply` **deletes by
+omission**, so a variable set in the dashboard and missing from the file is
+removed on the next apply — a setting that exists only in the dashboard is a
+setting that disappears.
 
 ---
 

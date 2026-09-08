@@ -51,20 +51,31 @@ def _apply_redirect(to_addr: str, subject: str) -> tuple[str, str]:
     return EMAIL_REDIRECT, f"[TEST → {to_addr}] {subject}"
 
 
-def _send_via_gmail_api(to_addr: str, subject: str, body: str, attachments: Optional[list[dict]] = None) -> dict:
-    """Send as GMAIL_MAILBOX over the Gmail API. Same status dict as SMTP."""
+def _send_via_gmail_api(actual_to: str, actual_subject: str, body: str,
+                        intended_to: str,
+                        attachments: Optional[list[dict]] = None) -> dict:
+    """Send as GMAIL_MAILBOX over the Gmail API. Same status dict as SMTP.
+
+    Takes the recipient ALREADY resolved through _apply_redirect. It used to call
+    the redirect itself, which meant each provider branch was individually
+    responsible for remembering to — and the Outlook branch did not. The single
+    call now lives in send_rfq_email, above every branch.
+
+    `intended_to` is the vendor the operator chose, and is what goes in the result
+    regardless of where the mail was actually delivered: callers correlate
+    outcomes to agents, and under a redirect every actual_to is the same address.
+    """
     from backend.connectors.gmail_connector import send_message
 
-    actual_to, actual_subject = _apply_redirect(to_addr, subject)
     try:
         msg_id = send_message(to_addr=actual_to, subject=actual_subject, body=body, attachments=attachments)
         logger.info("Email sent via Gmail API as %s to %s (id=%s)",
                     GMAIL_MAILBOX or "authenticated mailbox", actual_to, msg_id)
-        return {"status": "sent", "to": to_addr}
+        return {"status": "sent", "to": intended_to}
     except Exception as exc:
         error_msg = f"Gmail API send failed: {exc}"
         logger.exception(error_msg)
-        return {"status": "failed", "to": to_addr, "error": error_msg}
+        return {"status": "failed", "to": intended_to, "error": error_msg}
 
 
 def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[list[dict]] = None) -> dict:
@@ -87,19 +98,31 @@ def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[
         {"status": "sent", "to": to_addr} on success, or
         {"status": "failed", "to": to_addr, "error": "<message>"} on failure.
     """
+    # THE choke point. Every provider branch below is downstream of this one call,
+    # so a provider added later cannot mail a real vendor by forgetting to apply
+    # the redirect — which is exactly what the Outlook branch did: it returned
+    # here before the guard ran, so EMAIL_REDIRECT did nothing while /health and
+    # /automation/status both went on reporting safe mode as active.
+    actual_to, actual_subject = _apply_redirect(to_addr, subject)
+
     if EMAIL_PROVIDER == "outlook":
         from backend.connectors.outlook_sender import send_rfq_email as _outlook_send
-        return _outlook_send(to_addr=to_addr, subject=subject, body=body, attachments=attachments)
+        result = _outlook_send(to_addr=actual_to, subject=actual_subject,
+                               body=body, attachments=attachments)
+        # outlook_sender reports whoever it was handed. Under a redirect that is
+        # the test address, and the caller needs the vendor it picked.
+        result["to"] = to_addr
+        return result
 
     if EMAIL_PROVIDER in GMAIL_API_PROVIDERS:
-        return _send_via_gmail_api(to_addr=to_addr, subject=subject, body=body, attachments=attachments)
+        return _send_via_gmail_api(actual_to=actual_to, actual_subject=actual_subject,
+                                   body=body, intended_to=to_addr,
+                                   attachments=attachments)
 
     if not EMAIL_ACCOUNT or not EMAIL_PASSWORD:
         error_msg = "EMAIL_ACCOUNT or EMAIL_PASSWORD not set in environment"
         logger.error(error_msg)
         return {"status": "failed", "to": to_addr, "error": error_msg}
-
-    actual_to, actual_subject = _apply_redirect(to_addr, subject)
 
     msg = MIMEMultipart()
     msg["From"] = EMAIL_ACCOUNT
@@ -193,10 +216,11 @@ def send_rfq_emails_batch(drafts: list[dict]) -> list[dict]:
     list[dict]
         One result dict per draft with status "sent", "failed", or "skipped".
     """
-    if EMAIL_PROVIDER == "outlook":
-        from backend.connectors.outlook_sender import send_rfq_emails_batch as _outlook_batch
-        return _outlook_batch(drafts)
-
+    # Deliberately NOT delegating the whole list to outlook_sender's own batch.
+    # That function is a byte-identical loop over its OWN send_rfq_email, so it
+    # never passes through this module's redirect at all — a test run mailed every
+    # real freight agent on the list. Looping here instead means every provider,
+    # present and future, reaches a vendor only via the guarded send_rfq_email.
     results: list[dict] = []
 
     for draft in drafts:

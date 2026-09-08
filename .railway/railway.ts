@@ -74,6 +74,33 @@ export default defineRailway(() => {
       // in code review.
       RUN_SCHEDULER: "1",
 
+      // Also owned outright, for the same reason: config.py defaults this to
+      // "gmail", which is the legacy SMTP path. That path sends as EMAIL_ACCOUNT
+      // rather than GMAIL_MAILBOX, so replies arrive in a mailbox nothing
+      // ingests and every RFQ thread dead-ends — quietly, with each individual
+      // send reporting success. preserve() would have made an environment that
+      // simply never had the variable set inherit that default.
+      EMAIL_PROVIDER: "gmail_workspace",
+
+      // Owned outright for the third time, and for the strongest reason of the
+      // three. config.py already defaults this to True, so omitting it would not
+      // turn auth off — but `apply` deletes by omission, and a reviewer reading
+      // `railway variable list` on a service where the most security-relevant
+      // setting in the project is merely *implied by absence* has no way to tell
+      // "correct by default" from "someone unset it". With AUTH_ENABLED=0 anything
+      // that can reach the port can POST /send-rfq and mail real freight agents,
+      // so the value is spelled out where code review can see it.
+      AUTH_ENABLED: "1",
+
+      // The client-side pacer's ceiling (backend/classifier/rate_limiter.py),
+      // spelled out for the same reason as RUN_SCHEDULER: it is only a true
+      // statement about the org limit while exactly one process holds the key, so
+      // the two values belong in one file where a reviewer sees them together.
+      // 30000 is the Tier 1 gpt-4o TPM — raise it to the key's real tier rather
+      // than leaving the pacer throttling work the account is entitled to run, and
+      // keep it in step with LITERALS in scripts/railway_push_vars.py. 0 = off.
+      LLM_TPM: "30000",
+
       // ── Container-appropriate logging ────────────────────────────────────
       // stdout is the log; a rotating file inside a container is written to the
       // overlay filesystem and dies with it. JSON so the four correlation ids
@@ -111,7 +138,17 @@ export default defineRailway(() => {
       //
       // EMAIL_REDIRECT is the safe-mode valve. Leave it set to your own address
       // until you intend to mail real freight agents.
+      //
+      // OPENAI_MODEL has to be named here even though scripts/railway_push_vars.py
+      // is what supplies the value. It is declared, not omitted, purely because
+      // `apply` deletes anything this file does not mention: drop the line and the
+      // deployed "gpt-4o" is removed, config.py falls back to "gpt-4o-mini", and
+      // every email is classified by a weaker model from then on. No error, no log
+      // line, just quietly worse output. IMAP_SERVER is listed for the same
+      // structural reason, though its default happens to match.
       CORS_ORIGINS: preserve(),
+      OPENAI_MODEL: preserve(),
+      IMAP_SERVER: preserve(),
       GMAIL_MAILBOX: preserve(),
       GOOGLE_OAUTH_REDIRECT_URI: preserve(),
       EMAIL_REDIRECT: preserve(),
