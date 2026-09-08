@@ -30,6 +30,7 @@ from backend.connectors.gmail_connector import (
 from backend.classifier.classification_cache import classify_with_cache
 from backend.core.config import settings
 from backend.core.db import get_db
+from backend.core.heap import trim_heap
 from backend.core.logging_context import carry_context
 from backend.core.retry_utils import with_retry
 
@@ -204,10 +205,21 @@ def store_attachment(email_id: str, provider_msg_id: str, meta: dict) -> Optiona
 _attach_lock = threading.Lock()
 MAX_ATTACHMENT_ATTEMPTS = 5  # give up after this many transient failures
 
+# Ceiling on the bytes one download may pull into memory. There was no ceiling at
+# all, so a single oversized file was bounded only by what the sender could
+# attach, on every one of the worker's threads at once. The largest on file is a
+# 17 MB PDF and only 8 rows of 241,214 exceed 10 MB, so this costs essentially
+# nothing today and bounds the worst case rather than the common one.
+#
+# Enforced against the size the provider reported at enqueue, so an oversized
+# file is never fetched. Marked failed rather than left pending: retrying it
+# would fetch the same too-large bytes five times before giving up.
+MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
+
 # Floor for an embedded image to be treated as content rather than decoration. A
-# legible screenshot of a rate table does not fit in 20 kB; a signature logo,
+# legible screenshot of a rate table does not fit in 50 kB; a signature logo,
 # an icon, and a tracking pixel all do.
-INLINE_IMAGE_MIN_BYTES = 20_000
+INLINE_IMAGE_MIN_BYTES = 50_000
 
 
 def is_body_furniture(meta: dict) -> bool:
@@ -218,10 +230,10 @@ def is_body_furniture(meta: dict) -> bool:
       1. no Content-ID          — a file someone attached on purpose. Always kept,
                                   at any size: the queue holds real 1.8 kB payment
                                   PDFs and 300-byte CSVs.
-      2. Content-ID, >= 20 kB   — embedded but big enough to be a pasted rate
+      2. Content-ID, >= 50 kB   — embedded but big enough to be a pasted rate
                                   table, which in this trade *is* the quotation.
                                   Kept, drained after tier 1.
-      3. Content-ID, < 20 kB    — logos, icons, spacers, tracking pixels. This.
+      3. Content-ID, < 50 kB    — logos, icons, spacers, tracking pixels. This.
 
     Tier 3 was 25,484 of 36,205 queued rows — 70% of the queue for 3% of its bytes
     — and every one of them made a real document wait behind it. Size alone would
@@ -279,6 +291,17 @@ def _download_pending_attachment(row: dict) -> str:
     att_id = row["id"]
     attempts = (row.get("attempts") or 0) + 1
     try:
+        size = row.get("size_bytes")
+        if size is not None and size > MAX_ATTACHMENT_BYTES:
+            # Permanent, like the no-bytes case: refuse before the fetch so the
+            # bytes never reach memory, and fail rather than leaving it pending,
+            # because a retry would pull the same oversized file again.
+            logger.warning("Attachment %s is %d bytes, over the %d byte ceiling "
+                           "- refusing to fetch", att_id, size, MAX_ATTACHMENT_BYTES)
+            get_db().table("attachments").update(
+                {"processing_status": "failed", "attempts": attempts}
+            ).eq("id", att_id).execute()
+            return "failed"
         data = fetch_attachment(row["provider_msg_id"], row["attachment_id"])
         if not data:
             # No bytes is a permanent condition, not a transient one — fail now.
@@ -314,13 +337,13 @@ def _download_pending_attachment(row: dict) -> str:
         return "failed" if terminal else "retry"
 
 
-def process_pending_attachments(max_atts: int = 150, workers: int = 4) -> dict:
+def process_pending_attachments(max_atts: int = 150, workers: int = 2) -> dict:
     """Drain queued (pending) attachments: download bytes from Gmail, upload to the
     bucket, mark stored. Parallel across `workers`. Non-blocking lock — a second
     caller skips rather than double-processing the same rows.
     Returns {pending, stored, failed, retry}.
 
-    Deliberately throttled (4 workers × 150/tick). Higher settings saturate the
+    Deliberately throttled (2 workers × 150/tick). Higher settings saturate the
     shared Supabase project — bulk Storage uploads starve the ingest inserts and
     the dashboard reads (observed: dropped connections, 20s+ API latency). The
     bytes are not time-critical, so this trails in gently rather than at full tilt.
@@ -342,7 +365,7 @@ def process_pending_attachments(max_atts: int = 150, workers: int = 4) -> dict:
         _attach_lock.release()
 
 
-_QUEUE_COLUMNS = "id, provider_msg_id, attachment_id, file_name, mime_type, attempts"
+_QUEUE_COLUMNS = "id, provider_msg_id, attachment_id, file_name, mime_type, attempts, size_bytes"
 
 
 def _fetch_pending_batch(max_atts: int) -> list[dict]:
@@ -390,6 +413,11 @@ def _process_pending_attachments(max_atts: int, workers: int) -> dict:
                                futures[fut], e)
                 outcomes["retry"] += 1
     stats = {"pending": len(rows), **outcomes}
+    # The batch's buffers are unreachable by now, but glibc keeps the freed pages,
+    # so resident memory only ever ratchets up. Trim here rather than on a timer:
+    # this is the exact moment the large allocations are known to be dead. See
+    # backend/core/heap.py for the production measurements that motivated it.
+    trim_heap()
     logger.info("Attachment worker done: %s", stats)
     return stats
 

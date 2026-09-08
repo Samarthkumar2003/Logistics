@@ -2,14 +2,14 @@
 Which attachments are worth downloading, and in what order.
 
 The queue reached 36,205 pending rows, and 25,484 of them were embedded images
-under 20 kB — signature logos, icons, spacers, tracking pixels. At 150 downloads
+under 50 kB — signature logos, icons, spacers, tracking pixels. At 150 downloads
 per two-minute tick that is most of a day of work, and because the queue drained
 strictly oldest-first, a vendor's rate-card PDF landing now sat behind all of it.
 
 Two things are easy to get wrong here, and both lose real documents:
 
   * filtering on size alone — the queue holds genuine 1.8 kB payment PDFs and
-    300-byte CSVs, so a flat "under 20 kB is junk" rule discards content;
+    300-byte CSVs, so a flat "under 50 kB is junk" rule discards content;
   * filtering on embedded-ness alone — an agent pasting a rate table into the
     message body produces an embedded image indistinguishable, by disposition,
     from a logo. In this trade that screenshot *is* the quotation.
@@ -80,7 +80,7 @@ def test_a_blank_or_whitespace_content_id_is_not_a_content_id():
 
 @pytest.mark.parametrize("size", [INLINE_IMAGE_MIN_BYTES, 157_500, 426_100])
 def test_a_large_embedded_image_is_kept(size):
-    """A pasted rate table. The threshold is inclusive at the boundary: 20 kB
+    """A pasted rate table. The threshold is inclusive at the boundary: 50 kB
     exactly is kept, because the cost of downloading a logo is a wasted request
     and the cost of dropping a quotation is a lost sale."""
     assert is_body_furniture(_meta(size_bytes=size)) is False
