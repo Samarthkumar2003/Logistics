@@ -253,14 +253,12 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
       const res = await apiFetch(`/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        // Subject, body and sender are deliberately not sent. The server
+        // stores a review as a pointer plus the before/after labels and joins
+        // back to the email by id, so shipping the customer's message here
+        // only widened where a copy of it could end up.
         body: JSON.stringify({
           email_id: email.id,
-          email_subject: email.subject,
-          // The list ships body:"" by design; the backend fills it in from
-          // email_id rather than trusting the client for something it was
-          // never given.
-          email_body: fullBody ?? '',
-          email_sender: email.sender,
           predicted_label: email.label ?? 'unknown',
           corrected_label: newLabel,
           confidence: email.label_confidence ?? 0,
@@ -370,19 +368,37 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
           ) : approved ? (
             <span style={{ fontSize: 11, color: 'var(--green-soft)' }}>✓ Approved</span>
           ) : correcting ? (
-            <select
-              autoFocus
-              disabled={saving}
-              defaultValue=""
-              style={{ fontSize: 12, borderRadius: 6, padding: '3px 6px', background: 'var(--input-bg)', color: 'var(--text)', border: '1px solid var(--input-border)', cursor: 'pointer' }}
-              onClick={e => e.stopPropagation()}
-              onChange={e => { if (e.target.value) submitCorrection(e.target.value); }}
-            >
-              <option value="" disabled>Select correct label…</option>
-              <option value="customer_requirement">📦 Customer Request</option>
-              <option value="quotation_rate_card">💰 Rate Card</option>
-              <option value="general">📋 General</option>
-            </select>
+            <>
+              {/* Escape or the dismiss button leave select mode. `correcting`
+                  previously had no exit but a completed submit, so a misclick
+                  stranded the card here and the cheapest way out was filing a
+                  correction nobody meant. NOT onBlur: opening the native
+                  dropdown blurs the select in some browsers, which would
+                  cancel this the instant it was used. */}
+              <select
+                autoFocus
+                disabled={saving}
+                defaultValue=""
+                style={{ fontSize: 12, borderRadius: 6, padding: '3px 6px', background: 'var(--input-bg)', color: 'var(--text)', border: '1px solid var(--input-border)', cursor: 'pointer' }}
+                onClick={e => e.stopPropagation()}
+                onKeyDown={e => { if (e.key === 'Escape') { e.stopPropagation(); setCorrecting(false); } }}
+                onChange={e => { if (e.target.value) submitCorrection(e.target.value); }}
+              >
+                <option value="" disabled>Select correct label…</option>
+                <option value="customer_requirement">📦 Customer Request</option>
+                <option value="quotation_rate_card">💰 Rate Card</option>
+                <option value="general">📋 General</option>
+              </select>
+              <button
+                disabled={saving}
+                title="Keep the current label (Esc)"
+                aria-label="Cancel correction"
+                style={{ fontSize: 11, padding: '3px 8px', borderRadius: 6, border: '1px solid var(--border)', background: 'transparent', color: 'var(--faint)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+                onClick={e => { e.stopPropagation(); setCorrecting(false); }}
+              >
+                ✕
+              </button>
+            </>
           ) : (
             <>
               <button
