@@ -48,13 +48,26 @@ def load_csv() -> list[AgentContact]:
     return agents
 
 
-def ensure_agents(recipients: list[dict], category: str = "MANUAL") -> int:
+# Mirrors CATEGORY_KEYS in app/routes/rfq.py, the CHECK constraint on
+# agents.category, and categories.ts in the frontend.
+VALID_CATEGORIES = ("CHA", "FREIGHT_FORWARDER", "CARRIER")
+
+
+def ensure_agents(recipients: list[dict]) -> int:
     """Insert any recipient whose email is not already in the agents table.
 
-    Recipients are {agent_name, email}. Existing emails — DB agents the user
-    picked, or a manual address entered before — are skipped, so this is how a
-    hand-entered address gets remembered for next time. Returns the count added.
+    Recipients are {agent_name, email, category}. Existing emails - DB agents the
+    user picked, or a manual address entered before - are skipped, so this is how
+    a hand-entered address gets remembered for next time. Returns the count added.
     Non-fatal: on any DB error it logs and returns 0 rather than blocking a send.
+
+    The category comes from the recipient, and a recipient without a valid one is
+    not written. This used to be a single `category="MANUAL"` default applied to
+    the whole batch, which quietly guaranteed the opposite of what the function is
+    for: the three dropdowns on the send form filter on the three real categories,
+    so every address this remembered was invisible from the moment it was saved.
+    Skipping rather than defaulting also keeps the row from tripping the CHECK
+    constraint, where a rejected insert would lose the whole batch, not one row.
     """
     emails = [(r.get("email") or "").strip() for r in recipients]
     emails = [e for e in emails if e]
@@ -72,6 +85,13 @@ def ensure_agents(recipients: list[dict], category: str = "MANUAL") -> int:
         email = (r.get("email") or "").strip()
         lower = email.lower()
         if not email or lower in existing or lower in seen:
+            continue
+        category = (r.get("category") or "").strip()
+        if category not in VALID_CATEGORIES:
+            logger.warning(
+                "ensure_agents: not remembering %s, category %r is not one of %s",
+                email, category, ", ".join(VALID_CATEGORIES),
+            )
             continue
         seen.add(lower)
         to_insert.append({

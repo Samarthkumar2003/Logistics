@@ -40,6 +40,13 @@ class RfqError(Exception):
 class SelectedAgent:
     agent_name: str
     email: str
+    # Which of the three vendor kinds this recipient is, and therefore which
+    # reviewed draft they receive. Defaults to empty rather than being required so
+    # that callers with nothing to route - the offline suite, and any future path
+    # that lets the model draft per agent - need not invent one. That default is
+    # safe only because a category with no draft entry is refused rather than
+    # substituted for; see _draft_for_agent.
+    category: str = ""
 
 
 def new_reference() -> str:
@@ -99,20 +106,29 @@ def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent],
 def _draft_for_agent(
     agent: SelectedAgent,
     shipment: dict[str, Any],
-    edited_subject: str,
-    edited_body: str,
+    drafts: Optional[dict[str, dict[str, str]]],
     sender: SenderIdentity,
 ) -> dict[str, Any]:
     """One agent's draft and its own reference.
 
-    When the operator has edited a draft, that exact text goes out verbatim with
-    no model call — only the reference in the subject differs per agent, so
-    replies stay attributable.
+    `drafts` is the reviewed text keyed by vendor category. When it is supplied,
+    this agent is sent the entry for ITS category verbatim with no model call -
+    only the reference in the subject differs per agent, so replies stay
+    attributable. When it is None the operator never opened the draft editor, and
+    the model writes a draft per agent as before.
 
-    Note which branch signs. The edited text arrived from `preview_draft`, which
-    already appended the signature, so the operator has been looking at it and may
-    well have adjusted it; signing again would print it twice. Only the model
-    branch signs, because only the model was told to leave it out.
+    A supplied-but-unusable entry is refused, not filled in. That is the whole
+    reason the switch is `drafts is not None` rather than a truthiness test on the
+    text: falling through to the model here would put words nobody reviewed in
+    front of a freight vendor while the response still reported a clean send. The
+    route rejects the same case up front with a 422; this is the backstop for any
+    caller that bypasses it.
+
+    Note which branch signs. Operator text arrives already signed - `preview_draft`
+    appends the signature, and a hand-composed draft is built in the browser from
+    GET /rfq-signature - so the operator has been looking at it and may well have
+    adjusted it; signing again would print it twice. Only the model branch signs,
+    because only the model was told to leave it out.
     """
     reference = new_reference()
     entry: dict[str, Any] = {
@@ -120,12 +136,21 @@ def _draft_for_agent(
         "email": agent.email, "draft": None, "error": "",
     }
 
-    if edited_subject and edited_body:
+    if drafts is not None:
+        text = drafts.get(agent.category) or {}
+        subject = (text.get("subject") or "").strip()
+        body = text.get("body") or ""
+        if not subject or not body.strip():
+            entry["error"] = (
+                f"no reviewed draft for category {agent.category!r}, so nothing "
+                f"was sent to this agent"
+            )
+            return entry
         entry["draft"] = DraftEmail(
             vendor_name=agent.agent_name,
             vendor_email=agent.email,
-            subject=inject_reference(edited_subject, reference),
-            body=edited_body,
+            subject=inject_reference(subject, reference),
+            body=body,
         )
         return entry
 
@@ -301,12 +326,40 @@ def _dedupe_recipients(agents: list[SelectedAgent]) -> list[SelectedAgent]:
             logger.warning("Dropping recipient %r with no email address", agent.agent_name)
             continue
         if key in seen:
-            logger.warning("Dropping duplicate recipient %s (%s) — already sending to it once",
-                           agent.email, agent.agent_name)
+            # Which spelling wins now decides which category's draft this vendor is
+            # sent, not merely which name lands on the row, so name the category.
+            logger.warning(
+                "Dropping duplicate recipient %s (%s, category %r); already sending "
+                "to that address once under an earlier entry",
+                agent.email, agent.agent_name, agent.category,
+            )
             continue
         seen.add(key)
         unique.append(agent)
     return unique
+
+
+def _check_drafts(
+    agents: list[SelectedAgent], drafts: Optional[dict[str, dict[str, str]]],
+) -> None:
+    """Refuse the whole send if any recipient's category has no usable draft.
+
+    Up front, before a single row is reserved or a single mail leaves. Letting the
+    gap through would send the covered categories and quietly drop the rest, which
+    reads on screen as a partial success rather than the operator error it is.
+    """
+    if drafts is None:
+        return
+    missing = sorted({
+        a.category for a in agents
+        if not (drafts.get(a.category) or {}).get("subject", "").strip()
+        or not (drafts.get(a.category) or {}).get("body", "").strip()
+    })
+    if missing:
+        raise RfqError(
+            "No reviewed draft for " + ", ".join(repr(m) for m in missing)
+            + ", so nothing was sent. Draft those panels or remove their recipients."
+        )
 
 
 def send_rfqs(
@@ -314,28 +367,41 @@ def send_rfqs(
     agents: list[SelectedAgent],
     customer: dict[str, str],
     sender: SenderIdentity,
-    edited_subject: str = "",
-    edited_body: str = "",
+    drafts: Optional[dict[str, dict[str, str]]] = None,
     attachments: Optional[list[dict[str, Any]]] = None,
 ) -> dict[str, Any]:
-    """Draft, send, and record one RFQ per agent."""
+    """Draft, send, and record one RFQ per agent.
+
+    `drafts` holds the operator's reviewed text keyed by vendor category. Absent,
+    the model drafts per agent. Present, every agent gets their category's text
+    verbatim and any gap aborts the send.
+    """
     # Before the empty check, so a list of nothing but blanks is refused, not sent.
     agents = _dedupe_recipients(agents)
     if not agents:
         raise RfqError("Select at least one agent")
     if not shipment.get("origin") or not shipment.get("destination"):
         raise RfqError("Origin and destination ports are required")
+    _check_drafts(agents, drafts)
 
     # Remember hand-entered recipients so they show up as agents next time. A
     # no-op for agents already on file; non-fatal if the DB write fails.
-    agent_repo.ensure_agents([{"agent_name": a.agent_name, "email": a.email} for a in agents])
+    #
+    # The category travels with each recipient. It used to be one hardcoded
+    # "MANUAL" for the whole batch, which is why every hand-entered address was
+    # filed under a category none of the three dropdowns list, and so became
+    # invisible the moment it was saved.
+    agent_repo.ensure_agents([
+        {"agent_name": a.agent_name, "email": a.email, "category": a.category}
+        for a in agents
+    ])
 
     # Drafts run in parallel so latency is roughly one model call, not N.
     # `carry_context` keeps the operator's request id on every line the drafting
     # emits — this is the money path, and a pool worker would otherwise log the
     # model's failures with no way back to the request that caused them.
     draft_one = carry_context(
-        lambda a: _draft_for_agent(a, shipment, edited_subject, edited_body, sender)
+        lambda a: _draft_for_agent(a, shipment, drafts, sender)
     )
     with ThreadPoolExecutor(max_workers=min(len(agents), MAX_DRAFT_WORKERS)) as pool:
         entries = list(pool.map(draft_one, agents))
