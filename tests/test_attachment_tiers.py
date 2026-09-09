@@ -64,7 +64,10 @@ def test_a_document_with_no_content_id_is_kept_however_small():
         size_bytes=300, content_id="")) is False
 
 
-def test_a_deliberately_attached_image_is_kept():
+# Asserts the INTENT tier only. Such an image is no longer kept end to end:
+# is_stored_type refuses every image whatever its intent or size. See
+# tests/test_attachment_type_filter.py for the behaviour that now wins.
+def test_a_deliberately_attached_image_is_not_furniture():
     """No Content-ID means someone attached the photo rather than embedding it —
     a photo of a damaged container, say. Keep it."""
     assert is_body_furniture(_meta(size_bytes=900, content_id="")) is False
@@ -79,7 +82,10 @@ def test_a_blank_or_whitespace_content_id_is_not_a_content_id():
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("size", [INLINE_IMAGE_MIN_BYTES, 157_500, 426_100])
-def test_a_large_embedded_image_is_kept(size):
+# Asserts the INTENT tier only. Such an image is no longer kept end to end:
+# is_stored_type refuses every image whatever its intent or size. See
+# tests/test_attachment_type_filter.py for the behaviour that now wins.
+def test_a_large_embedded_image_is_not_furniture(size):
     """A pasted rate table. The threshold is inclusive at the boundary: 50 kB
     exactly is kept, because the cost of downloading a logo is a wasted request
     and the cost of dropping a quotation is a lost sale."""

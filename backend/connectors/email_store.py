@@ -222,6 +222,54 @@ MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
 INLINE_IMAGE_MIN_BYTES = 50_000
 
 
+# Attachment types whose bytes are worth pulling out of Gmail and into the bucket.
+# An allow-list, not a deny-list: the long tail arriving at a freight desk is
+# images, and a deny-list would silently begin storing whatever new type appeared
+# next.
+#
+# Measured over the 14 days before this filter: 6,212 files and 1,401 MB uploaded,
+# of which images were 4,798 files and 832 MB. This list keeps 34% of the bytes.
+#
+# `eml`/`msg` earn a place despite being neither PDF nor spreadsheet, because a
+# forwarded message carries its own attachments and discarding it discards the
+# rate card inside. The largest on file are named `June 2026 SOA.eml`,
+# `Proforma// : Required gst/pan` and `DEBIT NOTE // SOB - EN001151`.
+STORED_EXTENSIONS = frozenset({
+    "pdf",
+    "xlsx", "xls", "xlsm", "csv",   # Excel, and what Excel opens
+    "doc", "docx",
+    "eml", "msg",                   # forwarded mail, nested attachments included
+})
+
+STORED_MIME_TYPES = frozenset({
+    "application/pdf",
+    "application/vnd.ms-excel",
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    "application/vnd.ms-excel.sheet.macroenabled.12",
+    "text/csv",
+    "application/msword",
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    "message/rfc822",
+    "application/vnd.ms-outlook",
+})
+
+
+def is_stored_type(meta: dict) -> bool:
+    """True when this attachment's type is one worth keeping the bytes for.
+
+    Extension OR mime type, because either one arrives wrong on its own: Gmail
+    reports `application/octet-stream` for plenty of real PDFs, and 53 files in
+    the last fortnight had no extension at all. Requiring both would discard
+    documents. Accepting either costs only that a file lying in both fields gets
+    stored, which is the safe direction to err in.
+    """
+    name = meta.get("filename") or meta.get("file_name") or ""
+    if _extension_for(name) in STORED_EXTENSIONS:
+        return True
+    mime = (meta.get("mime_type") or "").split(";")[0].strip().lower()
+    return mime in STORED_MIME_TYPES
+
+
 def is_body_furniture(meta: dict) -> bool:
     """True for an image embedded in the message body and too small to be content.
 
@@ -248,18 +296,37 @@ def is_body_furniture(meta: dict) -> bool:
     return size is not None and size < INLINE_IMAGE_MIN_BYTES
 
 
+def should_fetch_bytes(meta: dict) -> bool:
+    """The one decision: does this attachment earn a Gmail fetch and an upload?
+
+    Two independent gates. `is_body_furniture` judges intent (decoration embedded
+    in the body); `is_stored_type` judges type. A file can fail either, and both
+    are kept separate so the reason a row was skipped stays inferable from the
+    row itself rather than collapsing into one opaque boolean.
+
+    Type now dominates in practice: images are refused at every size, which
+    reverses tier 2 of is_body_furniture above. That tier kept embedded images
+    over 50 kB on the theory that a pasted rate table is the quotation. It may
+    well be, but nothing reads them - `quotations` is empty, so an image's only
+    consumer is a human clicking a signed URL, and 832 MB a fortnight is too much
+    to spend on that possibility. The tier is left in place, not deleted: it is
+    the thing to re-enable first if a desk starts working from pasted tables.
+    """
+    return is_stored_type(meta) and not is_body_furniture(meta)
+
+
 def enqueue_attachment(email_id: str, provider_msg_id: str, meta: dict) -> bool:
     """Record attachment metadata only — no bytes fetched. The background worker
     (process_pending_attachments) downloads + uploads later. Fast: one insert,
     no Gmail/Storage round-trip. Returns True if the row was queued for download.
 
-    Body furniture (see is_body_furniture) is still written down, as `skipped`:
+    Anything `should_fetch_bytes` refuses is still written down, as `skipped`:
     the row keeps the mail's true attachment list honest and makes the decision
     reversible with one UPDATE, while never costing a Gmail fetch or a bucket
     upload. Returns False for it — nothing was queued."""
     if not meta.get("attachment_id"):
         return False
-    furniture = is_body_furniture(meta)
+    wanted = should_fetch_bytes(meta)
     try:
         get_db().table("attachments").insert({
             "id": str(uuid.uuid4()),
@@ -275,9 +342,9 @@ def enqueue_attachment(email_id: str, provider_msg_id: str, meta: dict) -> bool:
             # on the filter's own criterion afterwards — a retrospective prune had
             # to infer intent from file names.
             "content_id": (meta.get("content_id") or "").strip(),
-            "processing_status": "skipped" if furniture else "pending",
+            "processing_status": "pending" if wanted else "skipped",
         }).execute()
-        return not furniture
+        return wanted
     except Exception as e:
         logger.warning("Failed to enqueue attachment %s (email %s): %s",
                        meta.get("filename", ""), email_id, e)
