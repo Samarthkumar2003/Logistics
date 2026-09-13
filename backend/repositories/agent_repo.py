@@ -15,6 +15,7 @@ keyed on `agent_name` alone cannot tell them apart, which is why
 
 import csv
 import logging
+from dataclasses import dataclass, field
 
 from backend.core.db import get_db
 from backend.core.paths import AGENTS_CSV
@@ -116,3 +117,71 @@ def email_for_name(agent_name: str) -> str:
 
     matches = [a for a in load_csv() if a.agent_name == agent_name]
     return matches[0].email if len(matches) == 1 else ""
+
+
+@dataclass(frozen=True)
+class CategoryIndex:
+    """What kind of agent each mailbox belongs to: CHA, freight forwarder, carrier.
+
+    A read model for display only. The category lives on `agents`, never on
+    `rfq_jobs`, so an RFQ's type has to be resolved back through the roster at
+    read time. Two consequences worth knowing before trusting the label:
+
+    * It reflects the roster **now**, not at send time. Re-categorise an agent and
+      every past RFQ of theirs re-labels with it. There is no per-job snapshot to
+      compare against, so this is reported, not fixed.
+    * A mailbox that has since been removed from the roster resolves to `""`.
+
+    Email is the only exact key. `agents` is one row per *office*, so the same
+    company appears several times under one name, and a name could in principle
+    span two categories. `by_name` therefore holds only names that resolve to
+    exactly one category; the ambiguous ones are dropped rather than guessed at,
+    the same refusal `email_for_name` makes.
+    """
+
+    by_email: dict[str, str] = field(default_factory=dict)
+    by_name: dict[str, str] = field(default_factory=dict)
+
+    def category_for(self, agent_name: str, email: str = "") -> str:
+        """This agent's category, or `""` when it cannot be known.
+
+        Empty is a real answer and the caller must render it as unknown rather
+        than as a default category. Six of the twenty-one RFQs on file resolve to
+        empty today; all six went to QA addresses that were never roster agents.
+        """
+        addr = (email or "").strip().lower()
+        if addr and addr in self.by_email:
+            return self.by_email[addr]
+        return self.by_name.get((agent_name or "").strip(), "")
+
+
+def category_index() -> CategoryIndex:
+    """Build the name/email to category lookup in one query.
+
+    One read for a whole page of shipments rather than one per RFQ. Failure is
+    non-fatal: an empty index labels every agent unknown, which degrades the
+    display and breaks nothing.
+    """
+    try:
+        rows = get_db().table("agents").select("agent_name, email, category").execute().data or []
+    except Exception as e:
+        logger.warning("Agent category lookup failed: %s", e)
+        return CategoryIndex()
+
+    by_email: dict[str, str] = {}
+    names: dict[str, set[str]] = {}
+    for r in rows:
+        category = (r.get("category") or "").strip()
+        if not category:
+            continue
+        email = (r.get("email") or "").strip().lower()
+        if email:
+            by_email[email] = category
+        name = (r.get("agent_name") or "").strip()
+        if name:
+            names.setdefault(name, set()).add(category)
+
+    return CategoryIndex(
+        by_email=by_email,
+        by_name={n: next(iter(c)) for n, c in names.items() if len(c) == 1},
+    )

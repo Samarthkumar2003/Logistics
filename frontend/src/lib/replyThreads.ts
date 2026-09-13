@@ -1,5 +1,5 @@
 /**
- * Grouping an RFQ's replies for the Shipment card's reply panel.
+ * Grouping an agent's replies into threads.
  *
  * One card per Gmail thread, not per message. An agent who replies twice is one
  * agent, and rendering a card each read as two different agents having answered
@@ -7,8 +7,31 @@
  * cards therefore mean two genuinely separate threads.
  *
  * Kept out of page.tsx so it can be checked without a React renderer; see
- * frontend/tests/replyThreads.check.ts.
+ * frontend/tests/replyThreads.check.ts. It lives in lib/ rather than under
+ * dashboard/ because the reply panel moved to the shipment detail page: the
+ * dashboard grid shows shipments now and does not read mail at all.
  */
+
+/**
+ * One stored message from an agent.
+ *
+ * `linked` is false for a message that sits in a linked reply's thread but never
+ * quoted the RFQ reference itself. It is shown for context and labelled as such;
+ * it is not attribution. Agents reply twice and the second message routinely drops
+ * the token, so excluding these would hide the agent's latest word.
+ */
+export interface Reply {
+  id: string;
+  rfq_reference: string | null;
+  agent_name: string;
+  sender: string;
+  subject: string;
+  body: string;
+  received_at: string;
+  has_attachments: boolean;
+  thread_id: string;
+  linked: boolean;
+}
 
 /** The only fields grouping needs. The panel's Reply type is a superset. */
 export interface ThreadMessage {

@@ -15,7 +15,7 @@ every linked email, agents count distinct mailboxes.
 import pytest
 
 from backend.domain.models import Email
-from backend.repositories import email_repo
+from backend.repositories import agent_repo, email_repo
 from backend.services import reply_service
 
 REF = "RFQ-20260822-32e091f1"
@@ -192,7 +192,17 @@ def test_customer_request_counts_agents_and_messages_separately(monkeypatch):
         _reply(REF, "Ops <ops@one.example>", "2026-08-22T10:18:02+00:00"),
         _reply(REF, "Ops <OPS@one.example>", "2026-08-22T09:57:14+00:00"),
     ])
+    # The panel widens to the thread and labels each vendor now, so three more
+    # boundaries have to be stubbed. Nothing here contributes a message: this test
+    # is about the counts, and `test_reply_thread_view` covers the widening.
+    monkeypatch.setattr(reply_service.email_repo, "list_thread_messages", lambda _t: [])
+    monkeypatch.setattr(reply_service.email_repo, "reply_stats_by_reference",
+                        lambda _refs: {REF: email_repo.ReplyStats(messages=2, agents=1)})
+    monkeypatch.setattr(reply_service.agent_repo, "category_index",
+                        lambda: agent_repo.CategoryIndex())
 
     counts = reply_service.get_customer_request("cust-1")["counts"]
 
-    assert counts == {"agents": 2, "replies": 2, "agents_replied": 1}
+    # `thread_only` is 0 rather than absent: the field is always present so the UI
+    # never has to distinguish "no context messages" from "an old API".
+    assert counts == {"agents": 2, "replies": 2, "agents_replied": 1, "thread_only": 0}

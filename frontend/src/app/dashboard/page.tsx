@@ -3,9 +3,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import Link from 'next/link';
 import { needsClick, remaining, shouldAutoLoad } from './inboxPaging';
-import { countAgents, groupByThread } from './replyThreads';
 import { useInboxFeed, type InboxFeed } from './useInboxFeed';
 import { apiFetch, fetchCurrentUser, logout } from '@/lib/api';
+import {
+  agentTypeSummary, agentsRepliedText, failedSendText, requestHref,
+  statusBreakdown, statusInfo, totalText,
+  type Shipment, type ShipmentPage,
+} from '@/lib/shipments';
 import './dashboard.css';
 
 /** Rows a page of the unfiltered inbox holds. */
@@ -13,6 +17,11 @@ const INBOX_PAGE = 20;
 /** Rows a page of one label holds — fifteen customer requests, not fifteen
  *  inbox rows of which one is a request. */
 const LABEL_PAGE = 15;
+/** Shipments the grid asks for. A shipment is an enquiry, not a row, so fifty is a
+ *  lot of work on screen — twenty-one RFQ rows on file are seven shipments. The
+ *  server caps this at 100 and reports `has_more`, which the pane says out loud
+ *  rather than silently showing a prefix. */
+const SHIPMENT_PAGE = 50;
 /** How many pages scrolling may pull before it asks. Twelve is enough to fill
  *  any screen; few enough that a list which keeps claiming "there is more" stops
  *  and says so instead of paging through 27k rows. */
@@ -37,42 +46,6 @@ function formatReceived(iso?: string): string {
   const d = new Date(iso);
   if (isNaN(d.getTime())) return '';
   return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
-}
-
-interface RFQJob {
-  id: number;
-  reference: string;
-  customer_email_sender: string;
-  customer_email_subject: string;
-  customer_email_body: string;
-  shipment_origin: string;
-  shipment_destination: string;
-  shipment_mode: string;
-  shipment_weight_kg: number | null;
-  shipment_commodity: string;
-  status: string;
-  agents_contacted: string[];
-  created_at: string;
-  customer_email_id: string | null;
-  // Two different numbers. `agents_replied` is how many agents came back — the
-  // one a desk acts on. `reply_count` is how many messages arrived, and is
-  // larger whenever an agent follows up with a correction.
-  reply_count: number;
-  agents_replied: number;
-}
-
-interface Reply {
-  id: string;
-  sender: string;
-  subject: string;
-  body: string;
-  received_at: string;
-  has_attachments: boolean;
-  // The Gmail thread this message belongs to, and whether it cited the RFQ
-  // reference itself. A follow-up that dropped the token is still shown — the
-  // thread places it — but it is labelled rather than passed off as attributed.
-  thread_id: string;
-  linked: boolean;
 }
 
 type Tab = 'inbox' | 'requests' | 'ratecards' | 'unlinked' | 'shipments';
@@ -111,26 +84,6 @@ function modeLabel(mode: string): string {
     road: '🚛 Road',
   };
   return map[mode] ?? mode;
-}
-
-function statusInfo(status: string): { label: string; color: string; bg: string; desc: string } {
-  const map: Record<string, { label: string; color: string; bg: string; desc: string }> = {
-    rfqs_sent:       { label: 'RFQs Sent',       color: 'var(--blue-soft)', bg: 'var(--status-blue-bg)', desc: 'Waiting for agents to reply' },
-    // The row exists but the mail has not been handed to the provider yet — the
-    // backend writes it before sending so a reply can never arrive against a
-    // reference with no job. Normally lasts seconds; the label says "sending"
-    // rather than anything reassuring because a job still here minutes later
-    // means the send died mid-flight and needs a human.
-    sending:         { label: 'Sending…',          color: 'var(--amber)', bg: 'var(--status-amber-bg)', desc: 'Handing the RFQ to the mail provider' },
-    quotes_received: { label: 'Quotes Received',  color: 'var(--green-soft)', bg: 'var(--status-green-bg)', desc: 'Quotes in — ready to compare' },
-    approved:        { label: 'Approved',          color: 'var(--purple)', bg: 'var(--status-purple-bg)', desc: 'Shipment confirmed' },
-    // The RFQ never left. Written by _record_outcome when the sender did not
-    // confirm a send, so this job is NOT waiting on an agent — nobody was
-    // contacted. Without this entry the fallback below rendered the raw string
-    // 'send_failed' in neutral grey, which reads as an ordinary state.
-    send_failed:     { label: 'Send Failed',       color: 'var(--red)', bg: 'var(--red-tint)', desc: 'RFQ did not send — no agent was contacted' },
-  };
-  return map[status] ?? { label: status, color: 'var(--muted-soft)', bg: 'var(--status-neutral-bg)', desc: '' };
 }
 
 /* ─── Theme ──────────────────────────────────────────────────── */
@@ -484,275 +437,134 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
 }
 
 /* ─── Reply thread ─────────────────────────────────────────────── */
-function MessageBody({ body }: { body: string }) {
-  return (
-    <pre style={{
-      fontSize: 12, color: 'var(--muted-soft)', whiteSpace: 'pre-wrap',
-      lineHeight: 1.6, margin: 0, maxHeight: 220, overflowY: 'auto',
-    }}>{body?.slice(0, 2000)}{(body?.length ?? 0) > 2000 ? '\n…' : ''}</pre>
-  );
-}
-
-/* Same thread, but this message did not quote the RFQ reference itself. Shown
-   for context; it is not attribution. */
-function ThreadOnlyChip() {
-  return (
-    <span
-      title="Same thread as a linked reply, but this message did not quote the RFQ reference"
-      style={{
-        marginLeft: 8, padding: '1px 6px', borderRadius: 4, fontSize: 10,
-        fontWeight: 700, color: 'var(--amber)', border: '1px solid var(--amber)',
-      }}
-    >THREAD ONLY</span>
-  );
-}
-
-function ThreadCard({ messages }: { messages: Reply[] }) {
-  const [showEarlier, setShowEarlier] = useState(false);
-  // Newest first from the API, so the head is the agent's latest word — and when
-  // they replied twice, the correction rather than the version it supersedes.
-  const [latest, ...earlier] = messages;
-  // groupByThread never yields an empty group, but a card is not worth a white
-  // screen if that ever stops being true.
-  if (!latest) return null;
-
-  return (
-    <div className="q-card">
-      <div className="q-top">
-        <span className="q-agent">{latest.subject || '(no subject)'}</span>
-        <span style={{ fontSize: 11, color: 'var(--faint)' }}>
-          {formatReceived(latest.received_at)}
-        </span>
-      </div>
-      <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 6 }}>
-        {latest.sender}{latest.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
-        {earlier.length > 0 && (
-          <span style={{ marginLeft: 8, color: 'var(--faint)' }}>
-            · latest of {messages.length} messages
-          </span>
-        )}
-        {!latest.linked && <ThreadOnlyChip />}
-      </div>
-
-      <MessageBody body={latest.body} />
-
-      {earlier.length > 0 && (
-        <>
-          <button
-            onClick={() => setShowEarlier(s => !s)}
-            style={{
-              marginTop: 8, padding: 0, border: 'none', background: 'none',
-              color: 'var(--blue-soft)', fontSize: 11, cursor: 'pointer',
-            }}
-          >
-            {showEarlier
-              ? '▲ Hide earlier messages'
-              : `▼ ${earlier.length} earlier message${earlier.length > 1 ? 's' : ''} in this thread`}
-          </button>
-          {showEarlier && earlier.map(m => (
-            // Indented inside the same card, so the thread reads as one
-            // conversation with history rather than as separate replies.
-            <div key={m.id} style={{
-              marginTop: 8, paddingLeft: 10, borderLeft: '2px solid var(--border)',
-            }}>
-              <div style={{ fontSize: 11, color: 'var(--faint)', marginBottom: 4 }}>
-                {formatReceived(m.received_at)}
-                {m.has_attachments && <span style={{ marginLeft: 6 }}>📎</span>}
-                {!m.linked && <ThreadOnlyChip />}
-              </div>
-              <MessageBody body={m.body} />
-            </div>
-          ))}
-        </>
-      )}
-    </div>
-  );
-}
-
 /* ─── Shipment Card ──────────────────────────────────────────── */
-function ShipmentCard({ job }: { job: RFQJob }) {
-  const [open, setOpen] = useState(false);
-  const [replies, setReplies] = useState<Reply[]>([]);
-  const [loadingR, setLoadingR] = useState(false);
-  const [replyError, setReplyError] = useState('');
-  // The counts the pill shows: agents who answered, and messages they sent. Both
-  // start from /jobs, then track whatever the panel actually holds, so opening
-  // the panel can never disagree with the badge.
-  const [replyCount, setReplyCount] = useState(job.reply_count ?? 0);
-  const [agentsReplied, setAgentsReplied] = useState(job.agents_replied ?? 0);
-  const [approving, setApproving] = useState(false);
-  const [approveResult, setApproveResult] = useState<string | null>(null);
-  const [jobStatus, setJobStatus] = useState(job.status);
-  const si = statusInfo(jobStatus);
-  const agentName = job.agents_contacted?.[0] ?? 'this agent';
-
-  async function loadReplies() {
-    if (open) { setOpen(false); return; }
-    setOpen(true);
-    // Always refetch on open, never serve the first load again. Replies arrive
-    // while the dashboard sits on screen — ingest every 5 min, then the scan —
-    // so a cached panel showed the state of the thread at whatever moment it was
-    // first expanded and gave no hint that a newer message existed. Collapse and
-    // re-expand is the refresh gesture; keeping the old rows visible until the
-    // new ones land means it never blanks out.
-    setLoadingR(true);
-    setReplyError('');
-    try {
-      const r = await apiFetch(`/jobs/${job.reference}/replies`);
-      // A 500 returns {detail}, not an array — guard before trusting the shape.
-      const d = await r.json();
-      if (!r.ok) throw new Error(d?.detail ?? `Server error ${r.status}`);
-      const list: Reply[] = Array.isArray(d) ? d : [];
-      setReplies(list);
-      setReplyCount(list.length);
-      setAgentsReplied(countAgents(list));
-    } catch (err: unknown) {
-      setReplyError(err instanceof Error ? err.message : 'Failed to load replies');
-    } finally {
-      setLoadingR(false);
-    }
-  }
-
-  // One job is one agent, so approving needs no selection — the reference is
-  // the winner. Only an acceptance goes out; nobody else is emailed.
-  async function approveJob() {
-    setApproving(true);
-    setApproveResult(null);
-    try {
-      const r = await apiFetch(`/jobs/${job.reference}/approve`, { method: 'POST' });
-      const d = await r.json();
-      if (r.ok) {
-        setJobStatus('approved');
-        setApproveResult(
-          d.acceptance_status === 'sent'
-            ? `✅ Approved ${d.agent_name} — acceptance sent`
-            : `⚠️ Approved ${d.agent_name}, but the acceptance email ${d.acceptance_status}`
-        );
-      } else {
-        setApproveResult(`❌ ${d.detail ?? 'Failed'}`);
-      }
-    } catch {
-      setApproveResult('❌ Network error');
-    } finally {
-      setApproving(false);
-    }
-  }
+/**
+ * One customer enquiry and every RFQ it produced.
+ *
+ * Cards used to be one per `rfq_jobs` row — one per *agent* — so an enquiry sent to
+ * seven agents filled the grid with seven near-identical cards and the operator had
+ * to reconstruct the shipment by eye. Twenty-one rows on file are seven pieces of
+ * work.
+ *
+ * There is also nothing to decide on a single agent's card, which is why reading
+ * replies and awarding the shipment both moved to the detail page: awarding means
+ * choosing between agents, and that is a comparison you cannot make from one
+ * agent's card.
+ */
+function ShipmentCard({ shipment }: { shipment: Shipment }) {
+  const si = statusInfo(shipment.status);
+  const href = requestHref(shipment);
+  const failed = failedSendText(shipment);
+  const types = agentTypeSummary(shipment.agent_types);
+  const breakdown = statusBreakdown(shipment.statuses);
 
   return (
     <div className="scard">
-      {/* Header row */}
+      {/* Header: how big the shipment is, and the one status it leads with */}
       <div className="scard-hdr">
-        <div className="scard-ref">{job.reference}</div>
+        <div className="scard-ref">
+          {shipment.rfq_count} RFQ{shipment.rfq_count === 1 ? '' : 's'}
+        </div>
         <span className="scard-status-pill" style={{ color: si.color, background: si.bg }}>
           {si.label}
         </span>
       </div>
 
-      {/* Route */}
       <div className="scard-route">
-        <span className="scard-port">{job.shipment_origin}</span>
+        <span className="scard-port">{shipment.shipment_origin || '—'}</span>
         <span className="scard-arrow">→</span>
-        <span className="scard-port">{job.shipment_destination}</span>
+        <span className="scard-port">{shipment.shipment_destination || '—'}</span>
       </div>
 
-      {/* Details row */}
       <div className="scard-chips">
-        <span className="chip">{modeLabel(job.shipment_mode)}</span>
-        <span className="chip">📦 {job.shipment_commodity}</span>
-        {job.shipment_weight_kg != null && (
-          <span className="chip">⚖️ {job.shipment_weight_kg.toLocaleString()} kg</span>
+        <span className="chip">{modeLabel(shipment.shipment_mode)}</span>
+        {shipment.shipment_commodity && <span className="chip">📦 {shipment.shipment_commodity}</span>}
+        {shipment.shipment_size && <span className="chip">🧱 {shipment.shipment_size}</span>}
+        {shipment.shipment_weight_kg != null && (
+          <span className="chip">⚖️ {shipment.shipment_weight_kg.toLocaleString()} kg</span>
         )}
       </div>
 
-      {/* From */}
       <div className="scard-from">
         <span className="scard-from-lbl">From:</span>
-        <span>{senderName(job.customer_email_sender)}</span>
-        <span className="scard-from-subj">"{job.customer_email_subject}"</span>
+        <span>{senderName(shipment.customer_email_sender)}</span>
+        <span className="scard-from-subj">&quot;{shipment.customer_email_subject}&quot;</span>
       </div>
 
-      {/* Agent, and whether they have come back */}
-      {job.agents_contacted?.length > 0 && (
+      {/* What kind of agents were asked. Only visible once the enquiry is one card:
+          on a per-agent card there was no mix to show. */}
+      {types && (
         <div className="scard-agents">
-          <span className="scard-from-lbl">RFQ sent to:</span>
-          {job.agents_contacted.map(a => (
-            <span key={a} className="agent-pill">{a}</span>
-          ))}
-          <span style={{
-            fontSize: 11, fontWeight: 600, marginLeft: 4,
-            color: replyCount > 0 ? 'var(--green-soft)' : 'var(--amber)',
-          }}>
-            {/* Agents, not messages. `(2)` on a card whose RFQ went to one agent
-                read as two carriers answering; it was that agent writing twice. */}
-            {replyCount > 0
-              ? `✓ ${agentsReplied || 1} agent${(agentsReplied || 1) > 1 ? 's' : ''} replied`
-              : '⏳ awaiting reply'}
-          </span>
-          {replyCount > agentsReplied && agentsReplied > 0 && (
-            <span
-              title="The agent wrote more than once — the panel shows the latest on top"
-              style={{ fontSize: 11, color: 'var(--faint)' }}
-            >
-              · {replyCount} messages
-            </span>
-          )}
+          <span className="scard-from-lbl">Sent to:</span>
+          <span style={{ fontSize: 12, color: 'var(--muted-soft)' }}>{types}</span>
         </div>
       )}
 
-      {/* Status description */}
-      <div className="scard-status-desc">{si.desc}</div>
+      {/* The desk's own question: of everyone we asked, how many came back. */}
+      <div style={{ fontSize: 12 }}>
+        <strong style={{
+          color: shipment.agents_replied > 0 ? 'var(--green-soft)' : 'var(--amber)',
+        }}>
+          {agentsRepliedText(shipment)}
+        </strong>
+        {shipment.awaiting > 0 && (
+          <span style={{ color: 'var(--amber)' }}> · {shipment.awaiting} awaiting</span>
+        )}
+        {shipment.reply_count > shipment.agents_replied && (
+          <span
+            title="Some agents wrote more than once — the detail page shows the latest on top"
+            style={{ color: 'var(--faint)' }}
+          > · {shipment.reply_count} messages</span>
+        )}
+      </div>
 
-      {/* Created */}
-      <div className="scard-date">{fmtDate(job.created_at)}</div>
-
-      {/* Expand replies */}
-      <button className="scard-quotes-btn" onClick={loadReplies}>
-        {open ? '▲ Hide Replies' : '▼ View Replies'}
-      </button>
-
-      {open && (
-        <div className="scard-quotes">
-          {approveResult && (
-            <div style={{ fontSize: 13, marginBottom: 8, color: approveResult.startsWith('✅') ? 'var(--green-soft)' : 'var(--red)' }}>
-              {approveResult}
-            </div>
-          )}
-          {loadingR && <div className="q-loading">Loading replies…</div>}
-          {replyError && <div className="q-empty" style={{ color: 'var(--red)' }}>⚠️ {replyError}</div>}
-          {!loadingR && !replyError && replies.length === 0 && (
-            <div className="q-empty">
-              No reply from {agentName} yet. A reply is linked when the agent keeps
-              the RFQ reference in the subject.
-            </div>
-          )}
-          {replies.length > 0 && (
-            <div className="q-list">
-              {groupByThread(replies).map(thread => (
-                <ThreadCard key={thread[0].thread_id || thread[0].id} messages={thread} />
-              ))}
-              <a
-                href={`/request/${job.customer_email_id ?? ''}`}
-                style={{ fontSize: 12, color: 'var(--blue-soft)', textDecoration: 'none' }}
+      {/* The breakdown the headline chip cannot carry on its own. Shown only when
+          the RFQs disagree — with all seven at `rfqs_sent` the chip already said
+          it — but a shipment at {approved: 1, rfqs_sent: 2} must never render as
+          just "Approved", which turns two unanswered agents into a finished job. */}
+      {breakdown.length > 1 && (
+        <div className="scard-chips">
+          {breakdown.map(b => {
+            const bi = statusInfo(b.status);
+            return (
+              <span
+                key={b.status}
+                className="scard-status-pill"
+                style={{ color: bi.color, background: bi.bg }}
               >
-                Open full request →
-              </a>
-            </div>
-          )}
-
-          {jobStatus !== 'approved' && (
-            <button
-              disabled={approving}
-              onClick={approveJob}
-              style={{
-                marginTop: 12, fontSize: 12, padding: '6px 14px', borderRadius: 6,
-                border: 'none', background: approving ? 'var(--input-border)' : 'var(--green-solid)',
-                color: 'var(--on-accent)', cursor: approving ? 'default' : 'pointer', fontWeight: 600,
-              }}
-            >
-              {approving ? '⏳ Sending…' : `Award to ${agentName}`}
-            </button>
-          )}
+                {b.count} {bi.label}
+              </span>
+            );
+          })}
         </div>
+      )}
+
+      {/* The one thing an "Approved" headline is not allowed to hide. */}
+      {failed && (
+        <div style={{ fontSize: 12, color: 'var(--red)', fontWeight: 600 }}>⚠️ {failed}</div>
+      )}
+
+      <div className="scard-date">{fmtDate(shipment.first_sent_at)}</div>
+
+      {href ? (
+        <Link
+          href={href}
+          className="scard-quotes-btn"
+          style={{ display: 'block', textAlign: 'center', textDecoration: 'none' }}
+        >
+          Open shipment →
+        </Link>
+      ) : (
+        // A send with no source email has no enquiry to open. Disabled and said
+        // out loud, rather than a link that 404s.
+        <button
+          className="scard-quotes-btn"
+          disabled
+          title="This RFQ was not raised from a customer email, so there is no request page for it"
+          style={{ cursor: 'default', opacity: 0.55 }}
+        >
+          No customer email to open
+        </button>
       )}
     </div>
   );
@@ -813,7 +625,8 @@ export default function Dashboard() {
   const [theme, toggleTheme] = useTheme();
   const [tab, setTab] = useState<Tab>('inbox');
   const [unlinked, setUnlinked] = useState<Email[]>([]);
-  const [jobs, setJobs] = useState<RFQJob[]>([]);
+  const [shipmentPage, setShipmentPage] = useState<ShipmentPage>(
+    { shipments: [], total: 0, truncated: false, has_more: false });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
   const [expandedEmail, setExpandedEmail] = useState<string | null>(null);
@@ -852,12 +665,12 @@ export default function Dashboard() {
   const fetchData = useCallback(async () => {
     // Jobs + automation status load first — unblocks UI immediately
     try {
-      const [jr, ar, ur] = await Promise.all([
-        apiFetch(`/jobs`),
+      const [sr, ar, ur] = await Promise.all([
+        apiFetch(`/shipments?limit=${SHIPMENT_PAGE}`),
         apiFetch(`/automation/status`),
         apiFetch(`/rate-cards/unlinked?limit=50`),
       ]);
-      if (jr.ok) setJobs(await jr.json());
+      if (sr.ok) setShipmentPage(await sr.json());
       if (ar.ok) {
         const ad = await ar.json();
         setAutomationEnabled(ad.enabled ?? false);
@@ -878,7 +691,7 @@ export default function Dashboard() {
    *
    * The three email lists live in `useInboxFeed`, not in this component's state,
    * so they are only re-read by calling each feed's own `refresh`. "Refresh Now"
-   * used to call `fetchData` alone — which reloads jobs, automation status and
+   * used to call `fetchData` alone — which reloads shipments, automation status and
    * unlinked rate cards, none of which the Inbox, Customer Requests or Rate Cards
    * tab displays. The button moved the "Updated Ns ago" line and changed nothing
    * else on screen, so it read as broken. It goes through here now.
@@ -914,15 +727,18 @@ export default function Dashboard() {
     return () => clearInterval(t);
   }, [refreshAll]);
 
-  // Shipments & RFQs shows only jobs we actually sent an RFQ for — i.e. at least
-  // one agent was contacted. Excludes any job row that never reached a send.
-  const sentJobs  = jobs.filter(j => (j.agents_contacted?.length ?? 0) > 0);
-  // Summary for the Shipments pane. One job is one agent, so an agent who has
-  // answered is a job with at least one distinct replying sender — counting
-  // messages here would report a follow-up as another agent responding.
-  const agentsContacted = sentJobs.reduce((n, j) => n + (j.agents_contacted?.length ?? 0), 0);
-  const agentsReplied   = sentJobs.reduce((n, j) => n + (j.agents_replied ?? 0), 0);
-  const agentsAwaiting  = Math.max(0, agentsContacted - agentsReplied);
+  // Summary for the Shipments pane, totalled over the shipments on screen.
+  //
+  // The server has already excluded any enquiry that never sent an RFQ, and has
+  // already worked out per shipment who replied and who is still awaited. These are
+  // sums of its numbers rather than a second attempt at deriving them: the previous
+  // version computed `awaiting` as contacted-minus-replied, which counted a failed
+  // send and an awarded RFQ as agents still to hear from.
+  const shipments = shipmentPage.shipments;
+  const rfqsSent = shipments.reduce((n, s) => n + s.rfq_count, 0);
+  const agentsReplied = shipments.reduce((n, s) => n + s.agents_replied, 0);
+  const agentsAwaiting = shipments.reduce((n, s) => n + s.awaiting, 0);
+  const failedSends = shipments.reduce((n, s) => n + s.send_failed, 0);
 
   /** A plain, unpaged list of emails — the unlinked rate cards, which come from
    *  their own endpoint and arrive whole. */
@@ -1007,7 +823,7 @@ export default function Dashboard() {
     { key: 'requests'  as Tab, icon: '📦', label: 'Customer Requests',  count: requestFeed.total,  color: 'var(--blue)' },
     { key: 'ratecards' as Tab, icon: '💰', label: 'Rate Cards',         count: rateCardFeed.total, color: 'var(--green)' },
     { key: 'unlinked'  as Tab, icon: '🔗', label: 'Needs Linking',      count: unlinked.length,    color: 'var(--amber)' },
-    { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: sentJobs.length,    color: 'var(--yellow)' },
+    { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: shipmentPage.total,    color: 'var(--yellow)' },
   ];
 
   // `themed` opts this subtree into the palette in app/theme.css.
@@ -1193,8 +1009,8 @@ export default function Dashboard() {
                     <div>
                       <h2 className="pane-title">🚢 Shipments & RFQs</h2>
                       <p className="pane-desc">
-                        Every shipment processed — route, agents contacted, and quotes received.
-                        Click <strong>View Quotes</strong> on any card to see agent prices.
+                        One card per customer enquiry, with every RFQ it produced.
+                        Open a shipment to compare agents, read their replies and award it.
                       </p>
                     </div>
                     <div className="pane-legend">
@@ -1205,29 +1021,47 @@ export default function Dashboard() {
                       })}
                     </div>
                   </div>
-                  {sentJobs.length > 0 && (
-                    /* The desk's own question: of everyone we asked, how many
-                       came back. Agents, not messages — a follow-up is not a
-                       second response. */
+
+                  {shipments.length > 0 && (
                     <div style={{ fontSize: 12, color: 'var(--muted-soft)', marginBottom: 10 }}>
+                      <strong>{totalText(shipmentPage)}</strong>
+                      {' · '}
+                      <strong>{rfqsSent}</strong>
+                      {' RFQs · '}
+                      {/* Agents, not messages — a follow-up is not a second response. */}
                       <strong style={{ color: 'var(--green-soft)' }}>{agentsReplied}</strong>
-                      {' of '}
-                      <strong>{agentsContacted}</strong>
-                      {' agents replied'}
+                      {' replied'}
                       {agentsAwaiting > 0 && (
                         <span style={{ color: 'var(--amber)' }}>
-                          {' · '}{agentsAwaiting} still awaiting
+                          {' · '}{agentsAwaiting} awaiting
+                        </span>
+                      )}
+                      {failedSends > 0 && (
+                        <span style={{ color: 'var(--red)' }}>
+                          {' · '}{failedSends} never sent
+                        </span>
+                      )}
+                      {shipmentPage.has_more && (
+                        /* Said out loud rather than showing a prefix as if it were
+                           everything. There is no paging control on this pane yet. */
+                        <span style={{ color: 'var(--faint)' }}>
+                          {' · showing the '}{shipments.length}{' most recent'}
                         </span>
                       )}
                     </div>
                   )}
-                  {sentJobs.length === 0
+
+                  {shipments.length === 0
                     ? <div className="empty-state">No RFQs sent yet. Process a customer email and send an RFQ to get started.</div>
                     : <div className="shipments-grid">
-                        {[...sentJobs]
-                          .sort((a, b) => new Date(b.created_at).getTime() - new Date(a.created_at).getTime())
-                          .map(j => <ShipmentCard key={j.reference} job={j} />)
-                        }
+                        {shipments.map(s => (
+                          <ShipmentCard
+                            /* An orphan send has no customer_email_id, so the
+                               reference of its first RFQ is the only stable key. */
+                            key={s.customer_email_id ?? s.rfqs[0]?.reference ?? s.first_sent_at}
+                            shipment={s}
+                          />
+                        ))}
                       </div>
                   }
                 </div>
