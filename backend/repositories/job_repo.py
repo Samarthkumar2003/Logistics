@@ -9,6 +9,7 @@ to it.
 """
 
 import logging
+from dataclasses import dataclass
 from typing import Optional
 
 from backend.core.db import get_db
@@ -65,6 +66,102 @@ def list_for_customer_email(customer_email_id: str) -> list[RfqJob]:
         .order("created_at").execute().data or []
     )
     return [RfqJob.from_row(r) for r in rows]
+
+
+# How far back one page of shipments may look. `rfq_jobs` is one row per agent, so
+# a handful of enquiries is already dozens of rows and the count of *shipments*
+# cannot be read off a row count. Grouping therefore happens here, over a bounded
+# window, and `ShipmentPage.truncated` says when the window filled — at which
+# point `total` is a floor rather than a count, and the caller must say so instead
+# of printing a number it cannot stand behind.
+_SHIPMENT_SCAN_ROWS = 2000
+
+
+@dataclass(frozen=True)
+class ShipmentPage:
+    """One page of shipments, each holding its complete set of RFQs."""
+
+    groups: list[list[RfqJob]]
+    total: int
+    truncated: bool
+
+
+def _group_key(customer_email_id: Optional[str], reference: str) -> tuple[Optional[str], str]:
+    """What makes two RFQ rows the same shipment.
+
+    Normally the customer enquiry they came from. `insert` writes
+    `customer_email_id or None`, though, so a send with no source email — a manual
+    RFQ raised from nothing — has nothing to group on. Those key on their own
+    reference and stand alone rather than collapsing into one bogus shipment of
+    every orphan ever sent. There are none in the table today; the fallback exists
+    because a NULL column with a plausible-looking `groupby` over it is how they
+    would silently merge.
+    """
+    return (customer_email_id, "") if customer_email_id else (None, reference)
+
+
+def list_shipment_groups(limit: int, offset: int) -> ShipmentPage:
+    """Shipments, most recently active first, paginated by *shipment*.
+
+    Two queries by necessity. PostgREST has no DISTINCT ON, so pass one reads a
+    narrow window of keys to work out which shipments are on this page, and pass
+    two re-reads those shipments whole. The alternative — fetch N rows and group
+    them in the browser — under-reports every shipment whose RFQs straddle the row
+    limit, which is exactly the number the page exists to show.
+
+    Only shipments that actually sent something appear: at least one of their rows
+    must name a contacted agent. A reserved row that never reached a send is not a
+    shipment the desk can act on.
+    """
+    scan = (
+        get_db().table("rfq_jobs")
+        .select("reference, customer_email_id, agents_contacted, created_at")
+        .order("created_at", desc=True).limit(_SHIPMENT_SCAN_ROWS).execute().data or []
+    )
+
+    # dict preserves insertion order, and the scan is newest-first, so a shipment
+    # takes the position of its most recent RFQ.
+    ordered: dict[tuple[Optional[str], str], bool] = {}
+    for r in scan:
+        key = _group_key(r.get("customer_email_id"), r.get("reference") or "")
+        sent = bool(r.get("agents_contacted"))
+        ordered[key] = ordered.get(key, False) or sent
+
+    keys = [k for k, sent in ordered.items() if sent]
+    page = keys[offset:offset + limit]
+    if not page:
+        return ShipmentPage(groups=[], total=len(keys),
+                            truncated=len(scan) >= _SHIPMENT_SCAN_ROWS)
+
+    email_ids = [k[0] for k in page if k[0]]
+    orphan_refs = [k[1] for k in page if not k[0]]
+
+    rows: list[dict] = []
+    for i in range(0, len(email_ids), 100):  # stay under PostgREST IN limits
+        rows += (
+            get_db().table("rfq_jobs").select("*")
+            .in_("customer_email_id", email_ids[i:i + 100]).execute().data or []
+        )
+    for i in range(0, len(orphan_refs), 100):
+        rows += (
+            get_db().table("rfq_jobs").select("*")
+            .in_("reference", orphan_refs[i:i + 100]).execute().data or []
+        )
+
+    by_key: dict[tuple[Optional[str], str], list[RfqJob]] = {k: [] for k in page}
+    for r in rows:
+        job = RfqJob.from_row(r)
+        key = _group_key(job.customer_email_id, job.reference)
+        if key in by_key:  # an orphan re-read by customer_email_id belongs elsewhere
+            by_key[key].append(job)
+    for group in by_key.values():
+        group.sort(key=lambda j: j.created_at or "")
+
+    return ShipmentPage(
+        groups=[by_key[k] for k in page if by_key[k]],
+        total=len(keys),
+        truncated=len(scan) >= _SHIPMENT_SCAN_ROWS,
+    )
 
 
 def _row(job: RfqJob) -> dict:

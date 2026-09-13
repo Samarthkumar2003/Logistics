@@ -15,7 +15,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { countAgents, groupByThread, senderAddress } from '../src/app/dashboard/replyThreads.ts';
+import { countAgents, groupByThread, senderAddress } from '../src/lib/replyThreads.ts';
 
 const msg = (id: string, thread_id: string) => ({ id, thread_id });
 

@@ -1,12 +1,13 @@
 """RFQ jobs: listing, one customer request, replies, and awarding."""
 
 import logging
+from typing import Annotated
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 
 from backend.app.errors import AppException
 from backend.repositories import email_repo, job_repo
-from backend.services import reply_service, rfq_service
+from backend.services import reply_service, rfq_service, shipment_service
 
 logger = logging.getLogger(__name__)
 router = APIRouter(tags=["jobs"])
@@ -51,6 +52,29 @@ def list_jobs():
         }
         for j in jobs
     ]
+
+
+@router.get("/shipments")
+def list_shipments(
+    limit: Annotated[int, Query(ge=1, le=100)] = 20,
+    offset: Annotated[int, Query(ge=0)] = 0,
+):
+    """Shipments, not RFQ rows: one customer enquiry and every RFQ it produced.
+
+    `/jobs` returns one row per agent, which is the shape the send path writes and
+    the wrong shape to read: seven agents on one enquiry is seven cards for one
+    decision. This groups them and carries the aggregate the card needs.
+
+    Grouped on the server on purpose. `/jobs` is capped at 20 rows, so a browser
+    doing the same grouping would report a seven-RFQ shipment as however many of
+    its rows happened to fit on the page — silently, and wrongly, and most for the
+    busiest shipment.
+    """
+    try:
+        return shipment_service.list_shipments(limit=limit, offset=offset)
+    except Exception as e:
+        logger.exception("Failed to list shipments: %s", e)
+        raise AppException(status_code=500, detail=f"Failed to list shipments: {e}")
 
 
 @router.get("/jobs/{reference}")

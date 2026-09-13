@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from backend.core.rfq_reference import extract_rfq_reference
 from backend.domain.models import Email
-from backend.repositories import email_repo, job_repo
+from backend.repositories import agent_repo, email_repo, job_repo
 
 logger = logging.getLogger(__name__)
 
@@ -152,9 +152,64 @@ def list_unlinked(limit: int, offset: int) -> dict[str, Any]:
     return {"emails": items, "total": total, "has_more": (offset + limit) < total}
 
 
+def _widen_to_threads(
+    references: list[str],
+    agent_by_reference: dict[str, str],
+) -> tuple[list[dict[str, Any]], int]:
+    """Every message these RFQs drew, linked replies plus the rest of their threads.
+
+    Same widening `list_for_reference` does for a single RFQ, and for the same
+    reason: agents reply twice — a correction, an omitted surcharge, a revised
+    validity — and the second message routinely drops the reference token, because
+    "Re:" chains get retyped and some clients rewrite the subject. A panel showing
+    only linked mail shows the agent's first word and hides their latest.
+
+    Attribution does not widen with it. Nothing here writes `rfq_reference`, and a
+    message that did not cite one is returned with `linked: false` so the UI can
+    label it as context. A sibling already linked to a *different* RFQ is dropped
+    outright: it belongs on that RFQ's panel and repeating it here would be a claim.
+
+    Returns the messages newest-first and how many of them are context-only.
+    """
+    linked = email_repo.list_replies_for(references)
+    if not linked:
+        return [], 0
+
+    linked_ids = {e.id for e in linked}
+    reference_set = set(references)
+    # Which RFQ each thread belongs to, so a follow-up that dropped the token is
+    # still credited to the agent whose thread it is rather than to nobody.
+    reference_by_thread = {e.thread_id: e.rfq_reference for e in linked if e.thread_id}
+
+    siblings = [
+        e for e in email_repo.list_thread_messages([e.thread_id for e in linked])
+        if e.id not in linked_ids
+        # Unlinked: context, keep it. Linked to one of our own references: already
+        # in `linked` above. Linked to somebody else's RFQ: not ours to show.
+        and (not e.rfq_reference or e.rfq_reference in reference_set)
+    ]
+
+    def agent_for(e: Email, linked_msg: bool) -> str:
+        reference = e.rfq_reference if linked_msg else reference_by_thread.get(e.thread_id)
+        return agent_by_reference.get(reference or "", "")
+
+    messages = (
+        [_as_dict(e, agent_for(e, True)) for e in linked]
+        + [_as_dict(e, agent_for(e, False), linked=False) for e in siblings]
+    )
+    messages.sort(key=lambda r: r.get("received_at") or "", reverse=True)
+    return messages, len(siblings)
+
+
 def get_customer_request(customer_email_id: str) -> Optional[dict[str, Any]]:
     """One customer enquiry, its RFQs, and every agent reply against them.
-    None when neither the email nor any job exists."""
+    None when neither the email nor any job exists.
+
+    This is the shipment detail view: the enquiry that came in, a row per vendor we
+    asked with that vendor's own status, and the mail threads. It is the only place
+    a shipment can be awarded, because awarding means choosing between vendors and
+    that is a comparison you cannot make from a single vendor's card.
+    """
     email = email_repo.get_by_id(customer_email_id)
     jobs = job_repo.list_for_customer_email(customer_email_id)
     if email is None and not jobs:
@@ -162,10 +217,13 @@ def get_customer_request(customer_email_id: str) -> Optional[dict[str, Any]]:
 
     references = [j.reference for j in jobs if j.reference]
     agent_by_reference = {j.reference: j.agent_name for j in jobs if j.reference}
-    replies = [
-        _as_dict(r, agent_by_reference.get(r.rfq_reference or "", ""))
-        for r in email_repo.list_replies_for(references)
-    ]
+    replies, thread_only = _widen_to_threads(references, agent_by_reference)
+
+    # Batched: one reply-count read and one roster read for the whole page, not one
+    # per vendor row.
+    stats = email_repo.reply_stats_by_reference(references)
+    categories = agent_repo.category_index()
+    _no_stats = email_repo.ReplyStats(messages=0, agents=0)
 
     return {
         "customer_email_id": customer_email_id,
@@ -176,11 +234,22 @@ def get_customer_request(customer_email_id: str) -> Optional[dict[str, Any]]:
             "body": email.body,
             "received_at": email.received_at,
         } if email else None,
+        # Shipment-level facts, so the detail page can show the route it is about
+        # without a second call to /jobs. Every row came from one `_shipment()`
+        # dict, so these agree across the group.
+        "shipment": jobs[0].shipment_dict() if jobs else None,
         "jobs": [
             {
                 "reference": j.reference,
                 "status": j.status,
                 "agents_contacted": j.agents_contacted,
+                "agent_name": j.agent_name,
+                "agent_email": j.draft_to,
+                # "" when the roster cannot say. Rendered as unknown, never as a
+                # default category — see agent_repo.CategoryIndex.
+                "agent_category": categories.category_for(j.agent_name, j.draft_to),
+                "reply_count": stats.get(j.reference, _no_stats).messages,
+                "replied": stats.get(j.reference, _no_stats).messages > 0,
                 "created_at": j.created_at,
             }
             for j in jobs
@@ -189,13 +258,19 @@ def get_customer_request(customer_email_id: str) -> Optional[dict[str, Any]]:
         "agents_contacted": sorted({a for j in jobs for a in j.agents_contacted}),
         "counts": {
             "agents": len(jobs),
-            "replies": len(replies),
+            # Linked replies only, so this keeps meaning what it always meant. The
+            # widened thread adds context messages, and counting those here would
+            # inflate "replies received" with mail that answered nothing.
+            "replies": len(replies) - thread_only,
+            # Context messages pulled in by thread. Shown as its own number rather
+            # than hidden inside the one above.
+            "thread_only": thread_only,
             # Distinct mailboxes that answered, not messages. Two replies from one
             # agent is one response; counting messages here would say the enquiry
             # has two quotes to compare when it has one.
             "agents_replied": len({
                 addr for r in replies
-                if (addr := email_repo.sender_address(r["sender"]))
+                if r["linked"] and (addr := email_repo.sender_address(r["sender"]))
             }),
         },
     }
