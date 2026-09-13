@@ -218,3 +218,110 @@ def test_generated_references_are_8_hex_and_extractable():
     # Not a distribution test — just that the suffix varies at all. A constant
     # suffix would collide on the second RFQ of the day.
     assert len(seen) > 190
+
+
+# ===========================================================================
+# The counter form: RFQ-001042 / RFQId:001042
+#
+# Sequential references replaced the random hex suffix so an operator can read
+# one aloud. The legacy form above is untouched and must stay that way — those
+# references are in vendors' inboxes right now.
+# ===========================================================================
+
+COUNTER = "RFQ-001042"
+
+
+@pytest.mark.parametrize("text", [
+    "RFQId:001042",
+    "Re: RFQId:001042 | Nhava Sheva to Hamad",
+    "Fwd: Re: RFQId:001042",
+    "RFQId: 001042",                 # space after the colon
+    "RFQ Id : 001042",               # a human retyping it
+    "RFQID:001042",                  # shouting
+    "our rates for rfqid:001042 are attached",
+])
+def test_a_labelled_counter_resolves(text):
+    assert extract_rfq_reference(text) == COUNTER
+    assert has_rfq_reference(text) is True
+
+
+@pytest.mark.parametrize("text", [
+    "RFQ-001042",                          # bare, unlabelled
+    "Our RFQ-100234 refers",               # a vendor's own numbering
+    "Please quote against RFQ-123456",
+])
+def test_a_bare_counter_is_refused(text):
+    """The reason there are two patterns rather than one.
+
+    A date-stamped reference is unmistakably ours; nobody types
+    RFQ-20260101-a1b2c3d4 by chance. `RFQ-123456` is the opposite — it is
+    exactly what a freight agent writes about their own paperwork, and they do
+    have their own RFQ numbering. Accepting it inbound would file that vendor's
+    quote against whichever shipment happens to hold that number.
+
+    We send the labelled form, so the labelled form is what a replying agent
+    quotes back. Nothing is lost by refusing the bare one here.
+    """
+    assert extract_rfq_reference(text) is None
+    assert has_rfq_reference(text) is False
+
+
+@pytest.mark.parametrize("text", [
+    "RFQId:0010",         # truncated: must NOT resolve to reference 10
+    "RFQId:00104",        # five digits
+    "RFQId:1002345",      # seven: not shaved down to six
+    "RFQId:20260101",     # eight, e.g. a legacy reference that lost its suffix
+])
+def test_a_counter_of_the_wrong_width_matches_nothing(text):
+    """Exactly six digits, not four-to-six.
+
+    A variable width lets `RFQ-001042` retyped as `RFQ-0010` resolve to
+    reference 10 — a different, real shipment. Refusing to attribute is
+    recoverable; attributing to the wrong shipment is not. Same reasoning as the
+    legacy hex lookahead, applied to digits.
+    """
+    assert extract_rfq_reference(text) is None
+    assert has_rfq_reference(text) is False
+
+
+def test_the_counter_round_trips_through_the_subject_line():
+    assert subject_token(COUNTER) == "RFQId:001042"
+    assert extract_rfq_reference(subject_token(COUNTER)) == COUNTER
+
+
+def test_both_eras_round_trip_through_the_subject_line():
+    for reference in (COUNTER, REF, WIDE):
+        assert extract_rfq_reference(subject_token(reference)) == reference
+
+
+def test_a_counter_replaces_a_legacy_reference_in_a_subject():
+    assert inject_reference("RFQ-20260101-a1b2 | Rates", COUNTER) == \
+        "RFQId:001042 | Rates"
+
+
+def test_a_counter_replaces_a_bare_counter_rather_than_doubling_it():
+    """inject_reference matches permissively on our own text, which is the whole
+    reason it does not share the inbound pattern. If a bare `RFQ-000000` in a
+    draft were not recognised, the real reference would be prepended and the mail
+    would leave carrying two references — the first one a placeholder."""
+    subject = inject_reference("RFQ-000000 | Rates", COUNTER)
+    assert subject == "RFQId:001042 | Rates"
+    assert subject.count("RFQ") == 1
+
+
+def test_the_preview_placeholder_is_replaced_at_send_time():
+    from backend.core.rfq_reference import RESERVED_PREVIEW_REFERENCE
+
+    previewed = inject_reference("Rates please", RESERVED_PREVIEW_REFERENCE)
+    assert previewed == "RFQId:000000 | Rates please"
+    assert inject_reference(previewed, COUNTER) == "RFQId:001042 | Rates please"
+
+
+def test_the_placeholder_can_never_be_a_real_reference():
+    """The sequence starts at 1000, so 000000 is not reachable. A reply quoting
+    it therefore finds no job row and is left unlinked, rather than landing on
+    whatever shipment happened to be numbered first."""
+    from backend.core.rfq_reference import RESERVED_PREVIEW_REFERENCE
+
+    assert RESERVED_PREVIEW_REFERENCE == "RFQ-000000"
+    assert extract_rfq_reference("RFQId:000000") == RESERVED_PREVIEW_REFERENCE

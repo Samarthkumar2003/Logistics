@@ -151,7 +151,7 @@ def test_the_model_branch_signs_the_body(monkeypatch):
     _fake_model(monkeypatch)
     entry = rfq_service._draft_for_agent(
         rfq_service.SelectedAgent("Alpha", "alpha@example.com", "CHA"),
-        {"origin": "A", "destination": "B"}, None, OPERATOR,
+        "RFQ-001042", {"origin": "A", "destination": "B"}, None, OPERATOR,
     )
     assert entry["draft"].body.endswith("Asha Nair\nBhatia Shipping Group\n")
 
@@ -164,7 +164,7 @@ def test_the_edited_branch_is_not_signed_twice(monkeypatch):
     edited = "My own wording.\n\nAsha Nair\nBhatia Shipping Group\n"
     entry = rfq_service._draft_for_agent(
         rfq_service.SelectedAgent("Alpha", "alpha@example.com", "CHA"),
-        {"origin": "A", "destination": "B"},
+        "RFQ-001042", {"origin": "A", "destination": "B"},
         {"CHA": {"subject": "Subject RFQ-1", "body": edited}}, OPERATOR,
     )
     assert entry["draft"].body == edited
