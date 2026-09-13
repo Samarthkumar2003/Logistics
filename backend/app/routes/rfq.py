@@ -8,7 +8,7 @@ import logging
 from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.agents.intake_agent import ShipmentDetails, run_intake_agent
 from backend.app.errors import AppException
@@ -34,6 +34,12 @@ class EmailInput(BaseModel):
 # the routing key that decides WHICH DRAFT a recipient is sent, so an
 # unrecognised value is a refusal rather than an "OTHER" bucket.
 CATEGORY_KEYS = ("CHA", "FREIGHT_FORWARDER", "CARRIER")
+
+# Door addresses are free text, so they are capped. Uncapped, a pasted signature
+# block or a whole quoted thread would crowd the shipment facts out of the
+# drafting prompt - the model reads position and volume, not just content.
+# 500 characters is several lines of a real address with room to spare.
+MAX_ADDRESS_CHARS = 500
 
 
 class SelectedAgent(BaseModel):
@@ -61,6 +67,23 @@ class AttachmentInput(BaseModel):
     data_base64: str
 
 
+class PreviewAgent(BaseModel):
+    """Just enough to address a sample draft.
+
+    Deliberately NOT SelectedAgent. That model requires `category` because it is
+    the routing key deciding which reviewed draft a vendor is sent, and defaulting
+    it would mail somebody another category's wording. None of that applies here:
+    preview_rfq discards the field (it builds a two-argument
+    rfq_service.SelectedAgent) and the draft is shown to the operator, not sent.
+    Sharing the stricter model cost every operator AI drafting with a 422 reading
+    `body -> agent -> category: Field required`, which the frontend surfaced as
+    "AI draft unavailable" and blamed on the model.
+    """
+
+    agent_name: str
+    email: str
+
+
 class PreviewRFQRequest(BaseModel):
     origin_port: str
     destination_port: str
@@ -68,7 +91,13 @@ class PreviewRFQRequest(BaseModel):
     commodity: str = ""
     mode: str = "sea_freight"
     weight_kg: Optional[float] = None
-    agent: Optional[SelectedAgent] = None
+    # Optional door addresses, typed by the operator - never extracted from the
+    # customer email, for the same reason Size is not: a guessed address is worse
+    # than a blank one. Reaches the model only when non-empty (see rfq_agent).
+    # Must stay in step with the same pair on the other request model below.
+    sending_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
+    receiving_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
+    agent: Optional[PreviewAgent] = None
 
 
 class SendRFQRequest(BaseModel):
@@ -78,6 +107,12 @@ class SendRFQRequest(BaseModel):
     commodity: str = ""
     mode: str = "sea_freight"
     weight_kg: Optional[float] = None
+    # Optional door addresses, typed by the operator - never extracted from the
+    # customer email, for the same reason Size is not: a guessed address is worse
+    # than a blank one. Reaches the model only when non-empty (see rfq_agent).
+    # Must stay in step with the same pair on the other request model below.
+    sending_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
+    receiving_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
     agents: List[SelectedAgent]
     # The originating customer email, kept on the job for traceability.
     customer_sender: str = ""
@@ -142,6 +177,8 @@ def _shipment(payload) -> dict:
         "weight_kg": payload.weight_kg,
         "commodity": payload.commodity.strip(),
         "size": payload.size.strip(),
+        "sending_address": payload.sending_address.strip(),
+        "receiving_address": payload.receiving_address.strip(),
     }
 
 

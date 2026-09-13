@@ -435,6 +435,10 @@ export default function SendRequestPage() {
   const [commodity, setCommodity] = useState('');
   const [mode, setMode] = useState('sea_freight');
   const [weightKg, setWeightKg] = useState('');
+  // Optional door addresses. Deliberately absent from the extraction in init():
+  // a guessed address is worse than a blank one, same reasoning as Size above.
+  const [sendingAddress, setSendingAddress] = useState('');
+  const [receivingAddress, setReceivingAddress] = useState('');
 
   const [phase, setPhase] = useState<'loading' | 'ready' | 'sending' | 'sent' | 'error'>('loading');
   const [extracting, setExtracting] = useState(false);
@@ -520,6 +524,8 @@ export default function SendRequestPage() {
       commodity.trim() ? `Commodity: ${commodity.trim()}` : null,
       size.trim() ? `Size: ${size.trim()}` : null,
       weightKg.trim() ? `Weight: ${weightKg.trim()} kg` : null,
+      sendingAddress.trim() ? `Pickup (sending) address: ${sendingAddress.trim()}` : null,
+      receivingAddress.trim() ? `Delivery (receiving) address: ${receivingAddress.trim()}` : null,
     ].filter(Boolean);
     const body = [
       'Dear Team,', '',
@@ -771,6 +777,8 @@ export default function SendRequestPage() {
           commodity,
           mode,
           weight_kg: weightKg.trim() ? parseFloat(weightKg) : null,
+          sending_address: sendingAddress,
+          receiving_address: receivingAddress,
           agent: sampleAgent,
         }),
       });
@@ -831,6 +839,8 @@ export default function SendRequestPage() {
           commodity,
           mode,
           weight_kg: weightKg.trim() ? parseFloat(weightKg) : null,
+          sending_address: sendingAddress,
+          receiving_address: receivingAddress,
           // Each recipient carries its category, which is how the server knows
           // which panel's text to send it.
           agents: recipients,
@@ -1000,6 +1010,29 @@ export default function SendRequestPage() {
               <div>
                 <span style={labelStyle}>Weight (kg, optional)</span>
                 <input style={inputStyle} value={weightKg} onChange={e => setWeightKg(e.target.value)} placeholder="leave blank if unknown" type="number" />
+              </div>
+              {/* Full width: a street address does not fit a half column. maxLength
+                  mirrors MAX_ADDRESS_CHARS on the server, so the cap is felt while
+                  typing instead of arriving as a 422 after the draft is requested. */}
+              <div style={{ gridColumn: '1 / -1' }}>
+                <span style={labelStyle}>Sending Address (optional)</span>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 62, resize: 'vertical', fontFamily: 'inherit' }}
+                  value={sendingAddress}
+                  onChange={e => setSendingAddress(e.target.value)}
+                  maxLength={500}
+                  placeholder="Pickup / factory address - leave blank for a port-to-port enquiry"
+                />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <span style={labelStyle}>Receiving Address (optional)</span>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 62, resize: 'vertical', fontFamily: 'inherit' }}
+                  value={receivingAddress}
+                  onChange={e => setReceivingAddress(e.target.value)}
+                  maxLength={500}
+                  placeholder="Final delivery address - leave blank for a port-to-port enquiry"
+                />
               </div>
             </div>
 

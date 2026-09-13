@@ -17,6 +17,7 @@ human read and approved. `_draft_for_agent`'s switch is therefore
 from types import SimpleNamespace
 
 import pytest
+from pydantic import ValidationError
 
 from backend.app.routes import rfq as rfq_route
 from backend.domain.models import SenderIdentity
@@ -368,3 +369,48 @@ def test_a_recipient_with_no_usable_category_is_not_remembered(fake_agents_table
     ])
     assert added == 1
     assert [r["email"] for r in db.inserted] == ["good@x.example"]
+
+
+# ---------------------------------------------------------------------------
+# Where `category` is actually required: send, not preview.
+#
+# The gap this closes: /preview-rfq had no test at all, and reused SelectedAgent
+# for its optional `agent`. That made a field required which the handler then
+# discarded, so every draft request answered 422
+# `body -> agent -> category: Field required` before the handler ran. The
+# frontend caught it, assumed the model had failed, and told the operator
+# "AI draft unavailable" - blaming the LLM for a schema mismatch.
+# ---------------------------------------------------------------------------
+
+def test_preview_accepts_an_agent_with_no_category():
+    """Preview discards the field, so it must not demand it."""
+    payload = rfq_route.PreviewRFQRequest(
+        origin_port="Mundra",
+        destination_port="Tema",
+        agent={"agent_name": "Acme Lines", "email": "rates@acme.example"},
+    )
+    assert payload.agent is not None
+    assert payload.agent.email == "rates@acme.example"
+    assert not hasattr(payload.agent, "category"), (
+        "a preview agent must carry no routing key - having one invites a caller "
+        "to think preview honours it, which it does not"
+    )
+
+
+def test_preview_still_accepts_no_agent_at_all():
+    """`agent` is optional and stays that way: the drafting prompt uses it only
+    for flavour, so a shipment with no recipient chosen yet still previews."""
+    payload = rfq_route.PreviewRFQRequest(origin_port="Mundra", destination_port="Tema")
+    assert payload.agent is None
+
+
+def test_send_still_refuses_an_agent_with_no_category():
+    """The strictness has to survive the split. This is the path that reaches a
+    real freight vendor, where defaulting the category would send somebody
+    another category's wording."""
+    with pytest.raises(ValidationError):
+        rfq_route.SendRFQRequest(
+            origin_port="Mundra",
+            destination_port="Tema",
+            agents=[{"agent_name": "Acme Lines", "email": "rates@acme.example"}],
+        )
