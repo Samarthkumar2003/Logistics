@@ -21,7 +21,7 @@
  * somebody remembers a recipient late.
  */
 
-import { CATEGORY_KEYS, type CategoryKey } from './categories';
+import { CATEGORY_KEYS, type CategoryKey } from './categories.ts';
 
 /** What actually gets posted for one category. */
 export interface DraftText {

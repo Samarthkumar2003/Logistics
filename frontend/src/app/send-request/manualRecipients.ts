@@ -10,7 +10,7 @@
  * reported as text, and `onRoster` is confirmed by the recipient chip it produces.
  */
 
-import { isCategory, type CategoryChoice, type CategoryKey } from './categories';
+import { isCategory, type CategoryChoice, type CategoryKey } from './categories.ts';
 
 /** An ad-hoc recipient typed in by hand, not backed by a row in the agents table.
  *

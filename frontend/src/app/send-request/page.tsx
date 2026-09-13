@@ -5,22 +5,22 @@ import Link from 'next/link';
 import {
   ManualNote, ManualRecipient, dedupeByEmail, describeSplit, mergeManualRecipients,
   splitManualTokens, tokenizeEmails,
-} from './manualRecipients';
+} from './manualRecipients.ts';
 import {
   CONTAINER_OPTIONS, ContainerSelection, MAX_QUANTITY, MIN_QUANTITY, NO_CONTAINERS,
   containerSizeText, containerSummary, hasContainers, quantityOf, setManualText,
   setQuantity, toggleContainer, toggleManual,
-} from './containerSize';
+} from './containerSize.ts';
 import {
   CATEGORY_LABELS, CATEGORY_OPTIONS, CATEGORY_SHORT, type CategoryChoice,
   type CategoryKey, isCategory,
-} from './categories';
+} from './categories.ts';
 import {
   type CategoryDraft, type DraftMap, type DraftText, acknowledgeDraft,
   describeRedraft, editDraft,
   missingDrafts, presentCategories, recipientsFor, redraft, resetDraft, seedDrafts,
   syncDrafts, toWireDrafts, unreviewedDrafts,
-} from './categoryDrafts';
+} from './categoryDrafts.ts';
 import { apiFetch } from '@/lib/api';
 
 /* ─── Types ─────────────────────────────────────────────────────── */
