@@ -18,9 +18,13 @@ from typing import Any, Optional
 from backend.agents.rfq_agent import DraftEmail, generate_rfq_drafts
 from backend.connectors.email_sender import send_rfq_email, send_rfq_emails_batch
 from backend.core.logging_context import carry_context
-from backend.core.rfq_reference import inject_reference
+from backend.core.rfq_reference import (
+    MAX_REFERENCE_NUMBER,
+    RESERVED_PREVIEW_REFERENCE,
+    inject_reference,
+)
 from backend.domain.models import STATUS_SENDING, RfqJob, SenderIdentity
-from backend.repositories import agent_repo, email_repo, job_repo
+from backend.repositories import agent_repo, email_repo, job_repo, reference_repo
 
 logger = logging.getLogger(__name__)
 
@@ -50,16 +54,51 @@ class SelectedAgent:
 
 
 def new_reference() -> str:
-    """A per-agent RFQ id. Uniqueness per agent is what lets a reply be traced
-    back to exactly one job.
+    """A random per-agent RFQ id, in the pre-sequence format.
+
+    Retained as the fallback for when the sequence is unavailable, which is a
+    real state and not a theoretical one: this code deploys before anybody runs
+    sql/add_rfq_reference_sequence.sql. Still unique and still attributable, just
+    not readable aloud.
 
     8 hex characters, not 4: the suffix is scoped to one day, and 4 gave only
     65,536 values — a ~16% chance per day at ~150 RFQs of colliding with a
     reference already issued. The column is unique, so a collision fails the
-    insert; the send now reserves the row first, which turns that from a sent RFQ
+    insert; the send reserves the row first, which turns that from a sent RFQ
     stranded with no job row into an aborted send the operator can simply retry.
     """
     return f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:8]}"
+
+
+def allocate_references(count: int) -> list[str]:
+    """`count` references for one send, allocated in a single round trip.
+
+    Allocated up front rather than inside each drafting thread. `_draft_for_agent`
+    runs in a ThreadPoolExecutor, so minting per worker would have every send of
+    N agents race itself N ways; the sequence would still hand out distinct
+    numbers, but nothing else about the ordering would be predictable.
+
+    Falls back to the random form as a whole batch, never per reference. A batch
+    half-sequential and half-random is harder to reason about than either, and
+    the fallback is meant to be recognisable when an operator reads it.
+    """
+    numbers = reference_repo.allocate(count)
+    if numbers is None:
+        return [new_reference() for _ in range(count)]
+
+    out: list[str] = []
+    for number in numbers:
+        if not 1 <= number <= MAX_REFERENCE_NUMBER:
+            # Emitting it anyway would mail a vendor a reference that
+            # extract_rfq_reference refuses, so the reply could never be filed.
+            logger.error(
+                "RFQ reference sequence returned %s, outside 1..%s — falling back "
+                "to random references for this send. Widen the reference format.",
+                number, MAX_REFERENCE_NUMBER,
+            )
+            return [new_reference() for _ in range(count)]
+        out.append(f"RFQ-{number:06d}")
+    return out
 
 
 def _signed(body: str, sender: SenderIdentity) -> str:
@@ -81,7 +120,7 @@ def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent],
         raise RfqError("Origin and destination ports are required")
 
     target = agent or SelectedAgent("Sample Agent", "agent@example.com")
-    reference = new_reference()
+    reference = RESERVED_PREVIEW_REFERENCE
 
     result = generate_rfq_drafts(
         shipment_data=shipment,
@@ -105,6 +144,7 @@ def preview_draft(shipment: dict[str, Any], agent: Optional[SelectedAgent],
 
 def _draft_for_agent(
     agent: SelectedAgent,
+    reference: str,
     shipment: dict[str, Any],
     drafts: Optional[dict[str, dict[str, str]]],
     sender: SenderIdentity,
@@ -130,7 +170,6 @@ def _draft_for_agent(
     adjusted it; signing again would print it twice. Only the model branch signs,
     because only the model was told to leave it out.
     """
-    reference = new_reference()
     entry: dict[str, Any] = {
         "reference": reference, "agent_name": agent.agent_name,
         "email": agent.email, "draft": None, "error": "",
@@ -400,11 +439,15 @@ def send_rfqs(
     # `carry_context` keeps the operator's request id on every line the drafting
     # emits — this is the money path, and a pool worker would otherwise log the
     # model's failures with no way back to the request that caused them.
+    #
+    # References are allocated for the whole batch before the pool starts, so the
+    # sequence is touched once per send rather than once per agent.
+    references = allocate_references(len(agents))
     draft_one = carry_context(
-        lambda a: _draft_for_agent(a, shipment, drafts, sender)
+        lambda pair: _draft_for_agent(pair[0], pair[1], shipment, drafts, sender)
     )
     with ThreadPoolExecutor(max_workers=min(len(agents), MAX_DRAFT_WORKERS)) as pool:
-        entries = list(pool.map(draft_one, agents))
+        entries = list(pool.map(draft_one, zip(agents, references)))
 
     customer_email_id = customer.get("email_id", "")
     thread_id = email_repo.get_thread_id(customer_email_id) if customer_email_id else ""

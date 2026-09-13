@@ -202,7 +202,8 @@ def test_draft_for_agent_refuses_on_its_own(wired):
     """The backstop, for any caller that skips the guards above. It records an
     error on the entry and produces no draft, so no row is reserved and no mail
     is addressed - rather than silently calling the model."""
-    entry = rfq_service._draft_for_agent(CAR, SHIPMENT, {"CHA": _text("CHA")}, OPERATOR)
+    entry = rfq_service._draft_for_agent(
+        CAR, "RFQ-001042", SHIPMENT, {"CHA": _text("CHA")}, OPERATOR)
     assert entry["draft"] is None
     assert "CARRIER" in entry["error"]
     assert wired["model"] == []

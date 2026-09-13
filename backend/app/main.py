@@ -8,13 +8,12 @@ debugging. Read-only: it prints drafts and never sends anything.
 """
 
 import json
-import uuid
-from datetime import datetime
 
 from backend.connectors.email_connector import fetch_latest_emails
 from backend.agents.intake_agent import run_intake_agent, ShipmentDetails
 from backend.agents.rfq_agent import generate_rfq_drafts, RFQResponse
 from backend.core.config import settings
+from backend.core.rfq_reference import RESERVED_PREVIEW_REFERENCE
 from backend.domain.models import SenderIdentity
 from backend.repositories import agent_repo
 
@@ -66,7 +65,11 @@ def process_inbox(limit: int = 4) -> None:
                 continue
 
             # Step 3: RFQ Agent — draft vendor emails (not sent)
-            reference = f"RFQ-{datetime.now():%Y%m%d}-{uuid.uuid4().hex[:4]}"
+            #
+            # The reserved placeholder, not a sequence value: this walkthrough
+            # drafts and prints, so burning a real reference number would leave a
+            # permanent gap in the numbering for output nobody mailed.
+            reference = RESERVED_PREVIEW_REFERENCE
             rfq_response: RFQResponse = generate_rfq_drafts(
                 shipment_data=extracted.model_dump(),
                 agents=[
