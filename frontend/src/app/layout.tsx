@@ -7,7 +7,7 @@ import Script from "next/script";
 import AuthGate from "@/components/AuthGate";
 
 export const metadata = {
-  title: "Logistics Copilot - Multi-Agent Office",
+  title: "FreightMind - Multi-Agent Office",
   description: "Visual interface for AI operations",
 };
 

@@ -82,7 +82,7 @@ export default function LoginPage() {
   return (
     <main style={S.page}>
       <form onSubmit={handleSubmit} style={S.card} noValidate>
-        <div style={S.brand}>Logistics Copilot</div>
+        <div style={S.brand}>FreightMind</div>
         <h1 style={S.heading}>Sign in</h1>
         <p style={S.sub}>
           This desk sends real RFQs to real freight agents. Accounts are created by

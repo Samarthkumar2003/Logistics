@@ -851,7 +851,7 @@ export default function Dashboard() {
         <div className="sidebar-brand">
           <span className="brand-icon">🚢</span>
           <div>
-            <div className="brand-name">Logistics Copilot</div>
+            <div className="brand-name">FreightMind</div>
             <div className="brand-sub">Operations Dashboard</div>
           </div>
         </div>
