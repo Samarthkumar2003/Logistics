@@ -5,12 +5,22 @@ import Link from 'next/link';
 import {
   ManualNote, ManualRecipient, dedupeByEmail, describeSplit, mergeManualRecipients,
   splitManualTokens, tokenizeEmails,
-} from './manualRecipients';
+} from './manualRecipients.ts';
 import {
   CONTAINER_OPTIONS, ContainerSelection, MAX_QUANTITY, MIN_QUANTITY, NO_CONTAINERS,
   containerSizeText, containerSummary, hasContainers, quantityOf, setManualText,
   setQuantity, toggleContainer, toggleManual,
-} from './containerSize';
+} from './containerSize.ts';
+import {
+  CATEGORY_LABELS, CATEGORY_OPTIONS, CATEGORY_SHORT, type CategoryChoice,
+  type CategoryKey, isCategory,
+} from './categories.ts';
+import {
+  type CategoryDraft, type DraftMap, type DraftText, acknowledgeDraft,
+  describeRedraft, editDraft,
+  missingDrafts, presentCategories, recipientsFor, redraft, resetDraft, seedDrafts,
+  syncDrafts, toWireDrafts, unreviewedDrafts,
+} from './categoryDrafts.ts';
 import { apiFetch } from '@/lib/api';
 
 /* ─── Types ─────────────────────────────────────────────────────── */
@@ -32,12 +42,11 @@ interface SourceEmail {
   body: string;
 }
 
-interface DraftPreview {
-  reference: string;
-  vendor_name: string;
-  subject: string;
-  body: string;
-  note: string;
+/** A recipient, with the category that decides which draft they are sent. */
+interface Recipient {
+  agent_name: string;
+  email: string;
+  category: CategoryKey;
 }
 
 interface RFQJob {
@@ -263,9 +272,13 @@ function ContainerMultiSelect({ selection, onChange }: {
  *  answer with a line of text saying it had been selected; a chip is stronger,
  *  because the category dropdowns are collapsed by default and the checkbox it
  *  ticks is therefore off-screen. */
-function RecipientChip({ name, email, onRemove }: {
+function RecipientChip({ name, email, category, onRemove }: {
   name: string;
   email: string;
+  /** Which draft this recipient will be sent. Shown on the chip because the
+   *  category dropdowns are collapsed by default, so the checkbox that proves it
+   *  is off-screen - and unlike before, the choice changes what they receive. */
+  category: CategoryKey;
   onRemove: () => void;
 }) {
   return (
@@ -274,7 +287,10 @@ function RecipientChip({ name, email, onRemove }: {
       background: 'var(--blue-tint-2)', border: '1px solid var(--blue)', borderRadius: 14,
       padding: '4px 6px 4px 10px', fontSize: 11, color: 'var(--text)',
     }}>
-      {name} · {email}
+      <span style={{
+        fontSize: 9, fontWeight: 700, letterSpacing: '0.05em', color: 'var(--blue-text)',
+      }}>{CATEGORY_SHORT[category]}</span>
+      {name} {'\u00b7'} {email}
       <button
         type="button"
         onClick={onRemove}
@@ -285,6 +301,115 @@ function RecipientChip({ name, email, onRemove }: {
         }}
       >×</button>
     </span>
+  );
+}
+
+/* ─── Draft panels ──────────────────────────────────────────────── */
+function PanelBadge({ tone, children }: { tone: 'error' | 'warn' | 'info'; children: string }) {
+  const colour = tone === 'error' ? 'var(--red)' : tone === 'warn' ? 'var(--amber)' : 'var(--blue-soft)';
+  return (
+    <span style={{
+      fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', color: colour,
+      border: `1px solid ${colour}`, borderRadius: 10, padding: '1px 7px',
+    }}>{children}</span>
+  );
+}
+
+/** One category's draft, and who it is addressed to.
+ *
+ *  Collapsible because three twelve-row textareas bury the send button, and this
+ *  page already owns its own scroll for that reason. The header therefore has to
+ *  carry everything needed to decide whether to open it: which kind of vendor,
+ *  how many, exactly who, and whether the text has been touched.
+ *
+ *  The recipient list here is deliberately read-only. Selection stays in the
+ *  dropdowns above; a second place to remove a recipient is a second place for
+ *  the two to disagree about who is being written to.
+ */
+function DraftPanel({ category, addressees, draft, open, onToggle, onChange, onReset }: {
+  category: CategoryKey;
+  addressees: Recipient[];
+  draft: CategoryDraft;
+  open: boolean;
+  onToggle: () => void;
+  onChange: (patch: Partial<DraftText>) => void;
+  onReset: () => void;
+}) {
+  const blank = !draft.subject.trim() || !draft.body.trim();
+  const edge = blank ? 'var(--red-line)' : draft.isNew ? 'var(--amber)' : 'var(--purple)';
+
+  return (
+    <div style={{
+      background: 'var(--surface)', border: `1px solid ${edge}`,
+      borderRadius: 8, marginBottom: 12,
+    }}>
+      <div onClick={onToggle} style={{ padding: '11px 14px', cursor: 'pointer' }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap' }}>
+          <span style={{ color: 'var(--muted)', fontSize: 10 }}>
+            {open ? '\u25bc' : '\u25b6'}
+          </span>
+          <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--purple)' }}>
+            {CATEGORY_LABELS[category]}
+          </span>
+          <span style={{ fontSize: 11, color: 'var(--muted)' }}>
+            {'\u00b7'} {addressees.length} recipient{addressees.length === 1 ? '' : 's'}
+          </span>
+          {blank && <PanelBadge tone="error">BLANK</PanelBadge>}
+          {!blank && draft.isNew && <PanelBadge tone="warn">NEW - REVIEW</PanelBadge>}
+          {!blank && !draft.isNew && draft.edited && <PanelBadge tone="info">EDITED</PanelBadge>}
+        </div>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 8 }}>
+          {addressees.map(r => (
+            <span key={r.email} style={{
+              fontSize: 10, color: 'var(--muted-soft)', background: 'var(--sunken)',
+              border: '1px solid var(--border)', borderRadius: 10, padding: '2px 8px',
+            }}>{r.agent_name} {'\u00b7'} {r.email}</span>
+          ))}
+        </div>
+      </div>
+
+      {open && (
+        <div style={{ padding: '0 14px 14px' }}>
+          <label style={{ fontSize: 11, color: 'var(--muted-soft)', display: 'block', marginBottom: 4 }}>
+            Subject
+          </label>
+          <input
+            value={draft.subject}
+            onChange={e => onChange({ subject: e.target.value })}
+            style={{
+              width: '100%', fontSize: 12, color: 'var(--text)', marginBottom: 12,
+              background: 'var(--sunken)', border: '1px solid var(--border)', borderRadius: 6,
+              padding: '8px 10px', boxSizing: 'border-box',
+            }}
+          />
+          <label style={{ fontSize: 11, color: 'var(--muted-soft)', display: 'block', marginBottom: 4 }}>
+            Body
+          </label>
+          <textarea
+            value={draft.body}
+            onChange={e => onChange({ body: e.target.value })}
+            rows={9}
+            style={{
+              width: '100%', fontSize: 12, color: 'var(--text-soft)', lineHeight: 1.6,
+              whiteSpace: 'pre-wrap', background: 'var(--sunken)', border: '1px solid var(--border)',
+              borderRadius: 6, padding: 12, boxSizing: 'border-box', resize: 'vertical',
+              fontFamily: 'inherit',
+            }}
+          />
+          {draft.edited && (
+            <button
+              type="button"
+              onClick={onReset}
+              style={{
+                marginTop: 8, background: 'transparent', border: '1px solid var(--border-strong)',
+                borderRadius: 6, color: 'var(--muted-soft)', fontSize: 11, fontWeight: 600,
+                padding: '5px 12px', cursor: 'pointer',
+              }}
+            >{'\u21ba'} Reset to draft</button>
+          )}
+        </div>
+      )}
+    </div>
   );
 }
 
@@ -310,27 +435,44 @@ export default function SendRequestPage() {
   const [commodity, setCommodity] = useState('');
   const [mode, setMode] = useState('sea_freight');
   const [weightKg, setWeightKg] = useState('');
+  // Optional door addresses. Deliberately absent from the extraction in init():
+  // a guessed address is worse than a blank one, same reasoning as Size above.
+  const [sendingAddress, setSendingAddress] = useState('');
+  const [receivingAddress, setReceivingAddress] = useState('');
 
   const [phase, setPhase] = useState<'loading' | 'ready' | 'sending' | 'sent' | 'error'>('loading');
   const [extracting, setExtracting] = useState(false);
   const [errorMsg, setErrorMsg] = useState('');
   const [result, setResult] = useState<SendRFQResponse | null>(null);
-  const [preview, setPreview] = useState<DraftPreview | null>(null);
   const [previewing, setPreviewing] = useState(false);
-  // The user-editable draft, seeded from the preview. This exact text is what
-  // gets sent (one shared draft for all selected agents).
-  const [editedSubject, setEditedSubject] = useState('');
-  const [editedBody, setEditedBody] = useState('');
-  // True when the editor was opened without an AI draft (generation failed, e.g.
-  // LLM quota) — the user composes by hand. Send works identically.
-  const [manualDraft, setManualDraft] = useState(false);
 
-  // Ad-hoc recipients typed in by hand — agents not in the DB list. Merged with
-  // the checkbox-selected agents at preview/send time. Keyed by lowercased email.
+  // The one draft the model produced. Kept apart from the panels so a panel can
+  // be told from the text it started as: that comparison is what makes "edited"
+  // honest, and what lets Reset put a panel back.
+  const [seed, setSeed] = useState<DraftText | null>(null);
+  // One editable draft per vendor category, seeded from `seed` and diverging only
+  // where the operator edits. Never read directly - read `drafts` below, which is
+  // this map re-aligned with the current recipient list.
+  const [draftsRaw, setDraftsRaw] = useState<DraftMap>({});
+  const [openPanels, setOpenPanels] = useState<Set<CategoryKey>>(new Set());
+  // The operator's sign-off, so a hand-composed draft can end in the real one
+  // rather than have it bolted on server-side. Empty means the profile has no
+  // display name, which is a refusal the server will repeat on send.
+  const [signature, setSignature] = useState('');
+  const [signatureError, setSignatureError] = useState('');
+  // What a re-draft did, shown above the panels. A re-draft that spared an edited
+  // panel has to say so, or the operator will assume the new wording is everywhere.
+  const [draftNote, setDraftNote] = useState('');
+
+  // Ad-hoc recipients typed in by hand, not on the roster. Merged with the
+  // checkbox selection at draft and send time. Keyed by lowercased email.
   const [manualAgents, setManualAgents] = useState<ManualRecipient[]>([]);
   const [manualEmailInput, setManualEmailInput] = useState('');
   const [manualNameInput, setManualNameInput] = useState('');
   const [manualNote, setManualNote] = useState<ManualNote | null>(null);
+  // Which kind of vendor a hand-typed address is. Mandatory and with no default:
+  // it decides which draft they receive, so there is nothing safe to guess.
+  const [manualCategory, setManualCategory] = useState<CategoryChoice>('');
 
   // Files attached to the RFQ — same set goes to every selected agent.
   const [attachments, setAttachments] = useState<PendingAttachment[]>([]);
@@ -364,7 +506,15 @@ export default function SendRequestPage() {
   }
 
   // Starter template built from the form, used when composing manually.
-  function manualStarter() {
+  //
+  // It ends in the operator's real signature, fetched from GET /rfq-signature and
+  // laid out exactly as the server's _signed() does: body, blank line, name,
+  // company. It used to end on the literal line "Best regards," with nothing
+  // after it, and because the backend signs the model's drafts but deliberately
+  // never touches operator-supplied text, every hand-composed RFQ went to a
+  // freight vendor unsigned. With no signature available the sign-off is left off
+  // rather than faked, so the gap is visible; the send is refused anyway.
+  function manualStarter(): DraftText {
     const modeLabel = mode.replace('_', ' ');
     const subject = `Request for Quotation - ${modeLabel} ${originPort.trim()} to ${destPort.trim()}`.trim();
     const details = [
@@ -374,22 +524,44 @@ export default function SendRequestPage() {
       commodity.trim() ? `Commodity: ${commodity.trim()}` : null,
       size.trim() ? `Size: ${size.trim()}` : null,
       weightKg.trim() ? `Weight: ${weightKg.trim()} kg` : null,
+      sendingAddress.trim() ? `Pickup (sending) address: ${sendingAddress.trim()}` : null,
+      receivingAddress.trim() ? `Delivery (receiving) address: ${receivingAddress.trim()}` : null,
     ].filter(Boolean);
     const body = [
       'Dear Team,', '',
       'We have the following shipment enquiry and would appreciate your best rate and transit time:', '',
       ...details, '',
-      'Please share your best quotation at the earliest.', '', 'Best regards,',
+      'Please share your best quotation at the earliest.',
+      ...(signature ? ['', signature] : []),
     ].join('\n');
     return { subject, body };
   }
 
+  /** Why a recipient is needed before there is anything to draft.
+   *
+   *  The panel stack is derived from the recipient list - one panel per category
+   *  that somebody is in - so with nobody selected there is no panel to put text
+   *  in. Drafting anyway used to work, because there was a single panel and the
+   *  preview addressed a placeholder agent; now it would spend a model call and
+   *  put nothing on screen, which reads as the button being broken.
+   */
+  function needsRecipientFirst(): boolean {
+    if (recipients.length > 0) return false;
+    setErrorMsg(
+      'Pick at least one agent first. The draft is written per kind of agent, so '
+      + 'there is nothing to draft until somebody is selected.',
+    );
+    return true;
+  }
+
+  /** Open every present panel on a starter written from the form, with no model
+   *  call. Same shape as drafting: one text, copied into each category. */
   function openManualDraft() {
-    const { subject, body } = manualStarter();
-    setEditedSubject(subject);
-    setEditedBody(body);
-    setManualDraft(true);
-    setPreview({ reference: '', vendor_name: '', subject, body, note: '' });
+    if (needsRecipientFirst()) return;
+    const starter = manualStarter();
+    setSeed(starter);
+    setDraftsRaw(seedDrafts(present, starter));
+    setOpenPanels(new Set(present.slice(0, 1)));
   }
 
   useEffect(() => {
@@ -410,9 +582,26 @@ export default function SendRequestPage() {
         setPhase('error');
         return;
       }
+      // 2. The sign-off these RFQs will carry. Not fatal to the page: the form is
+      // still worth filling in, and the server repeats the refusal on send. But
+      // asking now is what surfaces a missing display name on load instead of
+      // after the operator has done all the work.
+      try {
+        const res = await apiFetch(`/rfq-signature`);
+        if (res.ok) {
+          setSignature(((await res.json()).signature || '').trim());
+        } else {
+          let detail = `Server error ${res.status}`;
+          try { detail = (await res.json()).detail || detail; } catch { /* non-JSON */ }
+          setSignatureError(detail);
+        }
+      } catch {
+        setSignatureError('Could not read your operator profile, so drafts cannot be signed.');
+      }
+
       setPhase('ready');
 
-      // 2. Prefill from the customer email via the intake agent
+      // 3. Prefill from the customer email via the intake agent
       let email: SourceEmail | null = null;
       try {
         const raw = sessionStorage.getItem('sendRequestEmail');
@@ -462,7 +651,9 @@ export default function SendRequestPage() {
     // had run the updater, so no message ever reached the user; and the updater
     // pushed into arrays declared outside itself, so its development double-invoke
     // added every address twice, producing duplicate chips on one duplicate key.
-    const split = splitManualTokens(tokens, agents, manualAgents, manualNameInput);
+    const split = splitManualTokens(
+      tokens, agents, manualAgents, manualNameInput, manualCategory,
+    );
 
     if (split.added.length > 0) {
       // Pure updater — re-filters against `prev`, so running it twice is a no-op.
@@ -478,8 +669,10 @@ export default function SendRequestPage() {
       setTextSelectedIds(prev => new Set([...prev, ...ids]));
     }
 
-    // Keep any invalid tokens in the box so the user can fix them; clear the rest.
-    setManualEmailInput(split.invalid.join(', '));
+    // Keep anything the operator still has to act on in the box - a typo to fix,
+    // or an address waiting on a category choice - and clear the rest. Dropping a
+    // held-back address would leave a note about an email no longer on screen.
+    setManualEmailInput([...split.invalid, ...split.needsCategory].join(', '));
     if (split.added.length > 0 || split.onRoster.length > 0) setManualNameInput('');
     setManualNote(describeSplit(split));
     setErrorMsg('');
@@ -489,17 +682,61 @@ export default function SendRequestPage() {
     setManualAgents(prev => prev.filter(m => m.email !== email));
   }
 
-  // Recipients = checkbox-selected DB agents + hand-entered emails, one per address.
-  // The dedup is not decoration. These are two independent states that can name the
-  // same person, the count below is what the send button promises, and this list is
-  // what gets posted — so any address appearing twice here is a second enquiry to a
-  // vendor under a second reference, sent without anything on screen showing it.
-  const selectedAgents = agents.filter(a => selected.has(a.id));
-  const recipients = dedupeByEmail([
-    ...selectedAgents.map(a => ({ agent_name: a.agent_name, email: a.email })),
+  // Recipients = checkbox-selected DB agents + hand-entered emails, one per
+  // address, each carrying the category that decides which draft it is sent.
+  //
+  // The dedup is not decoration. These are two independent states that can name
+  // the same person, the count below is what the send button promises, and this
+  // list is what gets posted - so any address appearing twice here is a second
+  // enquiry to a vendor under a second reference, sent without anything on screen
+  // showing it.
+  //
+  // The category filter is belt to the braces elsewhere: the dropdowns are built
+  // from byCategory, and typing a roster address refuses a row filed under
+  // anything else. A recipient with no panel to belong to must not reach the
+  // payload by any route.
+  const selectedAgents = agents.filter(a => selected.has(a.id) && isCategory(a.category));
+  const recipients: Recipient[] = dedupeByEmail([
+    ...selectedAgents.map(a => ({
+      agent_name: a.agent_name, email: a.email, category: a.category as CategoryKey,
+    })),
     ...manualAgents,
-  ]);
+  ]) as Recipient[];
   const totalRecipients = recipients.length;
+
+  // Categories that actually have a recipient, and so have a panel. A panel for a
+  // category nobody is selected in would invite the operator to write text that
+  // reaches no one.
+  const present = presentCategories(recipients);
+  const hasDrafts = Object.keys(draftsRaw).length > 0;
+
+  // The panels as they should be now, rather than as they were when the model last
+  // answered. Re-aligning here instead of in an effect keeps it a pure derivation:
+  // syncDrafts hands back its input untouched when nothing moved, and every write
+  // below is applied to THIS map - so a panel that appeared because an agent was
+  // ticked after drafting is seeded and editable straight away, which is the one
+  // ordering this whole design has to survive.
+  const drafts = hasDrafts ? syncDrafts(draftsRaw, present, seed) : draftsRaw;
+  const blocked = hasDrafts ? missingDrafts(drafts, present) : [];
+  const unreviewed = hasDrafts ? unreviewedDrafts(drafts, present) : [];
+
+  function togglePanel(key: CategoryKey) {
+    setOpenPanels(prev => {
+      const next = new Set(prev);
+      if (next.has(key)) next.delete(key); else next.add(key);
+      return next;
+    });
+    // Opening or closing a panel counts as having seen it.
+    setDraftsRaw(acknowledgeDraft(drafts, key));
+  }
+
+  function patchDraft(key: CategoryKey, patch: Partial<DraftText>) {
+    setDraftsRaw(editDraft(drafts, key, patch, seed));
+  }
+
+  function handleReset(key: CategoryKey) {
+    setDraftsRaw(resetDraft(drafts, key, seed));
+  }
 
   // Roster agents pulled in by typing an address, shown as chips next to the box the
   // operator typed into. Intersected with `selected` rather than trusted on its own,
@@ -515,12 +752,18 @@ export default function SendRequestPage() {
   async function handlePreview() {
     setErrorMsg('');
     if (!originPort.trim() || !destPort.trim()) { setErrorMsg('Origin and destination ports are required'); return; }
+    if (needsRecipientFirst()) return;
 
-    // Preview addresses the first recipient (selected agent or hand-entered
-    // email), or a placeholder if none picked yet.
-    const sampleAgent = recipients.length > 0
-      ? { agent_name: recipients[0].agent_name, email: recipients[0].email }
-      : null;
+    // One model call, whose answer seeds every panel - the three drafts start
+    // identical and diverge only where the operator edits one. Three calls would
+    // cost three times as much and produce three different texts, which is the
+    // opposite of what the panels are for.
+    //
+    // The prompt is still given one agent for context, so the wording can be
+    // addressed to that vendor and then copied to the other categories. That was
+    // already true when a single draft went to everyone; it is merely easier to
+    // notice now that the operator can see all three.
+    const sampleAgent = { agent_name: recipients[0].agent_name, email: recipients[0].email };
 
     setPreviewing(true);
     try {
@@ -534,6 +777,8 @@ export default function SendRequestPage() {
           commodity,
           mode,
           weight_kg: weightKg.trim() ? parseFloat(weightKg) : null,
+          sending_address: sendingAddress,
+          receiving_address: receivingAddress,
           agent: sampleAgent,
         }),
       });
@@ -543,15 +788,23 @@ export default function SendRequestPage() {
         throw new Error(detail);
       }
       const data = await res.json();
-      setManualDraft(false);
-      setPreview(data);
-      setEditedSubject(data.subject || '');
-      setEditedBody(data.body || '');
+      const fresh: DraftText = { subject: data.subject || '', body: data.body || '' };
+      setSeed(fresh);
+      if (hasDrafts) {
+        // Re-draft. Edited panels survive and are named; see describeRedraft.
+        const outcome = redraft(drafts, present, fresh);
+        setDraftsRaw(outcome.next);
+        setDraftNote(describeRedraft(outcome, key => CATEGORY_LABELS[key]) ?? '');
+      } else {
+        setDraftsRaw(seedDrafts(present, fresh));
+        setDraftNote('');
+      }
+      setOpenPanels(new Set(present.slice(0, 1)));
     } catch (err: unknown) {
       // Draft generation failed (commonly LLM quota). Don't dead-end — open a
       // manual draft seeded from the form so the user can still compose & send.
       const msg = err instanceof Error ? err.message : 'Preview failed';
-      setErrorMsg(`AI draft unavailable (${msg}) — compose the draft manually below.`);
+      setErrorMsg(`AI draft unavailable (${msg}) - compose the drafts manually below.`);
       openManualDraft();
     }
     setPreviewing(false);
@@ -561,6 +814,18 @@ export default function SendRequestPage() {
     setErrorMsg('');
     if (recipients.length === 0) { setErrorMsg('Select at least one agent or add an email'); return; }
     if (!originPort.trim() || !destPort.trim()) { setErrorMsg('Origin and destination ports are required'); return; }
+    // A recipient whose panel is blank is refused here, and again on the server.
+    // The alternative - sending the categories that are filled in and quietly
+    // dropping the rest - reports success for everyone else, so there is nothing
+    // on screen to tell the operator a whole category went nowhere.
+    if (blocked.length > 0) {
+      setErrorMsg(
+        `Nothing sent. No draft written for ${blocked.map(c => CATEGORY_LABELS[c]).join(', ')} - `
+        + `fill those panels in, or remove their recipients.`,
+      );
+      setOpenPanels(new Set(blocked));
+      return;
+    }
 
     setPhase('sending');
     try {
@@ -574,15 +839,21 @@ export default function SendRequestPage() {
           commodity,
           mode,
           weight_kg: weightKg.trim() ? parseFloat(weightKg) : null,
+          sending_address: sendingAddress,
+          receiving_address: receivingAddress,
+          // Each recipient carries its category, which is how the server knows
+          // which panel's text to send it.
           agents: recipients,
           customer_sender: sourceEmail?.sender || '',
           customer_subject: sourceEmail?.subject || '',
           customer_body: sourceEmail?.body || '',
           // Links every RFQ from this request back to the customer email (Phase 1).
           customer_email_id: sourceEmail?.id || '',
-          // Send the edited draft verbatim when one has been previewed/edited.
-          // Omitted otherwise, so the backend falls back to per-agent generation.
-          ...(preview ? { edited_subject: editedSubject, edited_body: editedBody } : {}),
+          // The reviewed panels, keyed by category, sent verbatim. Omitted only
+          // when the operator never opened the draft editor at all, which is the
+          // one case where the model still writes a draft per agent. A partly
+          // filled map is refused rather than topped up, above and on the server.
+          ...(hasDrafts ? { drafts: toWireDrafts(drafts, present) } : {}),
           attachments: attachments.map(({ filename, content_type, data_base64 }) => ({ filename, content_type, data_base64 })),
         }),
       });
@@ -700,6 +971,19 @@ export default function SendRequestPage() {
               </div>
             )}
 
+            {/* No display name on the operator profile means nothing can be signed.
+                Said here, on load, rather than discovered after the form is filled
+                in: the server refuses to draft or send without it either way. */}
+            {signatureError && (
+              <div style={{
+                background: 'var(--surface)', border: '1px solid var(--red-line)', borderRadius: 8,
+                padding: '10px 14px', marginBottom: 20, fontSize: 11, color: 'var(--red)',
+                lineHeight: 1.5,
+              }}>
+                Drafts cannot be signed, so sending will be refused: {signatureError}
+              </div>
+            )}
+
             {/* Shipment fields */}
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 16, marginBottom: 20 }}>
               <div>
@@ -727,6 +1011,29 @@ export default function SendRequestPage() {
                 <span style={labelStyle}>Weight (kg, optional)</span>
                 <input style={inputStyle} value={weightKg} onChange={e => setWeightKg(e.target.value)} placeholder="leave blank if unknown" type="number" />
               </div>
+              {/* Full width: a street address does not fit a half column. maxLength
+                  mirrors MAX_ADDRESS_CHARS on the server, so the cap is felt while
+                  typing instead of arriving as a 422 after the draft is requested. */}
+              <div style={{ gridColumn: '1 / -1' }}>
+                <span style={labelStyle}>Sending Address (optional)</span>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 62, resize: 'vertical', fontFamily: 'inherit' }}
+                  value={sendingAddress}
+                  onChange={e => setSendingAddress(e.target.value)}
+                  maxLength={500}
+                  placeholder="Pickup / factory address - leave blank for a port-to-port enquiry"
+                />
+              </div>
+              <div style={{ gridColumn: '1 / -1' }}>
+                <span style={labelStyle}>Receiving Address (optional)</span>
+                <textarea
+                  style={{ ...inputStyle, minHeight: 62, resize: 'vertical', fontFamily: 'inherit' }}
+                  value={receivingAddress}
+                  onChange={e => setReceivingAddress(e.target.value)}
+                  maxLength={500}
+                  placeholder="Final delivery address - leave blank for a port-to-port enquiry"
+                />
+              </div>
             </div>
 
             {/* Agent multi-selects */}
@@ -745,21 +1052,44 @@ export default function SendRequestPage() {
             {/* Manual email entry — add recipients not in the agent list */}
             <div style={{ marginBottom: 24 }}>
               <span style={labelStyle}>Add emails manually</span>
-              <div style={{ display: 'flex', gap: 8 }}>
+              {/* Category first, and required. It is not a label: it decides which
+                  of the drafts below this address is sent, so there is no safe
+                  default and Add refuses without it. Picking it also files the
+                  address under a real category when the send remembers it, which
+                  is what stops hand-entered agents disappearing from the three
+                  dropdowns the moment they are saved. */}
+              <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
+                <select
+                  value={manualCategory}
+                  onChange={e => { setManualCategory(e.target.value as CategoryChoice); setManualNote(null); }}
+                  aria-label="Kind of agent"
+                  style={{
+                    ...inputStyle, flex: 2, cursor: 'pointer',
+                    color: manualCategory ? 'var(--blue-soft)' : 'var(--muted)',
+                    border: `1px solid ${manualCategory ? 'var(--blue)' : 'var(--input-border)'}`,
+                  }}
+                >
+                  <option value="">What kind of agent is this? (required)</option>
+                  {CATEGORY_OPTIONS.map(o => (
+                    <option key={o.key} value={o.key}>{o.label}</option>
+                  ))}
+                </select>
                 <input
                   style={{ ...inputStyle, flex: 1 }}
                   value={manualNameInput}
                   onChange={e => setManualNameInput(e.target.value)}
                   placeholder="Name (optional)"
                 />
+              </div>
+              <div style={{ display: 'flex', gap: 8 }}>
                 <input
-                  style={{ ...inputStyle, flex: 2 }}
+                  style={{ ...inputStyle, flex: 1 }}
                   value={manualEmailInput}
                   onChange={e => { setManualEmailInput(e.target.value); setManualNote(null); }}
                   onKeyDown={e => {
                     if (e.key === 'Enter') { e.preventDefault(); addManualEmail(); }
                   }}
-                  placeholder="email@example.com — press Enter to add"
+                  placeholder="email@example.com - press Enter to add"
                   type="email"
                 />
                 <button
@@ -784,6 +1114,7 @@ export default function SendRequestPage() {
                       key={`roster-${a.id}`}
                       name={a.agent_name}
                       email={a.email}
+                      category={a.category as CategoryKey}
                       onRemove={() => removeTextSelected(a.id)}
                     />
                   ))}
@@ -792,6 +1123,7 @@ export default function SendRequestPage() {
                       key={m.email}
                       name={m.agent_name}
                       email={m.email}
+                      category={m.category}
                       onRemove={() => removeManualEmail(m.email)}
                     />
                   ))}
@@ -842,50 +1174,50 @@ export default function SendRequestPage() {
               )}
             </div>
 
-            {/* Draft preview panel */}
-            {preview && (
-              <div style={{
-                background: 'var(--surface)', border: '1px solid var(--purple)', borderRadius: 8,
-                padding: 16, marginBottom: 20,
-              }}>
-                <div style={{ display: 'flex', alignItems: 'center', marginBottom: 10 }}>
-                  <span style={{ fontSize: 12, fontWeight: 700, color: 'var(--purple)' }}>
-                    {manualDraft ? '✍️ COMPOSE DRAFT' : '✏️ EDIT DRAFT'} — sent to all {totalRecipients} agent{totalRecipients === 1 ? '' : 's'}
-                  </span>
-                  <button
-                    onClick={() => { setPreview(null); setManualDraft(false); }}
-                    style={{
-                      marginLeft: 'auto', background: 'transparent', border: 'none',
-                      color: 'var(--muted)', fontSize: 16, cursor: 'pointer', padding: '0 4px',
-                    }}
-                  >×</button>
-                </div>
+            {/* Draft panels - one per category that has a recipient */}
+            {hasDrafts && (
+              <div style={{ marginBottom: 20 }}>
                 <div style={{ fontSize: 11, color: 'var(--muted)', marginBottom: 10 }}>
-                  Edit freely. Each agent gets its own unique RFQ reference added to the subject
-                  automatically, so replies still match the right agent.
+                  One draft per kind of agent, all seeded from the same model draft. Editing
+                  one leaves the others alone, so an unedited panel sends exactly the text
+                  below. Each agent still gets its own unique RFQ reference in the subject,
+                  so replies match the right agent.
                 </div>
-                <label style={{ fontSize: 11, color: 'var(--muted-soft)', display: 'block', marginBottom: 4 }}>Subject</label>
-                <input
-                  value={editedSubject}
-                  onChange={e => setEditedSubject(e.target.value)}
-                  style={{
-                    width: '100%', fontSize: 12, color: 'var(--text)', marginBottom: 12,
-                    background: 'var(--sunken)', border: '1px solid var(--border)', borderRadius: 6,
-                    padding: '8px 10px', boxSizing: 'border-box',
-                  }}
-                />
-                <label style={{ fontSize: 11, color: 'var(--muted-soft)', display: 'block', marginBottom: 4 }}>Body</label>
-                <textarea
-                  value={editedBody}
-                  onChange={e => setEditedBody(e.target.value)}
-                  rows={12}
-                  style={{
-                    width: '100%', fontSize: 12, color: 'var(--text-soft)', lineHeight: 1.6,
-                    whiteSpace: 'pre-wrap', background: 'var(--sunken)', border: '1px solid var(--border)',
-                    borderRadius: 6, padding: 12, boxSizing: 'border-box', resize: 'vertical',
-                    fontFamily: 'inherit',
-                  }}
-                />
+                {draftNote && (
+                  <div style={{ fontSize: 11, color: 'var(--amber)', marginBottom: 10 }}>
+                    {draftNote}
+                  </div>
+                )}
+                {present.map(key => {
+                  const draft = drafts[key];
+                  if (!draft) return null;
+                  return (
+                    <DraftPanel
+                      key={key}
+                      category={key}
+                      addressees={recipientsFor(recipients, key)}
+                      draft={draft}
+                      open={openPanels.has(key)}
+                      onToggle={() => togglePanel(key)}
+                      onChange={patch => patchDraft(key, patch)}
+                      onReset={() => handleReset(key)}
+                    />
+                  );
+                })}
+                {unreviewed.length > 0 && (
+                  <div style={{ fontSize: 11, color: 'var(--amber)' }}>
+                    Appeared after drafting and not opened yet:{' '}
+                    {unreviewed.map(c => CATEGORY_LABELS[c]).join(', ')}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Said before the operator presses Send, not only after. */}
+            {blocked.length > 0 && (
+              <div style={{ fontSize: 11, color: 'var(--red)', marginBottom: 10 }}>
+                Nothing will send to {blocked.map(c => CATEGORY_LABELS[c]).join(', ')} until
+                those panels have both a subject and a body.
               </div>
             )}
 
@@ -902,9 +1234,9 @@ export default function SendRequestPage() {
                   cursor: previewing ? 'default' : 'pointer',
                 }}
               >
-                {previewing ? '⏳ Drafting...' : (preview ? '🔄 Re-draft' : '👁 Draft & edit')}
+                {previewing ? '⏳ Drafting...' : (hasDrafts ? '🔄 Re-draft' : '👁 Draft & edit')}
               </button>
-              {!preview && (
+              {!hasDrafts && (
                 <button
                   onClick={openManualDraft}
                   disabled={previewing || phase === 'sending'}
@@ -926,8 +1258,8 @@ export default function SendRequestPage() {
                 }}
               >
                 {phase === 'sending'
-                  ? (preview ? 'Sending edited draft...' : 'Generating drafts & sending...')
-                  : `${preview ? 'Send edited draft' : 'Send RFQ'} to ${totalRecipients} agent${totalRecipients === 1 ? '' : 's'}`}
+                  ? (hasDrafts ? 'Sending reviewed drafts...' : 'Generating drafts & sending...')
+                  : `${hasDrafts ? 'Send reviewed drafts' : 'Send RFQ'} to ${totalRecipients} agent${totalRecipients === 1 ? '' : 's'}`}
               </button>
             </div>
           </>

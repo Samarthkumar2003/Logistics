@@ -150,20 +150,22 @@ def _fake_model(monkeypatch, body="Model body."):
 def test_the_model_branch_signs_the_body(monkeypatch):
     _fake_model(monkeypatch)
     entry = rfq_service._draft_for_agent(
-        rfq_service.SelectedAgent("Alpha", "alpha@example.com"),
-        {"origin": "A", "destination": "B"}, "", "", OPERATOR,
+        rfq_service.SelectedAgent("Alpha", "alpha@example.com", "CHA"),
+        {"origin": "A", "destination": "B"}, None, OPERATOR,
     )
     assert entry["draft"].body.endswith("Asha Nair\nBhatia Shipping Group\n")
 
 
 def test_the_edited_branch_is_not_signed_twice(monkeypatch):
-    """Edited text came back from preview_draft already signed, and the operator
-    may have adjusted it. Appending again would print the name twice."""
+    """Operator text arrives already signed - preview_draft appends the signature,
+    and a hand-composed draft is built in the browser from GET /rfq-signature - and
+    the operator may have adjusted it. Appending again would print the name twice."""
     _fake_model(monkeypatch)
     edited = "My own wording.\n\nAsha Nair\nBhatia Shipping Group\n"
     entry = rfq_service._draft_for_agent(
-        rfq_service.SelectedAgent("Alpha", "alpha@example.com"),
-        {"origin": "A", "destination": "B"}, "Subject RFQ-1", edited, OPERATOR,
+        rfq_service.SelectedAgent("Alpha", "alpha@example.com", "CHA"),
+        {"origin": "A", "destination": "B"},
+        {"CHA": {"subject": "Subject RFQ-1", "body": edited}}, OPERATOR,
     )
     assert entry["draft"].body == edited
     assert entry["draft"].body.count("Asha Nair") == 1

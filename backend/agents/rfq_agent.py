@@ -52,6 +52,28 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str,
     origin = shipment_data.get("origin") or "Unknown"
     destination = shipment_data.get("destination") or "Unknown"
     mode = shipment_data.get("mode") or "sea_freight"
+    sending_address = shipment_data.get("sending_address") or ""
+    receiving_address = shipment_data.get("receiving_address") or ""
+
+    # A door address changes what is being asked for: with a pickup or delivery
+    # point the vendor has to price inland haulage, not just port to port. Said
+    # explicitly, and ONLY when an address is present, so a plain port-to-port RFQ
+    # never acquires a door-to-door clause nobody asked for.
+    #
+    # The "do not invent" instruction is load-bearing. Asked to write a
+    # professional email around a half-typed address, a model will helpfully
+    # complete it - inferring a postcode or a city - and that lands in a real
+    # quotation request as though the operator had verified it.
+    door_clause = ""
+    if sending_address or receiving_address:
+        door_clause = (
+            " A pickup and/or delivery address is given in the shipment details. "
+            "Treat it as a door leg: ask the vendor to include inland haulage and "
+            "any door charges for that leg, and to state which legs their rate "
+            "covers. Repeat each address verbatim so the vendor can price it. Do "
+            "NOT invent, complete, correct or reformat an address - if it looks "
+            "partial, quote it exactly as given."
+        )
 
     system_prompt = (
         "You are the RFQ (Request for Quotation) Agent for a logistics company. "
@@ -69,6 +91,7 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str,
         "title, no company line. The signature is appended automatically after "
         "you return, so anything you add there is either duplicated or wrong. "
         "Never emit a square-bracketed placeholder such as [Your Name]."
+        + door_clause
     )
 
     agents_context = [
@@ -88,6 +111,8 @@ def generate_rfq_drafts(shipment_data: dict, agents: list[dict], reference: str,
         + (f"Container/Size: {size}\n" if size else "")
         + (f"Weight: {weight} kg\n" if weight is not None else "")
         + (f"Commodity: {commodity}\n" if commodity else "")
+        + (f"Pickup (sending) address: {sending_address}\n" if sending_address else "")
+        + (f"Delivery (receiving) address: {receiving_address}\n" if receiving_address else "")
         + "\n"
         f"VENDORS TO DRAFT FOR (context only):\n"
         + "\n".join(agents_context)

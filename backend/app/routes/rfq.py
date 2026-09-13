@@ -5,10 +5,10 @@ here is driven by an explicit operator action.
 """
 
 import logging
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 from fastapi import APIRouter, Request
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from backend.agents.intake_agent import ShipmentDetails, run_intake_agent
 from backend.app.errors import AppException
@@ -27,9 +27,36 @@ class EmailInput(BaseModel):
     body: str
 
 
+# The three kinds of vendor, mirrored in frontend/src/app/send-request/categories.ts
+# and pinned by a CHECK constraint on agents.category.
+#
+# This used to be presentation only - a way to group three dropdowns. It is now
+# the routing key that decides WHICH DRAFT a recipient is sent, so an
+# unrecognised value is a refusal rather than an "OTHER" bucket.
+CATEGORY_KEYS = ("CHA", "FREIGHT_FORWARDER", "CARRIER")
+
+# Door addresses are free text, so they are capped. Uncapped, a pasted signature
+# block or a whole quoted thread would crowd the shipment facts out of the
+# drafting prompt - the model reads position and volume, not just content.
+# 500 characters is several lines of a real address with room to spare.
+MAX_ADDRESS_CHARS = 500
+
+
 class SelectedAgent(BaseModel):
     agent_name: str
     email: str
+    # Required, deliberately. A browser tab left open across a deploy posts the
+    # old bundle with no category at all; a 422 telling it to reload is the safe
+    # answer, where a default would send this vendor another category's wording.
+    # Same fail-closed reasoning as _sender_or_422 below.
+    category: str
+
+
+class DraftText(BaseModel):
+    """One category's reviewed subject and body, sent verbatim."""
+
+    subject: str
+    body: str
 
 
 class AttachmentInput(BaseModel):
@@ -40,6 +67,23 @@ class AttachmentInput(BaseModel):
     data_base64: str
 
 
+class PreviewAgent(BaseModel):
+    """Just enough to address a sample draft.
+
+    Deliberately NOT SelectedAgent. That model requires `category` because it is
+    the routing key deciding which reviewed draft a vendor is sent, and defaulting
+    it would mail somebody another category's wording. None of that applies here:
+    preview_rfq discards the field (it builds a two-argument
+    rfq_service.SelectedAgent) and the draft is shown to the operator, not sent.
+    Sharing the stricter model cost every operator AI drafting with a 422 reading
+    `body -> agent -> category: Field required`, which the frontend surfaced as
+    "AI draft unavailable" and blamed on the model.
+    """
+
+    agent_name: str
+    email: str
+
+
 class PreviewRFQRequest(BaseModel):
     origin_port: str
     destination_port: str
@@ -47,7 +91,13 @@ class PreviewRFQRequest(BaseModel):
     commodity: str = ""
     mode: str = "sea_freight"
     weight_kg: Optional[float] = None
-    agent: Optional[SelectedAgent] = None
+    # Optional door addresses, typed by the operator - never extracted from the
+    # customer email, for the same reason Size is not: a guessed address is worse
+    # than a blank one. Reaches the model only when non-empty (see rfq_agent).
+    # Must stay in step with the same pair on the other request model below.
+    sending_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
+    receiving_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
+    agent: Optional[PreviewAgent] = None
 
 
 class SendRFQRequest(BaseModel):
@@ -57,6 +107,12 @@ class SendRFQRequest(BaseModel):
     commodity: str = ""
     mode: str = "sea_freight"
     weight_kg: Optional[float] = None
+    # Optional door addresses, typed by the operator - never extracted from the
+    # customer email, for the same reason Size is not: a guessed address is worse
+    # than a blank one. Reaches the model only when non-empty (see rfq_agent).
+    # Must stay in step with the same pair on the other request model below.
+    sending_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
+    receiving_address: str = Field(default="", max_length=MAX_ADDRESS_CHARS)
     agents: List[SelectedAgent]
     # The originating customer email, kept on the job for traceability.
     customer_sender: str = ""
@@ -64,10 +120,14 @@ class SendRFQRequest(BaseModel):
     customer_body: str = ""
     # provider_msg_id of that email — what groups this request's per-agent RFQs.
     customer_email_id: str = ""
-    # One shared, operator-edited draft. When both are present every agent is
-    # sent THIS text verbatim; only the reference in the subject differs.
-    edited_subject: Optional[str] = None
-    edited_body: Optional[str] = None
+    # The reviewed drafts, keyed by category. When present, each agent is sent
+    # the text for THEIR category verbatim; only the reference in the subject
+    # differs. When absent - the operator never opened the draft editor - every
+    # agent is drafted by the model instead, which is the older flow and still
+    # supported. There is no middle ground: a partially filled map is refused,
+    # because silently model-drafting the gap swaps text nobody read for text
+    # somebody did, on the only path that reaches a real freight vendor.
+    drafts: Optional[Dict[str, DraftText]] = None
     # Same files go to every selected agent.
     attachments: List[AttachmentInput] = []
 
@@ -117,6 +177,8 @@ def _shipment(payload) -> dict:
         "weight_kg": payload.weight_kg,
         "commodity": payload.commodity.strip(),
         "size": payload.size.strip(),
+        "sending_address": payload.sending_address.strip(),
+        "receiving_address": payload.receiving_address.strip(),
     }
 
 
@@ -132,6 +194,62 @@ def list_agents():
     for a in agents:
         grouped.setdefault(a.get("category", "OTHER"), []).append(a)
     return {"agents": agents, "by_category": grouped, "total": len(agents)}
+
+
+def _usable(draft: Optional[DraftText]) -> bool:
+    return bool(draft and draft.subject.strip() and draft.body.strip())
+
+
+def _check_categories(payload: SendRFQRequest) -> None:
+    """Refuse any send the three draft panels cannot fully cover.
+
+    Every branch here fails the whole request rather than dropping or
+    substituting for one recipient. A recipient quietly skipped, or quietly given
+    text the operator never read, is indistinguishable on screen from a clean
+    send: the response still reports success for everyone else.
+    """
+    known = ", ".join(CATEGORY_KEYS)
+    unknown = sorted({a.category for a in payload.agents if a.category not in CATEGORY_KEYS})
+    if unknown:
+        raise AppException(
+            status_code=422,
+            detail=f"Recipient category not recognised: {', '.join(repr(u) for u in unknown)}. "
+                   f"Expected one of {known}. Reload the page and pick the recipients again.",
+        )
+    if payload.drafts is None:
+        return
+
+    stray = sorted(set(payload.drafts) - set(CATEGORY_KEYS))
+    if stray:
+        raise AppException(
+            status_code=422,
+            detail=f"Draft supplied for unknown category: {', '.join(stray)}. Expected {known}.",
+        )
+    needed = {a.category for a in payload.agents}
+    missing = [c for c in CATEGORY_KEYS if c in needed and not _usable(payload.drafts.get(c))]
+    if missing:
+        raise AppException(
+            status_code=422,
+            detail=f"No reviewed draft for {', '.join(missing)}, so nothing was sent. "
+                   f"Draft those panels or remove their recipients.",
+        )
+
+
+@router.get("/rfq-signature")
+def rfq_signature(request: Request):
+    """The sign-off this operator's RFQs will carry.
+
+    Exists so the browser can build a hand-composed draft that already ends in
+    the real signature. Every draft then arrives here signed, which keeps one
+    rule instead of a per-draft "is this signed yet" flag: rfq_service signs the
+    model branch only, and never touches operator-supplied text.
+
+    It also moves the missing-display-name refusal to page load. The same 422
+    used to surface only when the operator pressed Draft or Send, having already
+    filled the form in.
+    """
+    sender = _sender_or_422(request)
+    return {"name": sender.name, "signature": sender.signature}
 
 
 @router.post("/extract-details")
@@ -174,7 +292,13 @@ MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024
 def send_rfq(payload: SendRFQRequest, request: Request):
     """Send one RFQ per selected agent, each with its own reference."""
     sender = _sender_or_422(request)
-    agents = [rfq_service.SelectedAgent(a.agent_name, a.email) for a in payload.agents]
+    _check_categories(payload)
+    agents = [rfq_service.SelectedAgent(a.agent_name, a.email, a.category)
+              for a in payload.agents]
+    drafts = (
+        {key: {"subject": d.subject, "body": d.body} for key, d in payload.drafts.items()}
+        if payload.drafts is not None else None
+    )
 
     total_bytes = sum(len(a.data_base64) for a in payload.attachments) * 3 // 4
     if total_bytes > MAX_ATTACHMENT_TOTAL_BYTES:
@@ -195,8 +319,7 @@ def send_rfq(payload: SendRFQRequest, request: Request):
                 "email_id": payload.customer_email_id,
             },
             sender=sender,
-            edited_subject=(payload.edited_subject or "").strip(),
-            edited_body=(payload.edited_body or "").strip(),
+            drafts=drafts,
             attachments=[a.model_dump() for a in payload.attachments],
         )
     except rfq_service.RfqError as e:
