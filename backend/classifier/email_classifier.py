@@ -159,9 +159,6 @@ def _parse_llm_label(raw: str) -> tuple[str, float]:
 
 _INTERNAL_DOMAINS = {"bhatiashipping.com"}
 
-# Matches job/reference numbers common in freight forwarding subject lines
-_JOB_REF_RE = re.compile(r"\b[A-Z]{2,6}\d{5,}\b")
-
 # Rate-card subject signals — strong enough to bypass LLM when body is a cover note
 _RC_SUBJ_RE = re.compile(
     r"\b(rate\s*sheet|special\s*rates?\s*(ex|from)|tariff\s*(revision|update|circular|notice|change)|"
@@ -231,20 +228,11 @@ def classify_email(subject: str, body: str, sender: str = "") -> ClassificationR
             details=f"Reply to our RFQ {reference}",
         )
 
-    subj_lower = subject.lower().strip()
-    # Only skip to general on job-ref subjects that also lack any rate/quote signal.
-    # Re:/Fw: alone is NOT enough — customer enquiries frequently arrive as reply threads.
-    _RATE_SIGNAL_RE = re.compile(
-        r'\b(quote|quotation|rfq|rate|inquiry|enquiry|freight|fcl|lcl|air freight|sea freight)\b', re.I
-    )
-    if _JOB_REF_RE.search(subject) and not _RATE_SIGNAL_RE.search(subject):
-        logger.info("Rule: job-ref subject with no rate signal (%r) → general", subject)
-        return ClassificationResult(
-            label="general",
-            confidence=0.95,
-            method="rule:job_ref_no_rate_signal",
-            details=f"Job reference subject with no quote/rate keyword: {subject}",
-        )
+    # A job-reference subject used to short-circuit to general here. Removed:
+    # it fired on subject alone, before the body was read, so an enquiry like
+    # "India - DSL34100" / "can I get a price for the following" was filed as
+    # general without the model ever seeing the ask. Cheap, but it silently
+    # dropped real work. Job-ref mail now costs an LLM call. Do not re-add.
 
     latest = _strip_quoted(body)
 

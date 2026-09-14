@@ -1,13 +1,14 @@
 """
 Classifier rules and LLM-reply parsing.
 
-Only the rule tiers are tested — they short-circuit before any network call.
-The LLM path is not covered here and should not be: a test that needs an API key
-is a test that gets skipped.
+Mostly the rule tiers, which short-circuit before any network call. Two tests
+do exercise the fall-through, with the provider stubbed: no API key, no socket.
+A test that needs a real key is a test that gets skipped.
 """
 
 import pytest
 
+from backend.classifier import email_classifier
 from backend.classifier.email_classifier import (
     _COVER_NOTE_RE,
     _RC_SUBJ_RE,
@@ -15,6 +16,30 @@ from backend.classifier.email_classifier import (
     _parse_llm_label,
     classify_email,
 )
+
+
+class _StubProvider:
+    """Stands in for the LLM boundary so fall-through is testable offline."""
+
+    name = "stub"
+
+    def __init__(self, label: str, confidence: float):
+        self._raw = '{"label": "%s", "confidence": %s}' % (label, confidence)
+        self.calls: list[str] = []
+
+    def complete(self, system, user, temperature=0.0, max_tokens=0):
+        self.calls.append(user)
+        return self._raw
+
+
+@pytest.fixture
+def stub_llm(monkeypatch):
+    """Install a stub provider. Returns it, so a test can prove it was reached."""
+    def install(label: str = "general", confidence: float = 0.7) -> _StubProvider:
+        stub = _StubProvider(label, confidence)
+        monkeypatch.setattr(email_classifier, "get_provider", lambda: stub)
+        return stub
+    return install
 
 
 # ---------------------------------------------------------------------------
@@ -77,34 +102,59 @@ def test_legacy_canonical_reference_in_subject_also_triggers_the_rule():
     assert result.method == "rule:rfq_reference"
 
 
-def test_reference_in_the_body_alone_does_not_trigger_the_rule():
+def test_reference_in_the_body_alone_does_not_trigger_the_rule(stub_llm):
     """Subject-only, deliberately. The reference appears in the quoted original
     of every later message in a thread, so matching the body would relabel
     operational follow-ups as rate cards months after the fact.
 
-    The subject carries a job reference so a later rule catches it — otherwise
-    the email would fall through to the LLM, which this suite forbids.
+    Nothing catches this now, so it reaches the model. Stubbed: the assertion is
+    only that rule:rfq_reference stayed out of it.
     """
+    stub = stub_llm()
     result = classify_email(
         "BSPL123456 container update",
         "See RFQId:20260101-a1b2 below\n> original",
         "agent@example.com",
     )
-    assert result.method == "rule:job_ref_no_rate_signal"
+    assert result.method != "rule:rfq_reference"
+    assert result.label != "quotation_rate_card"
+    assert stub.calls, "no rule should have claimed this email"
 
 
 # ---------------------------------------------------------------------------
-# Rule tier 3 — job reference with no rate signal
+# Removed rule — a job reference must NOT short-circuit
 # ---------------------------------------------------------------------------
 
-def test_job_reference_subject_without_a_rate_word_is_general():
+def test_a_price_request_under_a_job_reference_reaches_the_model(stub_llm):
+    """The real email that exposed the removed rule. A job-ref subject used to
+    answer general from the subject alone, so this enquiry was filed without the
+    body ever being read. The model must now see the ask.
+    """
+    stub = stub_llm(label="customer_requirement", confidence=0.95)
+    result = classify_email(
+        "India - DSL34100",
+        "Please can I get a price for the following:\n\n"
+        "2 packages - 88x65x72 INCHES\n\nGross weight 1458.00KGS",
+        "James Norton <jnorton@hemisphere-freight.com>",
+    )
+    assert result.label == "customer_requirement"
+    assert result.method == "llm:stub"
+    assert "price for the following" in stub.calls[0], "the body must reach the prompt"
+
+
+def test_plain_operational_job_reference_mail_also_reaches_the_model(stub_llm):
+    """The cost of the removal, stated as a test: routine job chatter is no
+    longer free. It still ends up general, but the model has to say so.
+    """
+    stub = stub_llm(label="general")
     result = classify_email("BSPL123456 shipping documents", "docs", "agent@example.com")
     assert result.label == "general"
-    assert result.method == "rule:job_ref_no_rate_signal"
+    assert result.method == "llm:stub"
+    assert len(stub.calls) == 1
 
 
 # ---------------------------------------------------------------------------
-# Rule tier 4 — rate-card subject with a cover-note body
+# Rule tier 3 — rate-card subject with a cover-note body
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("body", [
