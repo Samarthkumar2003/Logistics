@@ -491,7 +491,7 @@ def send_rfqs(
     return {"jobs": jobs, "shipment": shipment, "total_sent": total_sent}
 
 
-def approve(reference: str) -> dict[str, Any]:
+def approve(reference: str, sender: SenderIdentity) -> dict[str, Any]:
     """Award this RFQ to the agent it was sent to.
 
     One job is one agent, so the reference alone identifies the winner — there
@@ -534,7 +534,7 @@ def approve(reference: str) -> dict[str, Any]:
         f"We look forward to working with you on this shipment. Please proceed "
         f"with the necessary arrangements and confirm the booking at your "
         f"earliest convenience.\n\n"
-        f"Best regards,\nLogistics Copilot"
+        f"Best regards,\n{sender.signature}"
     )
 
     try:

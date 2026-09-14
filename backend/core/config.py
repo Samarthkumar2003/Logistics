@@ -91,11 +91,10 @@ class Settings:
     # address inside email_store._alert_sync_drift, which meant a deployment for
     # anyone else silently mailed the original author.
     sync_alert_recipient: str
-    # Signs the RFQ emails sent to freight vendors. The operator's own name comes
-    # from their app_users row and rides the JWT; this is the company line under
-    # it, which is the same for everyone and so has no business in a per-user
-    # token. Empty renders a name-only signature rather than a blank line.
-    company_name: str
+    # NOTE: the company that signs vendor mail is deliberately NOT here. It lives
+    # on `app_users.company_name` and is read at send time by app/sender.py, so a
+    # rebrand is an UPDATE rather than a redeploy. Adding a COMPANY_NAME back would
+    # give the same fact two homes that can disagree.
 
     # --- Auth ----------------------------------------------------------------
     # False disables the bearer check on every route. Only for the offline test
@@ -211,7 +210,6 @@ def get_settings() -> Settings:
         gmail_mailbox=_env("GMAIL_MAILBOX"),
         report_recipient=_env("REPORT_RECIPIENT"),
         sync_alert_recipient=_env("SYNC_ALERT_RECIPIENT"),
-        company_name=_env("COMPANY_NAME"),
         auth_enabled=_flag("AUTH_ENABLED", True),
         jwt_secret=_env("JWT_SECRET"),
         jwt_algorithm=_env("JWT_ALGORITHM", "HS256"),

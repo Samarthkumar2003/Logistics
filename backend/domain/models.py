@@ -213,6 +213,10 @@ class AppUser:
     full_name: str = ""
     role: str = "operator"
     is_active: bool = True
+    # The company line on every RFQ and acceptance this operator sends. Lives on
+    # the row, not in the environment, so a rebrand is an UPDATE rather than a
+    # redeploy — see app/sender.py.
+    company_name: str = ""
 
     @classmethod
     def from_row(cls, row: dict) -> "AppUser":
@@ -225,6 +229,7 @@ class AppUser:
             # Absent means active: a partial select that omits the column must not
             # read as "this account is disabled" and lock everyone out.
             is_active=bool(row.get("is_active", True)),
+            company_name=_s(row, "company_name"),
         )
 
 
@@ -238,9 +243,11 @@ class SenderIdentity:
     route has any business editing who the mail is from.
 
     `name` comes from the operator's `app_users.full_name`, carried on their JWT
-    (see core/security.py). `company` comes from COMPANY_NAME in the environment:
-    it is identical for every operator, so putting it in a per-user token would
-    be storing one fact N times and invalidating N tokens to change it.
+    (see core/security.py). `company` comes from `app_users.company_name`, read
+    live at send time rather than carried on the token — for exactly the reason a
+    token is the wrong home for it: changing the company would otherwise mean
+    waiting out or invalidating every outstanding session. Read from the row, a
+    rebrand takes effect on the next email with no redeploy and nobody logged out.
 
     There is deliberately no default for `name`. An empty one is what produced
     the `[Your Name]` placeholders that reached real freight agents: the model was

@@ -12,7 +12,7 @@ from pydantic import BaseModel, Field
 
 from backend.agents.intake_agent import ShipmentDetails, run_intake_agent
 from backend.app.errors import AppException
-from backend.core.config import settings
+from backend.app.sender import sender_or_422
 from backend.domain.models import SenderIdentity
 from backend.repositories import agent_repo
 from backend.services import rfq_service
@@ -48,7 +48,7 @@ class SelectedAgent(BaseModel):
     # Required, deliberately. A browser tab left open across a deploy posts the
     # old bundle with no category at all; a 422 telling it to reload is the safe
     # answer, where a default would send this vendor another category's wording.
-    # Same fail-closed reasoning as _sender_or_422 below.
+    # Same fail-closed reasoning as app/sender.py's sender_or_422.
     category: str
 
 
@@ -132,43 +132,6 @@ class SendRFQRequest(BaseModel):
     attachments: List[AttachmentInput] = []
 
 
-NO_SENDER_NAME = (
-    "Your operator profile has no display name, so an RFQ cannot be signed. "
-    "Set full_name on your app_users row and log in again."
-)
-
-
-def _sender_or_422(request: Request) -> SenderIdentity:
-    """Who this RFQ will be signed by, or a refusal.
-
-    Reads the name from the verified token rather than the database: the bearer
-    middleware has already put the claims on `request.state`, so this costs
-    nothing, and app/auth.py notes that identity is exactly what they were put
-    there for.
-
-    Fails closed, and that is the whole point of the function. A blank name is
-    not cosmetic — it is what let the model sign RFQs to real freight agents as
-    `[Your Name]`. Three ways to get one, all handled here:
-
-      * a token minted before the `name` claim existed — blank, refused;
-      * an app_users row whose full_name was never filled in (the column
-        defaults to '') — blank, refused;
-      * AUTH_ENABLED=0, where the middleware returns before setting claims at
-        all, so `request.state.claims` does not exist — hence getattr, not
-        attribute access, or this would be a 500 instead of a 422.
-
-    The last case means the drafting endpoints do not work with auth disabled.
-    That is correct: with no token there is no operator, and an unsigned RFQ to a
-    vendor is worse than a refused one. The offline suite drives rfq_service
-    directly and passes its own SenderIdentity, so nothing there depends on this.
-    """
-    claims = getattr(request.state, "claims", None)
-    name = (getattr(claims, "name", "") or "").strip()
-    if not name:
-        raise AppException(status_code=422, detail=NO_SENDER_NAME)
-    return SenderIdentity(name=name, company=settings.company_name.strip())
-
-
 def _shipment(payload) -> dict:
     return {
         "origin": payload.origin_port.strip(),
@@ -248,7 +211,7 @@ def rfq_signature(request: Request):
     used to surface only when the operator pressed Draft or Send, having already
     filled the form in.
     """
-    sender = _sender_or_422(request)
+    sender = sender_or_422(request)
     return {"name": sender.name, "signature": sender.signature}
 
 
@@ -269,7 +232,7 @@ def preview_rfq(payload: PreviewRFQRequest, request: Request):
     """One sample draft, sent to nobody."""
     # Checked on preview as well as send, so a missing name is discovered while
     # composing rather than at the moment the operator tries to send.
-    sender = _sender_or_422(request)
+    sender = sender_or_422(request)
     agent = (rfq_service.SelectedAgent(payload.agent.agent_name, payload.agent.email)
              if payload.agent else None)
     try:
@@ -291,7 +254,7 @@ MAX_ATTACHMENT_TOTAL_BYTES = 15 * 1024 * 1024
 @router.post("/send-rfq")
 def send_rfq(payload: SendRFQRequest, request: Request):
     """Send one RFQ per selected agent, each with its own reference."""
-    sender = _sender_or_422(request)
+    sender = sender_or_422(request)
     _check_categories(payload)
     agents = [rfq_service.SelectedAgent(a.agent_name, a.email, a.category)
               for a in payload.agents]

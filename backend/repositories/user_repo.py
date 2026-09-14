@@ -20,7 +20,7 @@ logger = logging.getLogger(__name__)
 
 # Every column except password_hash. Used by list/read paths so a hash cannot
 # leak into a response by way of a `select("*")` someone added later.
-_SAFE_COLUMNS = "id, email, full_name, role, is_active, created_at, last_login_at"
+_SAFE_COLUMNS = ("id, email, full_name, role, is_active, created_at, last_login_at, company_name")
 
 
 def get_by_email(email: str) -> Optional[AppUser]:

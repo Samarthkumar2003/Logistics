@@ -3,9 +3,10 @@
 import logging
 from typing import Annotated
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, Request
 
 from backend.app.errors import AppException
+from backend.app.sender import sender_or_422
 from backend.repositories import email_repo, job_repo
 from backend.services import reply_service, rfq_service, shipment_service
 
@@ -130,14 +131,20 @@ def get_customer_request(customer_email_id: str):
 
 
 @router.post("/jobs/{reference}/approve")
-def approve_job(reference: str):
+def approve_job(reference: str, request: Request):
     """Award this RFQ to the agent it was sent to.
 
     No body: one job is one agent, so the reference identifies the winner. Only
     an acceptance is sent — agents who were not chosen are not emailed.
+
+    The operator is resolved before anything is awarded, because the acceptance
+    that goes to the agent is signed with their name and company. It used to be
+    signed "Logistics Copilot" — our internal product name, on a stranger's
+    screen, over someone else's business.
     """
+    sender = sender_or_422(request)
     try:
-        return rfq_service.approve(reference)
+        return rfq_service.approve(reference, sender)
     except rfq_service.RfqError as e:
         detail = str(e)
         raise AppException(status_code=404 if "not found" in detail else 422, detail=detail)
