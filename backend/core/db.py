@@ -157,8 +157,53 @@ class _RetryTransport(httpx.BaseTransport):
         self._inner.close()
 
 
+def _disable_http2(transport: httpx.BaseTransport, name: str) -> None:
+    """Take new connections down to HTTP/1.1, because one h2 connection is not
+    safe to share between threads.
+
+    postgrest-py asks httpx for `http2=True`, which is wrong for this app in a way
+    that stays invisible until it isn't. An HTTP/2 connection multiplexes every
+    caller onto one socket governed by one HPACK header-compression table — and
+    that table is mutated by `h2`, a library with no locking anywhere in it, from
+    httpcore's `_send_request_headers`, which does not take a lock either. Our
+    routes are sync `def`, so Starlette runs them in a worker threadpool that all
+    shares this one client. Two threads encoding headers at once corrupt the
+    table, and the far end does the only thing it can: tears the whole connection
+    down with GOAWAY `COMPRESSION_ERROR`, taking every request multiplexed on it.
+    That is the `<ConnectionTerminated error_code:9>` in our logs, and the
+    `[Errno 32] Broken pipe` is the next thread writing to the corpse.
+
+    Measured against the real project, 12 threads x 60 reads over one client:
+
+        HTTP/2, client shared across threads   7.9% failed
+        HTTP/2, one client per thread          0% failed
+        HTTP/1.1, client shared across threads 0% failed
+
+    at the same throughput. HTTP/1.1 checks a connection out of the pool for one
+    request at a time, so the shared mutable state stops existing rather than
+    being raced over less often.
+
+    There is no supported way to ask for this. postgrest-py hardcodes the flag,
+    and `ClientOptions.httpx_client` would replace the whole client, discarding
+    the base URL and auth headers it configures. httpcore reads `_http2` inside
+    `create_connection`, so setting it here governs every connection from now on;
+    the pool is empty at this point, so there is nothing already negotiated.
+    """
+    pool = getattr(transport, "_pool", None)
+    if pool is None or not hasattr(pool, "_http2"):
+        logger.warning(
+            "Supabase %s client exposes no connection pool; it will keep using "
+            "HTTP/2, which is not thread-safe (httpx internals changed?)",
+            name,
+        )
+        return
+    pool._http2 = False
+
+
 def _harden(client: Client) -> None:
-    """Wrap each sub-client's transport so a dead pooled connection is retried.
+    """Make supabase-py's clients safe for the way this app uses them: HTTP/1.1
+    so that threads cannot corrupt a shared HTTP/2 connection, and a retry around
+    the transport for the connection failures that remain.
 
     supabase-py offers no supported hook for a custom transport on the clients it
     builds itself — `ClientOptions.httpx_client` replaces the whole client, which
@@ -179,6 +224,7 @@ def _harden(client: Client) -> None:
         transport = getattr(session, "_transport", None)
         if transport is None or isinstance(transport, _RetryTransport):
             continue
+        _disable_http2(transport, name)
         session._transport = _RetryTransport(transport)
 
 

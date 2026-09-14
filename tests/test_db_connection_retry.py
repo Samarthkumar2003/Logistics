@@ -225,3 +225,57 @@ def test_harden_fails_soft_when_supabase_internals_move(caplog):
     with caplog.at_level("WARNING", logger="backend.core.db"):
         db._harden(client)  # must not raise
     assert "connection retries are inactive" in caplog.text
+
+# --- HTTP/1.1 downgrade -------------------------------------------------------
+
+
+def _fake_client(http2: bool = True):
+    class FakeSub:
+        def __init__(self):
+            self.session = httpx.Client(http2=http2)
+
+    class FakeClient:
+        def __init__(self):
+            self.postgrest = FakeSub()
+            self.storage = FakeSub()
+
+    return FakeClient()
+
+
+def test_harden_takes_new_connections_down_to_http1():
+    """The reason the retry above exists at all.
+
+    postgrest-py sets `http2=True`, which puts every thread on one socket sharing
+    one HPACK table that `h2` mutates without a lock. Measured against the real
+    project, that failed 7.9% of reads under 12 threads; HTTP/1.1 failed none,
+    because a connection serves one request at a time.
+    """
+    client = _fake_client(http2=True)
+    assert client.postgrest.session._transport._pool._http2 is True
+
+    db._harden(client)
+
+    for sub in (client.postgrest, client.storage):
+        assert sub.session._transport._inner._pool._http2 is False
+
+
+def test_harden_does_not_reach_past_a_transport_it_does_not_recognise():
+    """A custom transport with no pool must not crash startup, and must still get
+    the retry wrapper — the two protections are independent."""
+
+    class NoPool(httpx.BaseTransport):
+        def handle_request(self, request):  # pragma: no cover - never called
+            raise AssertionError
+
+    class FakeSub:
+        def __init__(self):
+            self.session = httpx.Client(transport=NoPool())
+
+    class FakeClient:
+        def __init__(self):
+            self.postgrest = FakeSub()
+            self.storage = FakeSub()
+
+    client = FakeClient()
+    db._harden(client)  # must not raise
+    assert isinstance(client.postgrest.session._transport, db._RetryTransport)
