@@ -12,7 +12,6 @@ import json
 from backend.connectors.email_connector import fetch_latest_emails
 from backend.agents.intake_agent import run_intake_agent, ShipmentDetails
 from backend.agents.rfq_agent import generate_rfq_drafts, RFQResponse
-from backend.core.config import settings
 from backend.core.rfq_reference import RESERVED_PREVIEW_REFERENCE
 from backend.domain.models import SenderIdentity
 from backend.repositories import agent_repo
@@ -80,7 +79,7 @@ def process_inbox(limit: int = 4) -> None:
                 # This CLI has no operator and no token, and it sends nothing, so
                 # the identity is a label for the printed output only.
                 sender=SenderIdentity(name="CLI walkthrough",
-                                      company=settings.company_name),
+                                      company="Preview"),
             )
 
             print(f"\n✉️  RFQ Agent Drafted {len(rfq_response.drafts)} Email(s) [{reference}]:")

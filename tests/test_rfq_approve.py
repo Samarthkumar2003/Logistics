@@ -16,10 +16,15 @@ the ordinary failure — a dead SMTP login — did not even reach the `except`.
 
 import pytest
 
-from backend.domain.models import OPEN_JOB_STATUSES, RfqJob
+from backend.domain.models import OPEN_JOB_STATUSES, RfqJob, SenderIdentity
 from backend.services import rfq_service
 
 REFERENCE = "RFQ-20260816-a1b2c3d4"
+
+# The acceptance is signed by whoever awarded it, so approve() now needs an
+# operator. Passed explicitly rather than defaulted: a default would let a
+# future caller mail a vendor an unsigned acceptance and no test would notice.
+SENDER = SenderIdentity(name="Asha Nair", company="Bhatia Shipping")
 
 
 @pytest.fixture
@@ -78,7 +83,7 @@ def test_an_acceptance_that_did_not_send_does_not_award_the_job(
     acceptance(status=failure)
 
     with pytest.raises(rfq_service.RfqError):
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert status_writes == []
 
@@ -87,7 +92,7 @@ def test_the_sender_raising_does_not_award_the_job(job, status_writes, acceptanc
     acceptance(raises=RuntimeError("smtp unreachable"))
 
     with pytest.raises(rfq_service.RfqError) as excinfo:
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert status_writes == []
     assert "smtp unreachable" in str(excinfo.value)
@@ -102,14 +107,14 @@ def test_a_missing_status_key_is_not_treated_as_success(
                         lambda to_addr, subject, body: {})
 
     with pytest.raises(rfq_service.RfqError):
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert status_writes == []
 
 
 def test_a_sent_acceptance_awards_the_job(job, status_writes, acceptance):
     acceptance(status="sent")
-    result = rfq_service.approve(REFERENCE)
+    result = rfq_service.approve(REFERENCE, SENDER)
 
     assert status_writes == [(REFERENCE, "approved")]
     assert result["status"] == "approved"
@@ -129,7 +134,7 @@ def test_the_error_names_the_agent_the_reference_and_the_outcome(
     acceptance(status="failed")
 
     with pytest.raises(rfq_service.RfqError) as excinfo:
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     detail = str(excinfo.value)
     assert "Alpha Freight" in detail
@@ -150,7 +155,7 @@ def test_the_failure_maps_to_422_not_404(job, status_writes, acceptance):
     acceptance(status="failed")
 
     with pytest.raises(rfq_service.RfqError) as excinfo:
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert "not found" not in str(excinfo.value)
 
@@ -163,7 +168,7 @@ def test_the_job_is_left_open_so_it_can_be_retried_and_still_take_a_reply(
     acceptance(status="failed")
 
     with pytest.raises(rfq_service.RfqError):
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert status_writes == []
     assert job["status"] in OPEN_JOB_STATUSES
@@ -178,10 +183,10 @@ def test_approving_again_after_the_sender_is_fixed_awards_the_job(
                         lambda to_addr, subject, body: next(outcomes))
 
     with pytest.raises(rfq_service.RfqError):
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
     assert status_writes == []
 
-    assert rfq_service.approve(REFERENCE)["status"] == "approved"
+    assert rfq_service.approve(REFERENCE, SENDER)["status"] == "approved"
     assert status_writes == [(REFERENCE, "approved")]
 
 
@@ -200,7 +205,7 @@ def test_an_unknown_reference_is_refused_before_anything_is_sent(
     monkeypatch.setattr(rfq_service, "send_rfq_email", _never)
 
     with pytest.raises(rfq_service.RfqError) as excinfo:
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert "not found" in str(excinfo.value)   # the one case that is a 404
     assert status_writes == []
@@ -219,6 +224,6 @@ def test_an_agent_with_no_single_address_is_refused_before_anything_is_sent(
     monkeypatch.setattr(rfq_service, "send_rfq_email", _never)
 
     with pytest.raises(rfq_service.RfqError):
-        rfq_service.approve(REFERENCE)
+        rfq_service.approve(REFERENCE, SENDER)
 
     assert status_writes == []

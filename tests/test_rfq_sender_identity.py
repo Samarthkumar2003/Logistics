@@ -18,9 +18,10 @@ import jwt
 import pytest
 
 from backend.app.errors import AppException
+from backend.app import sender as sender_mod
 from backend.app.routes import rfq as rfq_route
 from backend.core import security
-from backend.domain.models import SenderIdentity
+from backend.domain.models import AppUser, SenderIdentity
 from backend.services import rfq_service
 
 OPERATOR = SenderIdentity(name="Asha Nair", company="Bhatia Shipping Group")
@@ -82,12 +83,22 @@ def _request(claims=...):
 
 @pytest.fixture(autouse=True)
 def company(monkeypatch):
-    monkeypatch.setattr(rfq_route, "settings",
-                        SimpleNamespace(company_name="Bhatia Shipping Group"))
+    """The company line comes from the operator's `app_users` row.
+
+    Not from the environment, and not from the token. A live read is what makes a
+    rebrand an UPDATE instead of a redeploy plus every session invalidated.
+    """
+    monkeypatch.setattr(
+        sender_mod.user_repo, "get_by_id",
+        lambda _uid: AppUser(id="u1", email="asha@example.com",
+                             full_name="Asha Nair",
+                             company_name="Bhatia Shipping Group"),
+    )
 
 
 def test_a_named_operator_resolves_to_a_sender():
-    sender = rfq_route._sender_or_422(_request(SimpleNamespace(name="Asha Nair")))
+    sender = sender_mod.sender_or_422(
+        _request(SimpleNamespace(name="Asha Nair", user_id="u1")))
     assert sender == SenderIdentity(name="Asha Nair", company="Bhatia Shipping Group")
 
 
@@ -95,7 +106,7 @@ def test_a_named_operator_resolves_to_a_sender():
 def test_a_blank_display_name_is_refused_not_drafted(name):
     """The regression. A blank name is exactly what produced `[Your Name]`."""
     with pytest.raises(AppException) as exc:
-        rfq_route._sender_or_422(_request(SimpleNamespace(name=name)))
+        sender_mod.sender_or_422(_request(SimpleNamespace(name=name, user_id="u1")))
     assert exc.value.status_code == 422
     assert "display name" in exc.value.detail
 
@@ -103,7 +114,7 @@ def test_a_blank_display_name_is_refused_not_drafted(name):
 def test_missing_claims_are_a_422_not_a_500():
     """AUTH_ENABLED=0 sets no claims at all. That must not read as a crash."""
     with pytest.raises(AppException) as exc:
-        rfq_route._sender_or_422(_request())
+        sender_mod.sender_or_422(_request())
     assert exc.value.status_code == 422
 
 
@@ -223,3 +234,80 @@ def test_the_prompt_names_the_sender_and_forbids_a_sign_off(monkeypatch):
     assert "Bhatia Shipping Group" in system
     assert "signature" in system.lower()
     assert "[Your Name]" in system      # named as the thing never to emit
+
+
+# ---------------------------------------------------------------------------
+# The company line is data, not configuration
+# ---------------------------------------------------------------------------
+
+def _claims():
+    return SimpleNamespace(name="Asha Nair", user_id="u1")
+
+
+def test_the_company_is_read_from_the_operators_row(monkeypatch):
+    """Changing it must not need a deploy, so it is read at send time."""
+    monkeypatch.setattr(
+        sender_mod.user_repo, "get_by_id",
+        lambda _uid: AppUser(id="u1", email="a@b.com", company_name="Renamed Ltd"),
+    )
+    assert sender_mod.sender_or_422(_request(_claims())).company == "Renamed Ltd"
+
+
+def test_a_failed_company_lookup_still_signs_with_the_operator(monkeypatch):
+    """The company is one line of a sign-off. Losing the database for a moment
+    must not cost the operator a drafted RFQ — `SenderIdentity` already renders a
+    name-only signature, and a real person's name is a valid way to sign."""
+    def boom(_uid):
+        raise RuntimeError("supabase unreachable")
+
+    monkeypatch.setattr(sender_mod.user_repo, "get_by_id", boom)
+    sender = sender_mod.sender_or_422(_request(_claims()))
+    assert sender == SenderIdentity(name="Asha Nair", company="")
+    assert sender.signature == "Asha Nair"
+
+
+def test_a_token_for_a_deleted_row_signs_with_the_name(monkeypatch):
+    """Deciding whether a token still names a real user is authentication's job,
+    not the signature's."""
+    monkeypatch.setattr(sender_mod.user_repo, "get_by_id", lambda _uid: None)
+    assert sender_mod.sender_or_422(_request(_claims())).company == ""
+
+
+def test_a_blank_company_on_the_row_is_not_an_error(monkeypatch):
+    """A row that has not been given a company yet signs name-only rather than
+    refusing — the operator can still work, and the sign-off is still truthful."""
+    monkeypatch.setattr(
+        sender_mod.user_repo, "get_by_id",
+        lambda _uid: AppUser(id="u1", email="a@b.com", company_name="   "),
+    )
+    assert sender_mod.sender_or_422(_request(_claims())).signature == "Asha Nair"
+
+
+def test_the_acceptance_email_is_signed_by_the_operator_not_the_product():
+    """The regression this replaces: the award email closed with a hardcoded
+    "Logistics Copilot" — our internal product name, sent over a customer's
+    business to a freight agent who has never heard of us."""
+    sent = {}
+    import backend.services.rfq_service as svc
+    from backend.domain.models import RfqJob
+
+    original_get = svc.job_repo.get
+    try:
+        svc.job_repo.get = lambda _r: RfqJob(
+            reference="RFQ-000123", status="quotes_received",
+            agents_contacted=["Alpha Freight"])
+        svc.agent_repo.email_for_name = lambda _n: "alpha@example.com"
+        svc.job_repo.set_status = lambda *a, **k: None
+
+        def capture(to_addr, subject, body, **kw):
+            sent.update(to=to_addr, subject=subject, body=body)
+            return {"status": "sent"}
+
+        svc.send_rfq_email = capture
+        svc.approve("RFQ-000123",
+                    SenderIdentity(name="Dhaval Shah", company="Bhatia Shipping"))
+    finally:
+        svc.job_repo.get = original_get
+
+    assert sent["body"].rstrip().endswith("Best regards,\nDhaval Shah\nBhatia Shipping")
+    assert "Logistics Copilot" not in sent["body"]
