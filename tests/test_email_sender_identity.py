@@ -89,7 +89,8 @@ def test_gmail_workspace_sends_over_the_api_and_never_touches_smtp(
     monkeypatch.setattr(email_sender.smtplib, "SMTP", _boom)
     monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", "")
 
-    assert email_sender.send_rfq_email(TO, "RFQ", "body") == {"status": "sent", "to": TO}
+    assert email_sender.send_rfq_email(TO, "RFQ", "body") == {"status": "sent", "to": TO,
+                                                                "provider_msg_id": "msg-123"}
     assert gmail_api_sends == [
         {"to": TO, "subject": "RFQ", "body": "body", "attachments": None},
     ]
@@ -111,7 +112,7 @@ def test_attachments_reach_the_gmail_api_untouched(gmail_api_sends, monkeypatch)
 
     result = email_sender.send_rfq_email(TO, "RFQ", "body", attachments=files)
 
-    assert result == {"status": "sent", "to": TO}
+    assert result == {"status": "sent", "to": TO, "provider_msg_id": "msg-123"}
     assert gmail_api_sends[0]["attachments"] == files
 
 
@@ -171,7 +172,7 @@ def test_the_api_path_honours_email_redirect(gmail_api_sends, monkeypatch):
     assert gmail_api_sends[0]["subject"] == f"[TEST → {TO}] RFQ"
     # The caller is told the intended vendor, not the redirect target — job rows
     # and reply attribution key off it.
-    assert result == {"status": "sent", "to": TO}
+    assert result == {"status": "sent", "to": TO, "provider_msg_id": "msg-123"}
 
 
 def test_both_paths_rewrite_recipient_and_subject_the_same_way(

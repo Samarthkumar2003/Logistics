@@ -25,7 +25,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from backend.app.auth import bearer_middleware
 from backend.app.errors import register_handlers
 from backend.app.lifespan import lifespan
-from backend.app.routes import auth, automation, inbox, ingest, jobs, ops, rfq
+from backend.app.routes import auth, automation, inbox, ingest, jobs, ops, replies, rfq
 from backend.core.config import settings
 from backend.core.logging_config import configure_logging, default_log_file
 from backend.core.logging_context import clean_incoming_id, request_context
@@ -125,7 +125,7 @@ def create_app(auth_enabled: bool | None = None) -> FastAPI:
 
     register_handlers(app)
 
-    for module in (auth, ops, inbox, ingest, jobs, rfq, automation):
+    for module in (auth, ops, inbox, ingest, jobs, rfq, replies, automation):
         app.include_router(module.router)
 
     logger.info(

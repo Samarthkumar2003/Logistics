@@ -10,6 +10,9 @@ import {
   statusBreakdown, statusInfo, totalText,
   type Shipment, type ShipmentPage,
 } from '@/lib/shipments';
+import ReplyPanel from '@/components/ReplyPanel';
+import { ReplyChip } from '@/components/ReplyHistory';
+import type { ReplySummary } from '@/lib/sentReplies';
 import './dashboard.css';
 
 /** Rows a page of the unfiltered inbox holds. */
@@ -39,6 +42,8 @@ interface Email {
   // Only set on the unlinked rate-card list — why this reply never attached.
   reason?: string;
   cited_reference?: string | null;
+  // Replies the desk sent from the app. null: none; absent: older API, unknown.
+  replies?: ReplySummary | null;
 }
 
 function formatReceived(iso?: string): string {
@@ -198,6 +203,13 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
   const [processing, setProcessing] = useState(false);
   const [attachments, setAttachments] = useState<{ id: string; file_name: string; mime_type: string; size_bytes: number | null; url: string }[]>([]);
   const [loadingAtts, setLoadingAtts] = useState(false);
+  const [replyOpen, setReplyOpen] = useState(false);
+  // What this card just sent, ahead of the next inbox poll, remembered with the
+  // server summary it was built on. Once the poll brings a different summary, that
+  // one already includes the send, so the local copy stops applying.
+  const [localReplies, setLocalReplies] = useState<{ base: string; value: ReplySummary } | null>(null);
+  const serverKey = JSON.stringify(email.replies ?? null);
+  const replySummary = localReplies && localReplies.base === serverKey ? localReplies.value : email.replies;
 
   async function submitFeedback(newLabel: string, isApprove: boolean) {
     setSaving(true);
@@ -311,6 +323,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
           </div>
         </div>
         <div className="ecard-right" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <ReplyChip summary={replySummary} />
           <LabelPill label={displayLabel} confidence={correctedLabel ? undefined : email.label_confidence} />
           {correctionError ? (
             <span style={{ fontSize: 11, color: 'var(--red)' }} title={correctionError}>
@@ -434,6 +447,16 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
             >
               {processing ? '⏳ Opening…' : '🚀 Process this email → Send RFQs'}
             </button>
+            {!replyOpen && (
+              <button
+                style={{
+                  padding: '7px 16px', borderRadius: 8, border: '1px solid var(--blue)',
+                  background: 'transparent', color: 'var(--blue-text)',
+                  fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                }}
+                onClick={e => { e.stopPropagation(); setReplyOpen(true); }}
+              >↩ Reply</button>
+            )}
             {/* Rate-card view is only meaningful for a customer request (it maps to an RFQ). */}
             {(displayLabel === 'customer_requirement' || correctedLabel === 'customer_requirement') && (
               <a
@@ -446,6 +469,15 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
               >📋 View rate cards</a>
             )}
           </div>
+          <ReplyPanel
+            emailId={email.id}
+            sender={email.sender}
+            subject={decodeEntities(email.subject)}
+            open={replyOpen}
+            onOpenChange={setReplyOpen}
+            summary={replySummary}
+            onSummary={value => setLocalReplies({ base: serverKey, value })}
+          />
         </div>
       )}
     </div>

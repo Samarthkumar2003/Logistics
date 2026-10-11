@@ -102,6 +102,18 @@ def get_by_id(provider_msg_id: str) -> Optional[Email]:
     return Email.from_row(rows[0]) if rows else None
 
 
+def get_reply_target(provider_msg_id: str) -> Optional[dict]:
+    """What answering this email needs: who sent it, what it said, and the two ids
+    that thread a reply (Gmail's thread id for our mailbox, the RFC 2822
+    Message-ID for the recipient's). None when the email is not stored."""
+    rows = (
+        get_db().table("emails")
+        .select("provider_msg_id, sender, subject, body, received_at, thread_id, message_id")
+        .eq("provider_msg_id", provider_msg_id).limit(1).execute().data or []
+    )
+    return rows[0] if rows else None
+
+
 _REPLY_COLUMNS = ("provider_msg_id, rfq_reference, sender, subject, body, "
                   "received_at, has_attachments, thread_id, classification")
 

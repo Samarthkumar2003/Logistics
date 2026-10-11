@@ -13,7 +13,7 @@ from typing import Any, Optional
 
 from backend.core.rfq_reference import extract_rfq_reference
 from backend.domain.models import Email
-from backend.repositories import agent_repo, email_repo, job_repo
+from backend.repositories import agent_repo, email_repo, job_repo, sent_reply_repo
 
 logger = logging.getLogger(__name__)
 
@@ -134,6 +134,7 @@ def list_unlinked(limit: int, offset: int) -> dict[str, Any]:
         [ref for ref in cited_by_id.values() if ref]
     )
     queued = email_repo.pending_scan_ids(list(cited_by_id))
+    sent = sent_reply_repo.summaries_or_empty(list(cited_by_id))
 
     items = []
     for e in emails:
@@ -147,6 +148,7 @@ def list_unlinked(limit: int, offset: int) -> dict[str, Any]:
             "received_at": e.received_at,
             "cited_reference": cited,
             "reason": _unlinked_reason(cited, cited in jobs_present, e.id in queued),
+            "replies": sent[e.id].as_dict() if e.id in sent else None,
         })
 
     return {"emails": items, "total": total, "has_more": (offset + limit) < total}

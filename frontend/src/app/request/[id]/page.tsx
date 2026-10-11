@@ -7,6 +7,7 @@ import { apiFetch } from '@/lib/api';
 import { groupByThread, type Reply } from '@/lib/replyThreads';
 import { agentTypeLabel, statusInfo } from '@/lib/shipments';
 import { ThreadCard } from '@/components/ThreadCard';
+import ReplyPanel from '@/components/ReplyPanel';
 
 /* ─── Types ─────────────────────────────────────────────────────── */
 interface CustomerEmail {
@@ -275,6 +276,7 @@ export default function CustomerRequestPage() {
   const [data, setData] = useState<RequestData | null>(null);
   const [status, setStatus] = useState<'loading' | 'ready' | 'error'>('loading');
   const [errorMsg, setErrorMsg] = useState('');
+  const [replyOpen, setReplyOpen] = useState(false);
 
   useEffect(() => {
     if (!id) return;
@@ -373,6 +375,23 @@ export default function CustomerRequestPage() {
                 background: 'var(--sunken)', border: '1px solid var(--border)', borderRadius: 6,
                 padding: 12, maxHeight: 260, overflowY: 'auto',
               }}>{data.customer_email.body}</div>
+              {!replyOpen && (
+                <button
+                  onClick={() => setReplyOpen(true)}
+                  style={{
+                    marginTop: 10, padding: '6px 14px', borderRadius: 8, border: '1px solid var(--blue)',
+                    background: 'transparent', color: 'var(--blue-text)', fontSize: 13, fontWeight: 600,
+                    cursor: 'pointer',
+                  }}
+                >↩ Reply to customer</button>
+              )}
+              <ReplyPanel
+                emailId={data.customer_email.provider_msg_id}
+                sender={data.customer_email.sender}
+                subject={data.customer_email.subject}
+                open={replyOpen}
+                onOpenChange={setReplyOpen}
+              />
             </div>
           ) : (
             <div style={{ ...card, color: 'var(--muted-soft)', fontSize: 13 }}>

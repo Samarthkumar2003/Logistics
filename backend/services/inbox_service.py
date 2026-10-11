@@ -8,7 +8,7 @@ import logging
 from typing import Any
 
 from backend.domain.models import Email
-from backend.repositories import email_repo
+from backend.repositories import email_repo, sent_reply_repo
 
 logger = logging.getLogger(__name__)
 
@@ -33,8 +33,13 @@ def _effective_label(email: Email, cached: dict[str, dict]) -> str:
 LABELS = ("customer_requirement", "quotation_rate_card", "general", "pending")
 
 
-def _row(email: Email, effective: str, meta: dict) -> dict[str, Any]:
-    """One inbox row as the dashboard consumes it."""
+def _row(email: Email, effective: str, meta: dict,
+         reply: "sent_reply_repo.ReplySummary | None" = None) -> dict[str, Any]:
+    """One inbox row as the dashboard consumes it.
+
+    `replies` is the "Replied" chip: counts of replies the desk sent from the app.
+    Null when there are none, so the common case costs the payload nothing.
+    """
     return {
         "id": email.id,
         "sender": email.sender,
@@ -45,6 +50,7 @@ def _row(email: Email, effective: str, meta: dict) -> dict[str, Any]:
         "label_confidence": meta.get("confidence", 0.0),
         "label_method": meta.get("method", ""),
         "received_at": email.received_at,
+        "replies": reply.as_dict() if reply else None,
     }
 
 
@@ -76,12 +82,13 @@ def _fill_page(limit: int, offset: int, search: str,
         if not emails:
             return kept, scanned, True
         cached = email_repo.get_cached_labels([e.id for e in emails])
+        replies = sent_reply_repo.summaries_or_empty([e.id for e in emails])
         for e in emails:
             scanned += 1
             effective = _effective_label(e, cached)
             if effective != label:
                 continue
-            kept.append(_row(e, effective, cached.get(e.id, {})))
+            kept.append(_row(e, effective, cached.get(e.id, {}), replies.get(e.id)))
             if len(kept) == limit:
                 return kept, scanned, False
         if len(emails) < limit:  # last stretch of the filtered set
@@ -116,7 +123,8 @@ def get_inbox_page(limit: int, offset: int, search: str = "",
             limit=limit, offset=offset, search=search
         )
         cached = email_repo.get_cached_labels([e.id for e in emails])
-        items = [_row(e, _effective_label(e, cached), cached.get(e.id, {}))
+        replies = sent_reply_repo.summaries_or_empty([e.id for e in emails])
+        items = [_row(e, _effective_label(e, cached), cached.get(e.id, {}), replies.get(e.id))
                  for e in emails]
         next_offset = offset + len(emails)
         return {"emails": items, "total": total, "next_offset": next_offset,
