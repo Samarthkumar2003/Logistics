@@ -70,9 +70,10 @@ repo. It is listed as P1 because the data is third-party (vendors who did not
 agree to publication) and because commercial rates paid are exactly what a
 competitor would want.
 
-Note that `data/agents_database.csv` cannot simply be dropped: `agent_repo` falls
-back to it when the `agents` table is empty, and the Dockerfile copies `data/`
-into the image for that reason.
+Nothing at runtime reads `data/` any more (2026-10-11): `agent_repo` no longer
+falls back to the CSV, and the Dockerfile no longer copies `data/` into the
+image. The only remaining reader is the offline `seed_agents_table` script, so
+the file can be removed from the repo once its rows are kept somewhere private.
 
 **Options, none of them free:** make the repo private (fastest, and does not
 address forks or anything already cloned); rewrite history with

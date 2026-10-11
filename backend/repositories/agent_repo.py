@@ -1,24 +1,25 @@
 """
 agent_repo.py
 -------------
-Freight agents, from the Supabase `agents` table with the CSV as a fallback.
+Freight agents, from the Supabase `agents` table. The table is the only source.
 
-Two sources of truth exist and drift: the table is seeded from
-`data/agents_database.csv` by `scripts/seed_agents_table.py`, and editing one
-without re-running that leaves them inconsistent.
+There used to be a second one: `email_for_name` fell back to
+`data/agents_database.csv` when the table had no row for a name. Every CSV row
+was already in the table, so the fallback could only ever change an outcome in
+the two cases where it was wrong to: a vendor deliberately deleted from the
+table stayed mailable through the file, and a fresh deployment with an empty
+table resolved names against the original operator's private vendor list.
 
-Both are one row **per office**, so a company with several branches appears
+Rows are one per **office**, so a company with several branches appears
 several times with different mailboxes — DP World 4x, ATC 3x, MSC 3x. Anything
 keyed on `agent_name` alone cannot tell them apart, which is why
 `email_for_name` refuses to guess rather than picking the first match.
 """
 
-import csv
 import logging
 from dataclasses import dataclass, field
 
 from backend.core.db import get_db
-from backend.core.paths import AGENTS_CSV
 from backend.domain.models import AgentContact
 
 logger = logging.getLogger(__name__)
@@ -33,20 +34,6 @@ def list_all_raw() -> list[dict]:
     """Raw rows for the Send Request dropdowns, which need the row `id` the
     frontend uses as a selection key."""
     return get_db().table("agents").select("*").order("agent_name").execute().data or []
-
-
-def load_csv() -> list[AgentContact]:
-    """The CSV fallback. Used where the table may not be seeded yet."""
-    agents: list[AgentContact] = []
-    try:
-        with open(AGENTS_CSV, newline="", encoding="utf-8") as f:
-            for row in csv.DictReader(f):
-                agents.append(AgentContact.from_row(row))
-    except FileNotFoundError:
-        logger.error("Agents CSV not found at %s", AGENTS_CSV)
-    except Exception as e:
-        logger.exception("Failed to load agents CSV: %s", e)
-    return agents
 
 
 # Mirrors CATEGORY_KEYS in app/routes/rfq.py, the CHECK constraint on
@@ -117,26 +104,24 @@ def email_for_name(agent_name: str) -> str:
     Returns empty for both "unknown" and "ambiguous". The caller turns that into
     a clear error — which is the right outcome, because the alternative is
     emailing the wrong branch of a multi-office agent.
+
+    A failed lookup raises rather than returning ''. Swallowing it reported a
+    database outage to the operator as "no address on file", which sends them
+    hunting for a missing vendor instead of retrying. Nothing is written before
+    this is called, so `approve` is safe to repeat once the database is back.
     """
     if not agent_name:
         return ""
 
-    try:
-        rows = (
-            get_db().table("agents").select("email")
-            .eq("agent_name", agent_name).execute().data or []
-        )
-        if len(rows) == 1:
-            return (rows[0].get("email") or "").strip()
-        if len(rows) > 1:
-            logger.warning("Agent %r has %d addresses on file — refusing to guess",
-                           agent_name, len(rows))
-            return ""
-    except Exception as e:
-        logger.warning("Agent lookup failed for %r: %s", agent_name, e)
-
-    matches = [a for a in load_csv() if a.agent_name == agent_name]
-    return matches[0].email if len(matches) == 1 else ""
+    rows = (
+        get_db().table("agents").select("email")
+        .eq("agent_name", agent_name).execute().data or []
+    )
+    if len(rows) > 1:
+        logger.warning("Agent %r has %d addresses on file — refusing to guess",
+                       agent_name, len(rows))
+        return ""
+    return (rows[0].get("email") or "").strip() if rows else ""
 
 
 @dataclass(frozen=True)

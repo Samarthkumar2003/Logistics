@@ -25,8 +25,7 @@ There are **two things called "agents"** in this codebase and it trips
 everyone up:
 
 - **Freight agents** — real vendor companies (carriers, CHAs, forwarders) that
-  quote you a price. They live in `data/agents_database.csv` and the Supabase
-  `agents` table.
+  quote you a price. They live in the Supabase `agents` table.
 - **AI agents** — the modules in `backend/agents/`. Ordinary Python, one
   LLM call each. No framework, no tool-calling loop, no autonomy.
 
