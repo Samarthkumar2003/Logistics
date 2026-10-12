@@ -185,17 +185,14 @@ the subject. `GET /automation/status` reports `safe_mode: true` when it's on.
 **`RUN_SCHEDULER=0`** — starts the API without the background jobs. Use it when
 you want to poke endpoints without ingest and scan running underneath you.
 
-## Two sources of agent truth
+## Where agents come from
 
-`data/agents_database.csv` (110 rows) and the Supabase `agents` table are both
-live. The table is seeded *from* the CSV by
-`python -m backend.scripts.seed_agents_table`, and they drift if you edit one
-and forget the other.
+The Supabase `agents` table, and nothing else. `data/agents_database.csv` was
+the original list and seeded the table once
+(`python -m backend.scripts.seed_agents_table`); no runtime code reads it, and
+it is not in the Docker image.
 
-- `GET /agents` — the dropdowns on Send Request — reads the **table**.
-- Rate-card sender resolution reads the **CSV**.
-
-The CSV is one row **per office**, so a company with several branches appears
+The table is one row **per office**, so a company with several branches appears
 several times with different mailboxes — DP World 4×, ATC 3×, MSC 3×. Code that
 keys on `agent_name` alone cannot tell them apart, which is
 [a known bug](BUGS.md#p2).

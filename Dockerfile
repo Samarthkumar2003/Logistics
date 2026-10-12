@@ -35,10 +35,10 @@ WORKDIR /app
 COPY requirements.lock .
 RUN pip install --no-deps -r requirements.lock
 
-# data/ is needed: agent_repo falls back to data/agents_database.csv when the
-# agents table is empty. sql/ and Documentation/ are excluded by .dockerignore.
+# data/ is deliberately NOT copied: nothing at runtime reads it, and it holds
+# third-party vendor contacts and rates paid. Agents come from the database.
+# sql/ and Documentation/ are excluded by .dockerignore.
 COPY backend/ ./backend/
-COPY data/ ./data/
 
 # Non-root. automation_state.json is written to PROJECT_ROOT at runtime, so /app
 # has to be writable by the runtime user — hence chown rather than a bare USER.
