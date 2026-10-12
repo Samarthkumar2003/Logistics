@@ -132,7 +132,8 @@ def _gmail_post(path: str, payload: dict) -> dict:
     return resp.json()
 
 
-def send_message(to_addr: str, subject: str, body: str, attachments: list[dict] | None = None) -> str:
+def send_message(to_addr: str, subject: str, body: str, attachments: list[dict] | None = None,
+                 cc: list[str] | None = None, thread_id: str = "", in_reply_to: str = "") -> str:
     """Send a plain-text message as the authenticated mailbox. Returns the message id.
 
     No From header is set on purpose: Gmail stamps it with the token owner, i.e.
@@ -142,10 +143,24 @@ def send_message(to_addr: str, subject: str, body: str, attachments: list[dict] 
     already granted on the same refresh token as the read path.
 
     attachments : each dict {"filename": str, "content_type": str, "data_base64": str}.
+
+    Replying (all three optional, and an RFQ passes none of them):
+      cc          extra visible recipients.
+      thread_id   the Gmail thread to file the sent message under, so it sits in
+                  the same conversation as the mail it answers in this mailbox.
+      in_reply_to the RFC 2822 Message-ID being answered. Set as In-Reply-To and
+                  References, which is what threads it in the RECIPIENT's client;
+                  `threadId` only affects our own mailbox. Gmail also needs the
+                  subject to match, which the caller guarantees with "Re: ".
     """
     msg = MIMEMultipart()
     msg["To"] = to_addr
+    if cc:
+        msg["Cc"] = ", ".join(cc)
     msg["Subject"] = subject
+    if in_reply_to:
+        msg["In-Reply-To"] = in_reply_to
+        msg["References"] = in_reply_to
     msg.attach(MIMEText(body, "plain"))
     for att in (attachments or []):
         try:
@@ -155,7 +170,10 @@ def send_message(to_addr: str, subject: str, body: str, attachments: list[dict] 
         except Exception:
             logger.exception("Skipping malformed attachment %r", att.get("filename"))
     raw = base64.urlsafe_b64encode(msg.as_bytes()).decode()
-    return _gmail_post("messages/send", {"raw": raw}).get("id", "")
+    payload = {"raw": raw}
+    if thread_id:
+        payload["threadId"] = thread_id
+    return _gmail_post("messages/send", payload).get("id", "")
 
 
 def _decode_header_value(raw: str) -> str:

@@ -3,6 +3,7 @@
 import { useState, useEffect, useRef } from 'react';
 import Link from 'next/link';
 import { apiFetch } from '@/lib/api';
+import ReplyPanel from '@/components/ReplyPanel';
 
 const DESKS = {
   intake:  { left: 90,  top: 265 },
@@ -325,6 +326,11 @@ export default function Office() {
   const [status, setStatus] = useState<AppStatus>('inbox');
   const [inbox, setInbox] = useState<InboxEmail[]>([]);
   const [selectedEmail, setSelectedEmail] = useState<InboxEmail | null>(null);
+  // The email whose reply composer is open in the modal, if any.
+  const [replyTo, setReplyTo] = useState<InboxEmail | null>(null);
+  // The modal stays up after a send so the outcome (sent or failed) is seen;
+  // only the composer inside it closes.
+  const [replyComposing, setReplyComposing] = useState(true);
   const [apiResult, setApiResult] = useState<ProcessResult | null>(null);
   const [step, setStep] = useState(0);
   const [logs, setLogs] = useState<string[]>([]);
@@ -859,6 +865,16 @@ export default function Office() {
                           Process this email
                         </button>
                       )}
+                      <button
+                        onClick={(e) => { e.stopPropagation(); e.preventDefault(); setReplyTo(email); setReplyComposing(true); }}
+                        style={{
+                          fontSize: 11, padding: '4px 10px', fontWeight: 600,
+                          background: 'transparent', color: '#93c5fd', border: '1px solid #3b82f6',
+                          borderRadius: 5, cursor: 'pointer', marginTop: 0,
+                        }}
+                      >
+                        ↩ Reply
+                      </button>
                     </div>
                   </div>
                 </div>
@@ -1047,6 +1063,55 @@ export default function Office() {
           </>
         )}
       </aside>
+
+      {/* Reply composer. A modal here because this view has no expanding card to put
+          it in; the panel itself is the same one the dashboard uses. */}
+      {replyTo && (
+        <div
+          onClick={() => setReplyTo(null)}
+          style={{
+            position: 'fixed', inset: 0, zIndex: 1000, background: 'rgba(0,0,0,0.55)',
+            display: 'flex', alignItems: 'flex-start', justifyContent: 'center', padding: '6vh 16px',
+          }}
+        >
+          <div
+            role="dialog"
+            aria-label={`Reply to ${replyTo.sender}`}
+            onClick={e => e.stopPropagation()}
+            style={{
+              width: 'min(680px, 100%)', maxHeight: '88vh', overflowY: 'auto', padding: 16,
+              borderRadius: 12, background: 'var(--bg)', border: '1px solid var(--border)',
+              color: 'var(--text)',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, flex: 1 }}>Reply: {replyTo.subject}</div>
+              <button
+                aria-label="Close"
+                onClick={() => setReplyTo(null)}
+                style={{ border: 'none', background: 'transparent', color: 'var(--muted)', fontSize: 16, cursor: 'pointer' }}
+              >✕</button>
+            </div>
+            <ReplyPanel
+              key={replyTo.id}
+              emailId={replyTo.id}
+              sender={replyTo.sender}
+              subject={replyTo.subject}
+              open={replyComposing}
+              onOpenChange={setReplyComposing}
+            />
+            {!replyComposing && (
+              <button
+                onClick={() => setReplyComposing(true)}
+                style={{
+                  marginTop: 12, padding: '6px 14px', borderRadius: 8, border: '1px solid var(--blue)',
+                  background: 'transparent', color: 'var(--blue-text)', fontSize: 13, fontWeight: 600, cursor: 'pointer',
+                }}
+              >↩ Write another reply</button>
+            )}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

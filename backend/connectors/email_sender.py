@@ -51,9 +51,57 @@ def _apply_redirect(to_addr: str, subject: str) -> tuple[str, str]:
     return EMAIL_REDIRECT, f"[TEST → {to_addr}] {subject}"
 
 
+def _reply_kwargs(cc: Optional[list[str]], thread_id: str, in_reply_to: str) -> dict:
+    """The reply-only send arguments, after safe mode has had its say.
+
+    Under EMAIL_REDIRECT all three are dropped. Cc is the one that matters: the
+    redirect rewrites `To` only, so a Cc carried through would mail a real
+    customer from a test run, which is the one thing safe mode exists to stop.
+    Threading is dropped too, because the redirected subject carries a
+    "[TEST → ...]" prefix and filing that into a live customer thread in our own
+    mailbox would put test mail in front of the desk as if it had gone out.
+    """
+    if EMAIL_REDIRECT:
+        if cc:
+            logger.info("EMAIL_REDIRECT active — dropping Cc %s", cc)
+        return {}
+    out: dict = {}
+    if cc:
+        out["cc"] = list(cc)
+    if thread_id:
+        out["thread_id"] = thread_id
+    if in_reply_to:
+        out["in_reply_to"] = in_reply_to
+    return out
+
+
+def _outcome_unknown(exc: BaseException) -> bool:
+    """Whether a failed Gmail send may have gone out anyway.
+
+    A read timeout, a dropped connection or a 5xx can all come back after Gmail
+    accepted the message, so "failed" would be a guess, and a guess that invites
+    a resend. Only a refusal we can trust (a 4xx, a connect timeout, which means the
+    request never left, or dead credentials) counts as definitely not sent.
+    A connection error raised before the request left is lumped in with the
+    ambiguous ones: requests cannot tell the two apart, and over-warning costs a
+    look in Gmail Sent where under-warning costs a duplicate email.
+    """
+    import requests
+
+    if isinstance(exc, requests.exceptions.ConnectTimeout):
+        return False
+    if isinstance(exc, (requests.exceptions.Timeout, requests.exceptions.ConnectionError)):
+        return True
+    if isinstance(exc, requests.exceptions.HTTPError):
+        resp = exc.response
+        return resp is None or resp.status_code >= 500
+    return False
+
+
 def _send_via_gmail_api(actual_to: str, actual_subject: str, body: str,
                         intended_to: str,
-                        attachments: Optional[list[dict]] = None) -> dict:
+                        attachments: Optional[list[dict]] = None,
+                        reply_kwargs: Optional[dict] = None) -> dict:
     """Send as GMAIL_MAILBOX over the Gmail API. Same status dict as SMTP.
 
     Takes the recipient ALREADY resolved through _apply_redirect. It used to call
@@ -64,22 +112,38 @@ def _send_via_gmail_api(actual_to: str, actual_subject: str, body: str,
     `intended_to` is the vendor the operator chose, and is what goes in the result
     regardless of where the mail was actually delivered: callers correlate
     outcomes to agents, and under a redirect every actual_to is the same address.
+
+    `reply_kwargs` (cc / thread_id / in_reply_to) is passed only when non-empty,
+    so an RFQ calls send_message with exactly the arguments it always has.
     """
     from backend.connectors.gmail_connector import send_message
 
     try:
-        msg_id = send_message(to_addr=actual_to, subject=actual_subject, body=body, attachments=attachments)
+        msg_id = send_message(to_addr=actual_to, subject=actual_subject, body=body,
+                              attachments=attachments, **(reply_kwargs or {}))
         logger.info("Email sent via Gmail API as %s to %s (id=%s)",
                     GMAIL_MAILBOX or "authenticated mailbox", actual_to, msg_id)
-        return {"status": "sent", "to": intended_to}
+        return {"status": "sent", "to": intended_to, "provider_msg_id": msg_id}
     except Exception as exc:
         error_msg = f"Gmail API send failed: {exc}"
         logger.exception(error_msg)
-        return {"status": "failed", "to": intended_to, "error": error_msg}
+        result = {"status": "failed", "to": intended_to, "error": error_msg}
+        # Extra key, status unchanged: RFQ callers keep reading "failed" exactly as
+        # before; the reply record uses this to avoid offering a blind resend.
+        if _outcome_unknown(exc):
+            result["outcome_unknown"] = True
+        return result
 
 
-def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[list[dict]] = None) -> dict:
-    """Send a single RFQ email and return a status dict.
+def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[list[dict]] = None,
+                   *, cc: Optional[list[str]] = None, thread_id: str = "",
+                   in_reply_to: str = "") -> dict:
+    """Send a single email and return a status dict.
+
+    Named for its first caller, but it is the one function every outbound mail
+    goes through: RFQs, acceptances and operator replies alike. The keyword-only
+    arguments are the reply case; see `_reply_kwargs` for what safe mode does
+    to them.
 
     Parameters
     ----------
@@ -104,8 +168,16 @@ def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[
     # here before the guard ran, so EMAIL_REDIRECT did nothing while /health and
     # /automation/status both went on reporting safe mode as active.
     actual_to, actual_subject = _apply_redirect(to_addr, subject)
+    reply_kwargs = _reply_kwargs(cc, thread_id, in_reply_to)
 
     if EMAIL_PROVIDER == "outlook":
+        if reply_kwargs.get("cc"):
+            # Refused rather than dropped: an operator who typed a Cc and got a
+            # "sent" back would reasonably believe that person was told.
+            return {"status": "failed", "to": to_addr,
+                    "error": "Cc is not supported on the Outlook sender yet"}
+        if reply_kwargs:
+            logger.info("Outlook sender does not thread replies; sending unthreaded")
         from backend.connectors.outlook_sender import send_rfq_email as _outlook_send
         result = _outlook_send(to_addr=actual_to, subject=actual_subject,
                                body=body, attachments=attachments)
@@ -117,7 +189,7 @@ def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[
     if EMAIL_PROVIDER in GMAIL_API_PROVIDERS:
         return _send_via_gmail_api(actual_to=actual_to, actual_subject=actual_subject,
                                    body=body, intended_to=to_addr,
-                                   attachments=attachments)
+                                   attachments=attachments, reply_kwargs=reply_kwargs)
 
     if not EMAIL_ACCOUNT or not EMAIL_PASSWORD:
         error_msg = "EMAIL_ACCOUNT or EMAIL_PASSWORD not set in environment"
@@ -127,7 +199,13 @@ def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[
     msg = MIMEMultipart()
     msg["From"] = EMAIL_ACCOUNT
     msg["To"] = actual_to
+    smtp_cc = reply_kwargs.get("cc") or []
+    if smtp_cc:
+        msg["Cc"] = ", ".join(smtp_cc)
     msg["Subject"] = actual_subject
+    if reply_kwargs.get("in_reply_to"):
+        msg["In-Reply-To"] = reply_kwargs["in_reply_to"]
+        msg["References"] = reply_kwargs["in_reply_to"]
     msg.attach(MIMEText(body, "plain"))
     for att in (attachments or []):
         try:
@@ -144,7 +222,8 @@ def send_rfq_email(to_addr: str, subject: str, body: str, attachments: Optional[
             server.starttls(context=context)
             server.ehlo()
             server.login(EMAIL_ACCOUNT, EMAIL_PASSWORD)
-            server.sendmail(EMAIL_ACCOUNT, actual_to, msg.as_string())
+            server.sendmail(EMAIL_ACCOUNT, [actual_to, *smtp_cc] if smtp_cc else actual_to,
+                            msg.as_string())
         logger.info("Email sent successfully to %s", actual_to)
         return {"status": "sent", "to": to_addr}
     except smtplib.SMTPAuthenticationError as exc:
