@@ -105,7 +105,8 @@ def sends(monkeypatch):
     ("Re: Air freight quote", "Re: Air freight quote"),
     ("RE:Air freight quote", "RE:Air freight quote"),
     ("  re : spaced", "re : spaced"),
-    ("", "Re: (no subject)"),
+    ("", "Re:"),
+    ("   ", "Re:"),
 ])
 def test_reply_subject_never_doubles_the_prefix(subject, expected):
     assert svc.reply_subject(subject) == expected
@@ -437,3 +438,23 @@ def test_outcome_update_maps_each_result():
     assert m({"status": "failed", "error": "x"})["status"] == "failed"
     assert m({"status": "failed", "error": "x", "outcome_unknown": True})["status"] == "unknown"
     assert m({"status": "failed"})["error"] == "Send failed"
+
+
+def test_a_blank_subject_email_gets_a_reply_gmail_will_thread(store, monkeypatch):
+    """The 2026-10-13 prod test: a blank-subject email, answered as
+    "Re: (no subject)", threaded in our mailbox but arrived as a new conversation
+    for the customer, because their Gmail compares subjects with "Re:" stripped.
+    End to end through the real sender and connector, only the HTTP post stubbed."""
+    monkeypatch.setattr(email_repo, "get_reply_target",
+                        lambda eid: {**TARGET, "subject": ""} if eid == "m-1" else None)
+    monkeypatch.setattr(email_sender, "EMAIL_PROVIDER", sorted(email_sender.GMAIL_API_PROVIDERS)[0])
+    monkeypatch.setattr(email_sender, "EMAIL_REDIRECT", "")
+    posted = {}
+    monkeypatch.setattr(gmail_connector, "_gmail_post",
+                        lambda path, payload: posted.update(payload) or {"id": "g-3"})
+    row = svc.send_reply("m-1", "Hello", OPERATOR, "k-blank")
+    assert row["status"] == "sent" and row["subject"] == "Re:"
+    msg = message_from_bytes(base64.urlsafe_b64decode(posted["raw"]))
+    assert msg["Subject"] == "Re:"
+    assert posted["threadId"] == "t-1"
+    assert msg["In-Reply-To"] == "<abc@mail.sunrise.example>"

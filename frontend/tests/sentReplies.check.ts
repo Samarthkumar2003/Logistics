@@ -84,7 +84,8 @@ const at = '2026-10-11T09:02:00Z';
   assert.equal(replySubject('Rates for Mundra'), 'Re: Rates for Mundra');
   assert.equal(replySubject('RE: Rates'), 'RE: Rates');
   assert.equal(replySubject('  re : Rates'), 're : Rates');
-  assert.equal(replySubject(''), 'Re: (no subject)');
+  assert.equal(replySubject(''), 'Re:');
+  assert.equal(replySubject('   '), 'Re:');
   assert.equal(addressOf('"Asha K" <asha@cust.example>'), 'asha@cust.example');
   assert.equal(addressOf('asha@cust.example'), 'asha@cust.example');
 }

@@ -97,7 +97,8 @@ export function canRetry(r: Pick<SentReply, 'status' | 'attachment_names'>): boo
  *  which is the one that counts; this is only what the composer shows. */
 export function replySubject(subject: string): string {
   const s = (subject ?? '').trim();
-  if (!s) return 'Re: (no subject)';
+  // Bare "Re:" for a blank original, as Gmail does; anything after it breaks threading.
+  if (!s) return 'Re:';
   return /^\s*re\s*:/i.test(s) ? s : `Re: ${s}`;
 }
 
