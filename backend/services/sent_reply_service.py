@@ -54,10 +54,15 @@ class ReplyError(Exception):
 
 def reply_subject(subject: str) -> str:
     """"Re: " plus the original, never "Re: Re: ". Gmail threads a reply only when
-    the subject matches, so this is threading, not cosmetics."""
+    the subject matches, so this is threading, not cosmetics.
+
+    A blank original gets a bare "Re:", which is what Gmail's own Reply sends.
+    The recipient's Gmail strips the prefix before comparing, so "Re:" matches a
+    blank subject; "Re: (no subject)" does not, and landed as a new conversation.
+    """
     s = (subject or "").strip()
     if not s:
-        return "Re: (no subject)"
+        return "Re:"
     return s if _RE_PREFIX.match(s) else f"Re: {s}"
 
 
