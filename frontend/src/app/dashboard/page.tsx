@@ -11,6 +11,8 @@ import {
   type Shipment, type ShipmentPage,
 } from '@/lib/shipments';
 import ReplyPanel from '@/components/ReplyPanel';
+import ThreadDrawer, { ThreadButton } from '@/components/ThreadDrawer';
+import SentFolder from '@/components/SentFolder';
 import { ReplyChip } from '@/components/ReplyHistory';
 import type { ReplySummary } from '@/lib/sentReplies';
 import './dashboard.css';
@@ -58,7 +60,7 @@ function formatReceived(iso?: string): string {
   return d.toLocaleString([], { day: '2-digit', month: 'short', hour: '2-digit', minute: '2-digit' });
 }
 
-type Tab = 'inbox' | 'requests' | 'ratecards' | 'unlinked' | 'shipments';
+type Tab = 'inbox' | 'requests' | 'ratecards' | 'unlinked' | 'shipments' | 'sent';
 
 /* ─── Helpers ─────────────────────────────────────────────────── */
 function timeAgo(iso: string): string {
@@ -209,6 +211,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
   const [attachments, setAttachments] = useState<{ id: string; file_name: string; mime_type: string; size_bytes: number | null; url: string }[]>([]);
   const [loadingAtts, setLoadingAtts] = useState(false);
   const [replyOpen, setReplyOpen] = useState(false);
+  const [threadOpen, setThreadOpen] = useState(false);
   // What this card just sent, ahead of the next inbox poll, remembered with the
   // server summary it was built on. Once the poll brings a different summary, that
   // one already includes the send, so the local copy stops applying.
@@ -462,6 +465,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
                 onClick={e => { e.stopPropagation(); setReplyOpen(true); }}
               >↩ Reply</button>
             )}
+            <ThreadButton onClick={() => setThreadOpen(true)} />
             {/* Rate-card view is only meaningful for a customer request (it maps to an RFQ). */}
             {(displayLabel === 'customer_requirement' || correctedLabel === 'customer_requirement') && (
               <a
@@ -485,6 +489,7 @@ function EmailCard({ email, expanded, onToggle, onProcessed, note }: {
           />
         </div>
       )}
+      {threadOpen && <ThreadDrawer emailId={email.id} onClose={() => setThreadOpen(false)} />}
     </div>
   );
 }
@@ -687,6 +692,17 @@ export default function Dashboard() {
   const [lastRefresh, setLastRefresh] = useState<Date | null>(null);
   const [automationEnabled, setAutomationEnabled] = useState<boolean | null>(null);
   const [togglingAutomation, setTogglingAutomation] = useState(false);
+  // The Sent badge counts the mailbox's SENT label in Gmail (the store only holds
+  // the inbox). Re-read on every tab change, which is cheap: one label lookup.
+  const [sentTotal, setSentTotal] = useState(0);
+  useEffect(() => {
+    let cancelled = false;
+    apiFetch('/sent/count')
+      .then(r => (r.ok ? r.json() : null))
+      .then(d => { if (!cancelled && d && typeof d.total === 'number') setSentTotal(d.total); })
+      .catch(() => { /* badge stays as it was; the tab itself reports errors */ });
+    return () => { cancelled = true; };
+  }, [tab]);
 
   // One feed per tab, each paging its own filtered list on the server. The label
   // tabs take fifteen a page: a page of a *label* is what the reader counts, and
@@ -900,6 +916,7 @@ export default function Dashboard() {
     { key: 'ratecards' as Tab, icon: '💰', label: 'Rate Cards',         count: rateCardFeed.total, color: 'var(--green)' },
     { key: 'unlinked'  as Tab, icon: '🔗', label: 'Needs Linking',      count: unlinked.length,    color: 'var(--amber)' },
     { key: 'shipments' as Tab, icon: '🚢', label: 'Shipments & RFQs',   count: shipmentPage.total,    color: 'var(--yellow)' },
+    { key: 'sent'      as Tab, icon: '📤', label: 'Sent',               count: sentTotal,          color: 'var(--blue)' },
   ];
 
   // `themed` opts this subtree into the palette in app/theme.css.
@@ -1142,6 +1159,9 @@ export default function Dashboard() {
                   }
                 </div>
               )}
+
+              {/* SENT */}
+              {tab === 'sent' && <SentFolder />}
 
             </div>
           </>
