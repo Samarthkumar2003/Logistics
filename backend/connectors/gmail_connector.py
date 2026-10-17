@@ -17,8 +17,11 @@ AuthorizedSession is thread-safe → enables parallel message fetches.
 import base64
 import logging
 import os
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from email.header import decode_header
+from html import unescape as html_unescape
+from html.parser import HTMLParser
 from email.mime.application import MIMEApplication
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
@@ -500,3 +503,188 @@ def fetch_messages_since(after_epoch_s: int | None = None, max_results: int = 50
 
     target = ids if incremental else ids[:max_results]
     return fetch_full_records(target)
+
+
+# ---------------------------------------------------------------------------
+# Read-only mailbox views: the Sent folder and whole threads
+# ---------------------------------------------------------------------------
+#
+# Live from Gmail rather than from `emails`, because ingest reads INBOX only:
+# mail sent from this app, or by the desk straight from Gmail, never reaches the
+# store. A Sent folder or a thread built from the store would be missing exactly
+# the half of the conversation these views exist to show.
+
+VIEW_BODY_CHARS = 20_000      # per message; a thread is many of them
+THREAD_MAX_MESSAGES = 50      # newest kept; the rest are counted, not dropped silently
+
+
+class _HTMLText(HTMLParser):
+    """HTML to readable plain text: block tags become line breaks, script and
+    style vanish, entities are decoded. Enough to read an HTML-only email, not a
+    renderer."""
+
+    _BLOCK = {"br", "p", "div", "tr", "li", "h1", "h2", "h3", "h4", "h5", "h6",
+              "blockquote", "table", "hr"}
+    _SKIP = {"script", "style", "head", "title"}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.out: list[str] = []
+        self._skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if tag in self._SKIP:
+            self._skip += 1
+        elif tag in self._BLOCK:
+            self.out.append("\n")
+
+    def handle_endtag(self, tag):
+        if tag in self._SKIP:
+            self._skip = max(0, self._skip - 1)
+        elif tag in self._BLOCK:
+            self.out.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        # <br/> and <hr/> are one break, not the start+end pair the default gives.
+        if tag in self._BLOCK and not self._skip:
+            self.out.append("\n")
+
+    def handle_data(self, data):
+        if not self._skip:
+            self.out.append(data)
+
+
+def html_to_text(html: str) -> str:
+    parser = _HTMLText()
+    parser.feed(html or "")
+    parser.close()
+    lines = [re.sub(r"[ \t\u00a0]+", " ", ln).strip() for ln in "".join(parser.out).splitlines()]
+    # At most one blank line in a row.
+    text = re.sub(r"\n{3,}", "\n\n", "\n".join(lines))
+    return text.strip()
+
+
+def _find_part(payload: dict, mime: str) -> str:
+    if payload.get("mimeType", "") == mime:
+        data = payload.get("body", {}).get("data", "")
+        if data:
+            return base64.urlsafe_b64decode(data + "==").decode("utf-8", errors="replace")
+    for part in payload.get("parts", []) or []:
+        found = _find_part(part, mime)
+        if found:
+            return found
+    return ""
+
+
+def extract_text(payload: dict) -> str:
+    """The plain-text part, else the HTML part as text. `_extract_body` (ingest)
+    stays plain-only on purpose; this is for reading, where a blank message is
+    worse than an approximate one. Line endings come back as LF only: mail is
+    CRLF on the wire, and the view folds quoted history line by line."""
+    plain = _extract_body(payload).replace("\r\n", "\n").replace("\r", "\n").strip()
+    if plain:
+        return plain
+    return html_to_text(_find_part(payload, "text/html")).replace("\r", "")
+
+
+def _iso(internal_ms: str | None) -> str | None:
+    if not internal_ms:
+        return None
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(int(internal_ms) / 1000, tz=timezone.utc).isoformat()
+
+
+def view_message(msg: dict) -> dict:
+    """One message as the thread and Sent views show it."""
+    payload = msg.get("payload", {}) or {}
+    headers = {h["name"].lower(): h["value"] for h in payload.get("headers", []) or []}
+    labels = msg.get("labelIds", []) or []
+    body = extract_text(payload)
+    clipped = len(body) > VIEW_BODY_CHARS
+    return {
+        "id": msg["id"],
+        "thread_id": msg.get("threadId", msg["id"]),
+        "from": _decode_header_value(headers.get("from", "")),
+        "to": _decode_header_value(headers.get("to", "")),
+        "cc": _decode_header_value(headers.get("cc", "")),
+        "subject": _decode_header_value(headers.get("subject", "")),
+        "date": _iso(msg.get("internalDate")),
+        "direction": "sent" if "SENT" in labels else "received",
+        "body": body[:VIEW_BODY_CHARS],
+        "body_clipped": clipped,
+        # Same rule as ingest: a part with a Content-ID is embedded furniture
+        # (signature logos), not a document someone attached.
+        "attachments": [
+            {"filename": a["filename"], "mime_type": a["mime_type"], "size_bytes": a["size_bytes"]}
+            for a in _collect_attachments(payload) if not a.get("content_id")
+        ],
+    }
+
+
+def fetch_view_message(msg_id: str) -> dict:
+    return view_message(_gmail_get(f"messages/{msg_id}", params={"format": "full"}))
+
+
+def message_thread_id(msg_id: str) -> str:
+    msg = _gmail_get(f"messages/{msg_id}", params={"format": "minimal", "fields": "id,threadId"})
+    return msg.get("threadId") or msg_id
+
+
+def fetch_thread(thread_id: str) -> dict:
+    """Every message in a thread, oldest first, drafts left out.
+
+    Capped at the newest THREAD_MAX_MESSAGES; `omitted` says how many older ones
+    were left off so the view can say so rather than look complete.
+    """
+    data = _gmail_get(f"threads/{thread_id}", params={"format": "full"})
+    msgs = [m for m in data.get("messages", []) or [] if "DRAFT" not in (m.get("labelIds") or [])]
+    omitted = max(0, len(msgs) - THREAD_MAX_MESSAGES)
+    return {"thread_id": data.get("id", thread_id), "omitted": omitted,
+            "messages": [view_message(m) for m in msgs[omitted:]]}
+
+
+def _fetch_sent_row(msg_id: str) -> dict:
+    msg = _gmail_get(f"messages/{msg_id}", params={
+        "format": "metadata",
+        "metadataHeaders": ["To", "Cc", "Subject"],
+        "fields": "id,threadId,snippet,internalDate,payload/headers",
+    })
+    headers = {h["name"].lower(): h["value"] for h in msg.get("payload", {}).get("headers", []) or []}
+    return {
+        "id": msg["id"],
+        "thread_id": msg.get("threadId", msg["id"]),
+        "to": _decode_header_value(headers.get("to", "")),
+        "cc": _decode_header_value(headers.get("cc", "")),
+        "subject": _decode_header_value(headers.get("subject", "")),
+        "snippet": html_unescape(msg.get("snippet", "")),
+        "date": _iso(msg.get("internalDate")),
+    }
+
+
+def list_sent(limit: int = 20, page_token: str = "") -> dict:
+    """One page of the Sent folder, newest first, metadata only (bodies load on
+    open). Same parallel metadata fetch as fetch_latest_emails."""
+    params = {"labelIds": "SENT", "maxResults": limit,
+              "fields": "messages/id,nextPageToken"}
+    if page_token:
+        params["pageToken"] = page_token
+    result = _gmail_get("messages", params=params)
+    ids = [m["id"] for m in result.get("messages", []) or []]
+    rows: dict[str, dict] = {}
+    if ids:
+        fetch_one = carry_context(_fetch_sent_row)
+        with ThreadPoolExecutor(max_workers=min(len(ids), 10)) as pool:
+            future_map = {pool.submit(fetch_one, i): i for i in ids}
+            for future in as_completed(future_map):
+                try:
+                    rows[future_map[future]] = future.result()
+                except Exception as e:
+                    logger.warning("Skipping sent message %s: %s", future_map[future], e)
+    # Gmail's order (newest first), not completion order.
+    return {"items": [rows[i] for i in ids if i in rows],
+            "next_page_token": result.get("nextPageToken", "")}
+
+
+def sent_total() -> int:
+    """Messages in Sent, from the label's own counter: one cheap call."""
+    return int(_gmail_get("labels/SENT", params={"fields": "messagesTotal"}).get("messagesTotal", 0))
