@@ -30,6 +30,9 @@ from backend.core.paths import PROJECT_ROOT
 load_dotenv(PROJECT_ROOT / ".env")
 
 
+MIN_INGEST_INTERVAL_SECONDS = 30
+
+
 class ConfigError(RuntimeError):
     """A required setting is missing or unusable."""
 
@@ -117,6 +120,12 @@ class Settings:
 
     # --- Runtime -------------------------------------------------------------
     run_scheduler: bool
+    # Seconds between Gmail sweeps: the lag between mail landing and the desk
+    # seeing it. A sweep with nothing new is one list call and one id lookup
+    # (~1s in prod, 2026-10-16), and the ingest lock means a slow one is skipped,
+    # never stacked. Floored at MIN_INGEST_INTERVAL_SECONDS so a typo cannot turn
+    # it into a hot loop against the Gmail quota.
+    ingest_interval_seconds: int
     scan_batch: int
     # A job sits at `sending` only between reserving its row and recording the
     # send outcome — seconds, normally. Past this many minutes it is treated as
@@ -216,6 +225,7 @@ def get_settings() -> Settings:
         jwt_expiry_minutes=_int("JWT_EXPIRY_MINUTES", 720),
         bcrypt_rounds=_int("BCRYPT_ROUNDS", 12),
         run_scheduler=_flag("RUN_SCHEDULER", True),
+        ingest_interval_seconds=max(MIN_INGEST_INTERVAL_SECONDS, _int("INGEST_INTERVAL_SECONDS", 60)),
         scan_batch=_int("SCAN_BATCH", 50),
         stale_sending_minutes=_int("STALE_SENDING_MINUTES", 15),
         auto_retry_stuck_sends=_flag("AUTO_RETRY_STUCK_SENDS", True),

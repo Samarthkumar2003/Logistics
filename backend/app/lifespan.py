@@ -155,7 +155,7 @@ def run_scan_in_background() -> None:
 
 
 def run_ingest_in_background() -> None:
-    """Used by POST /ingest/run-now, the manual equivalent of the 5-minute sweep.
+    """Used by POST /ingest/run-now, the manual equivalent of the scheduled sweep.
 
     Same reasoning as the scan: a sweep can outlast any sensible HTTP timeout, so
     the request returns 202 and the caller polls. `carry_context` keeps the
@@ -176,8 +176,14 @@ async def lifespan(_app: FastAPI):
         scheduler = BackgroundScheduler(timezone="UTC")
         scheduler.add_job(_scan_job, "interval", minutes=5,
                           id="inbox_scan", replace_existing=True)
-        scheduler.add_job(_ingest_job, "interval", minutes=5,
-                          id="email_ingest", replace_existing=True)
+        # Every minute by default (was 5): this interval is how long new mail
+        # takes to appear on the dashboard. The scan above stays at 5 because
+        # ingest already classifies what it stores; the scan only picks up
+        # anything that slipped through. coalesce + max_instances: a sweep that
+        # overruns is followed by one run, not a burst of the missed ones.
+        scheduler.add_job(_ingest_job, "interval", seconds=settings.ingest_interval_seconds,
+                          id="email_ingest", replace_existing=True,
+                          coalesce=True, max_instances=1)
         scheduler.add_job(_gap_audit_job, "interval", hours=24,
                           id="sync_gap_audit", replace_existing=True)
         # Self-heals once the LLM provider recovers (quota restored, outage over).
@@ -201,7 +207,8 @@ async def lifespan(_app: FastAPI):
         scheduler.add_job(_stuck_sends_job, "interval", minutes=15,
                           id="stuck_sends", replace_existing=True)
         scheduler.start()
-        logger.info("Scheduler started — scanning every 5 minutes")
+        logger.info("Scheduler started — ingest every %ds, scan every 5 minutes",
+                    settings.ingest_interval_seconds)
     else:
         logger.info("RUN_SCHEDULER=0 — no background jobs in this process")
 

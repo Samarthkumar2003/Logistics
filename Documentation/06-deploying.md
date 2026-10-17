@@ -165,6 +165,7 @@ force that — there is no revocation list.
 | `CORS_ORIGINS` | the frontend's exact public origin, e.g. `https://frontend-production-abcd.up.railway.app` | Scheme + host, no trailing slash, no wildcard. A browser matches `Origin` literally, so `http://` ≠ `https://` and a trailing `/` fails. Add `http://localhost:3000` only if you also point a local `npm run dev` at this API. |
 | `GOOGLE_OAUTH_REDIRECT_URI` | **`http://localhost:8080/`** — leave it alone | It is **not** a runtime callback. The OAuth dance happens once, on a laptop, in `authorize_gmail.py`; the deployed API never redirects a browser to Google. The value only has to match the URI the refresh token was minted against. Point it at your deployed domain and every token refresh fails — all inbox ingest stops — with an `invalid_grant` / `redirect_uri_mismatch` that reads like anything but a config typo. |
 | `RUN_SCHEDULER` | `1` on this service, and nowhere else, ever | The Dockerfile defaults it to `0` so you have to opt in. See [§ Scaling past one replica](#scaling-past-one-replica). |
+| `INGEST_INTERVAL_SECONDS` | leave unset (`60`) | Seconds between Gmail sweeps, i.e. how long new mail takes to reach the dashboard. Floored at 30. "Refresh Now" on the dashboard sweeps on demand regardless. |
 | `EMAIL_REDIRECT` | your own address, until you mean it | Only honoured on the SMTP path. With `EMAIL_PROVIDER=outlook` it does nothing and real vendors get real RFQs while `/health` still reports safe mode as active. |
 
 ### The rest

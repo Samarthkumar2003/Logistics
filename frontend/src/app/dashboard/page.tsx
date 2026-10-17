@@ -29,6 +29,11 @@ const SHIPMENT_PAGE = 50;
  *  any screen; few enough that a list which keeps claiming "there is more" stops
  *  and says so instead of paging through 27k rows. */
 const AUTO_PAGE_LIMIT = 12;
+/** How long "Refresh Now" waits for its Gmail sweep, and how often it checks. A
+ *  no-op sweep takes about a second; one with new mail fetches bodies and
+ *  classifies, so allow for that before giving up and reloading anyway. */
+const INGEST_WAIT_MS = 30_000;
+const INGEST_POLL_MS = 1_500;
 
 /* ─── Types ─────────────────────────────────────────────────────── */
 interface Email {
@@ -747,12 +752,35 @@ export default function Dashboard() {
    * `allSettled`, not `all`: one list failing must not abandon the other three.
    * Each feed keeps its own error line, and `fetchData` sets the shared banner.
    */
+  /**
+   * "Refresh Now" asks Gmail, not just the database. The lists read Supabase only,
+   * so a reload alone could not show mail the scheduled sweep had not pulled yet,
+   * which is exactly when someone reaches for the button. Starts a sweep, waits
+   * for it (409 means one is already running: wait for that one instead), then
+   * reloads. Capped, so a stuck sweep still ends in a reload of what is there.
+   */
+  const pullNewMail = useCallback(async () => {
+    try {
+      const res = await apiFetch(`/ingest/run-now`, { method: 'POST' });
+      if (!res.ok && res.status !== 409) return;
+      const deadline = Date.now() + INGEST_WAIT_MS;
+      while (Date.now() < deadline) {
+        await new Promise(r => setTimeout(r, INGEST_POLL_MS));
+        const s = await apiFetch(`/ingest/status`);
+        if (!s.ok || !(await s.json()).running) return;
+      }
+    } catch { /* fall through to a plain reload */ }
+  }, []);
+
   const refreshAll = useCallback(async (showRefreshing = false) => {
     // Held until every list has landed, not just the first — releasing the button
     // while three feeds are still in flight invites a second click that the
     // feeds' in-flight guard would silently drop.
     if (showRefreshing) setRefreshing(true);
     try {
+      // Only for the button. The 60s poll stays a cheap DB read; the scheduler
+      // already sweeps Gmail every minute on its own.
+      if (showRefreshing) await pullNewMail();
       await Promise.allSettled([
         fetchData(),
         refreshInbox(),
@@ -762,7 +790,7 @@ export default function Dashboard() {
     } finally {
       if (showRefreshing) setRefreshing(false);
     }
-  }, [fetchData, refreshInbox, refreshRequests, refreshRateCards]);
+  }, [fetchData, refreshInbox, refreshRequests, refreshRateCards, pullNewMail]);
 
   // Jobs, automation status and the unlinked list, once. The feeds load their own
   // first page on mount, so nothing here fetches inbox rows.
@@ -915,7 +943,7 @@ export default function Dashboard() {
             onClick={() => { void refreshAll(true); }}
             disabled={refreshing}
           >
-            {refreshing ? '⏳ Refreshing…' : '↻ Refresh Now'}
+            {refreshing ? '⏳ Checking Gmail…' : '↻ Refresh Now'}
           </button>
           <button
             onClick={toggleAutomation}
