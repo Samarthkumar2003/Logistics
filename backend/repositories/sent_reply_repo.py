@@ -155,3 +155,19 @@ def summaries_or_empty(email_ids: list[str]) -> dict[str, ReplySummary]:
     except Exception as e:  # noqa: BLE001 - deliberate: decoration must not break the inbox
         logger.warning("Reply summaries unavailable: %s", e)
         return {}
+
+
+def app_sent_ids(provider_msg_ids: list[str]) -> set[str]:
+    """Which of these Gmail ids are replies this app sent. For the "Sent from app"
+    chip on the Sent folder: decoration, so a failure reads as "none", never as
+    a broken folder."""
+    ids = [i for i in dict.fromkeys(provider_msg_ids) if i]
+    if not ids:
+        return set()
+    try:
+        rows = (get_db().table(TABLE).select("provider_msg_id")
+                .in_("provider_msg_id", ids).execute().data or [])
+    except Exception as e:  # noqa: BLE001 - deliberate: decoration must not break the folder
+        logger.warning("App-sent lookup unavailable: %s", e)
+        return set()
+    return {r["provider_msg_id"] for r in rows if r.get("provider_msg_id")}
